@@ -54,7 +54,7 @@ const uint8_t default_intra_quantisation_matrix[] = { 8, 16, 19, 22, 26, 27, 29,
 
 VAStatus MPEG2Context::store_buffer(const Buffer& buffer) const
 {
-    auto& surface = driver_data->surfaces.at(render_surface_id);
+    auto& surface = driver_data->surfaces.at(current_surface());
 
     const auto source_data = surface.source_buffer->get().mapping()[0];
 
@@ -96,7 +96,7 @@ VAStatus MPEG2Context::store_buffer(const Buffer& buffer) const
 
 int MPEG2Context::set_controls()
 {
-    auto& surface = driver_data->surfaces.at(render_surface_id);
+    auto& surface = driver_data->surfaces.at(current_surface());
 
     VAPictureParameterBufferMPEG2* va_picture = surface.params.mpeg2.picture;
     VAIQMatrixBufferMPEG2* iqmatrix = surface.params.mpeg2.iqmatrix;

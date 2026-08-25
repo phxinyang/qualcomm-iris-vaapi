@@ -28,8 +28,9 @@
 #include "image.h"
 
 #include <algorithm>
-#include <cassert>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <va/va.h>
 
 extern "C" {
@@ -54,7 +55,13 @@ VAStatus copy_surface_to_image(DriverData* driver_data, const Surface& surface, 
     }
     auto& buffer = driver_data->buffers.at(image->buf);
 
-    assert(image->num_planes == surface.logical_destination_layout.size());
+    if (image->num_planes != surface.logical_destination_layout.size()) {
+        if (std::getenv("V4L2_VA_TRACE"))
+            std::fprintf(stderr, "va image layout mismatch image_planes=%u surface_planes=%zu image=%ux%u surface=%ux%u\n",
+                image->num_planes, surface.logical_destination_layout.size(), image->width, image->height,
+                surface.width, surface.height);
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
     for (i = 0; i < surface.logical_destination_layout.size(); i++) {
         const auto& mapping = surface.destination_buffer->get().mapping();
 

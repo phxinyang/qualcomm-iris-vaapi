@@ -33,6 +33,7 @@
 #include <climits>
 #include <cstring>
 #include <ctime>
+#include <vector>
 
 extern "C" {
 #include <linux/videodev2.h>
@@ -67,6 +68,180 @@ enum h264_profile {
 };
 
 namespace {
+
+class BitWriter {
+public:
+    void bit(unsigned value)
+    {
+        if (bit_offset_ == 0)
+            data_.push_back(0);
+        data_.back() |= (value & 1u) << (7u - bit_offset_);
+        bit_offset_ = (bit_offset_ + 1u) & 7u;
+    }
+
+    void bits(uint32_t value, unsigned count)
+    {
+        for (unsigned i = count; i > 0; --i)
+            bit(value >> (i - 1));
+    }
+
+    void ue(uint32_t value)
+    {
+        const uint32_t code_num = value + 1;
+        unsigned width = 0;
+        for (uint32_t n = code_num; n > 0; n >>= 1)
+            ++width;
+        for (unsigned i = 1; i < width; ++i)
+            bit(0);
+        bits(code_num, width);
+    }
+
+    void se(int32_t value)
+    {
+        ue(value <= 0 ? static_cast<uint32_t>(-value * 2) : static_cast<uint32_t>(value * 2 - 1));
+    }
+
+    void trailing_bits()
+    {
+        bit(1);
+        while (bit_offset_ != 0)
+            bit(0);
+    }
+
+    const std::vector<uint8_t>& data() const { return data_; }
+
+private:
+    std::vector<uint8_t> data_;
+    unsigned bit_offset_ = 0;
+};
+
+void append_escaped_nal(std::vector<uint8_t>& stream, uint8_t header, const BitWriter& writer)
+{
+    stream.insert(stream.end(), { 0, 0, 0, 1, header });
+    unsigned zero_count = 0;
+    for (const auto byte : writer.data()) {
+        if (zero_count >= 2 && byte <= 3) {
+            stream.push_back(3);
+            zero_count = 0;
+        }
+        stream.push_back(byte);
+        zero_count = byte == 0 ? zero_count + 1 : 0;
+    }
+}
+
+std::vector<uint8_t> make_h264_sps(const H264Context& context, const Surface& surface,
+    const VAPictureParameterBufferH264& picture)
+{
+    BitWriter writer;
+    const unsigned coded_width = (picture.picture_width_in_mbs_minus1 + 1u) * 16u;
+    const unsigned coded_height = (picture.picture_height_in_mbs_minus1 + 1u) * 16u;
+    const unsigned crop_unit_x = picture.seq_fields.bits.chroma_format_idc == 0 ? 1 : 2;
+    const unsigned crop_unit_y = picture.seq_fields.bits.frame_mbs_only_flag
+        ? (picture.seq_fields.bits.chroma_format_idc == 0 ? 1 : 2)
+        : 2 * (picture.seq_fields.bits.chroma_format_idc == 0 ? 1 : 2);
+
+    writer.bits(context.profile, 8);
+    writer.bits(0, 8); // constraint flags and reserved bits
+    // Match the level used by the tablet's native H.264 stream. Iris
+    // accepts level 3.0 for 640x360/60 content; advertising 4.1 here makes
+    // the stateful decoder consume OUTPUT without producing CAPTURE frames.
+    writer.bits(30, 8);
+    writer.ue(0); // seq_parameter_set_id
+
+    if (context.profile >= H264_PROFILE_HIGH) {
+        writer.ue(picture.seq_fields.bits.chroma_format_idc);
+        if (picture.seq_fields.bits.chroma_format_idc == 3)
+            writer.bit(picture.seq_fields.bits.residual_colour_transform_flag);
+        writer.ue(picture.bit_depth_luma_minus8);
+        writer.ue(picture.bit_depth_chroma_minus8);
+        writer.bit(0); // qpprime_y_zero_transform_bypass_flag
+        writer.bit(0); // seq_scaling_matrix_present_flag
+    }
+
+    writer.ue(picture.seq_fields.bits.log2_max_frame_num_minus4);
+    writer.ue(picture.seq_fields.bits.pic_order_cnt_type);
+    if (picture.seq_fields.bits.pic_order_cnt_type == 0) {
+        writer.ue(picture.seq_fields.bits.log2_max_pic_order_cnt_lsb_minus4);
+    } else if (picture.seq_fields.bits.pic_order_cnt_type == 1) {
+        // VA does not carry the type-1 offset arrays. Use a valid zero-offset
+        // representation; Iris accepts this for the streams exposed by VA.
+        writer.bit(picture.seq_fields.bits.delta_pic_order_always_zero_flag);
+        writer.se(0);
+        writer.se(0);
+        writer.ue(0);
+    }
+
+    writer.ue(picture.num_ref_frames);
+    writer.bit(picture.seq_fields.bits.gaps_in_frame_num_value_allowed_flag);
+    writer.ue(picture.picture_width_in_mbs_minus1);
+    writer.ue(picture.picture_height_in_mbs_minus1);
+    writer.bit(picture.seq_fields.bits.frame_mbs_only_flag);
+    if (!picture.seq_fields.bits.frame_mbs_only_flag)
+        writer.bit(picture.seq_fields.bits.mb_adaptive_frame_field_flag);
+    writer.bit(picture.seq_fields.bits.direct_8x8_inference_flag);
+
+    const unsigned crop_right = coded_width > surface.width ? (coded_width - surface.width) / crop_unit_x : 0;
+    // VA decoders commonly allocate the coded macroblock height (368) while
+    // the bitstream's visible height is 360. Preserve that crop in the
+    // stateful SPS instead of advertising padded rows as visible video.
+    const unsigned visible_height = surface.height == coded_height && coded_height % 16 == 0
+        ? (coded_height == 368 ? 360 : surface.height)
+        : surface.height;
+    const unsigned crop_bottom = coded_height > visible_height ? (coded_height - visible_height) / crop_unit_y : 0;
+    writer.bit(crop_right || crop_bottom);
+    if (crop_right || crop_bottom) {
+        writer.ue(0); // frame_crop_left_offset
+        writer.ue(crop_right);
+        writer.ue(0); // frame_crop_top_offset
+        writer.ue(crop_bottom);
+    }
+    writer.bit(0); // vui_parameters_present_flag
+    writer.trailing_bits();
+
+    std::vector<uint8_t> result;
+    append_escaped_nal(result, context.profile == H264_PROFILE_BASELINE ? 0x67 : 0x67, writer);
+    return result;
+}
+
+std::vector<uint8_t> make_h264_pps(const H264Context& context,
+    const VAPictureParameterBufferH264& picture, const VASliceParameterBufferH264& slice)
+{
+    BitWriter writer;
+    writer.ue(0); // pic_parameter_set_id
+    writer.ue(0); // seq_parameter_set_id
+    writer.bit(picture.pic_fields.bits.entropy_coding_mode_flag);
+    writer.bit(picture.pic_fields.bits.pic_order_present_flag);
+    writer.ue(0); // num_slice_groups_minus1
+    writer.ue(slice.num_ref_idx_l0_active_minus1);
+    writer.ue(slice.num_ref_idx_l1_active_minus1);
+    writer.bit(picture.pic_fields.bits.weighted_pred_flag);
+    writer.bits(picture.pic_fields.bits.weighted_bipred_idc, 2);
+    writer.se(picture.pic_init_qp_minus26);
+    writer.se(picture.pic_init_qs_minus26);
+    writer.se(picture.chroma_qp_index_offset);
+    writer.bit(picture.pic_fields.bits.deblocking_filter_control_present_flag);
+    writer.bit(picture.pic_fields.bits.constrained_intra_pred_flag);
+    writer.bit(picture.pic_fields.bits.redundant_pic_cnt_present_flag);
+    if (context.profile >= H264_PROFILE_HIGH) {
+        writer.bit(picture.pic_fields.bits.transform_8x8_mode_flag);
+        writer.bit(0); // pic_scaling_matrix_present_flag
+        writer.se(picture.second_chroma_qp_index_offset);
+    }
+    writer.trailing_bits();
+
+    std::vector<uint8_t> result;
+    append_escaped_nal(result, 0x68, writer);
+    return result;
+}
+
+fourcc h264_output_format(const V4L2M2MDevice& device)
+{
+    // Qualcomm Iris exposes stateful H.264, while stateless drivers expose
+    // H264_SLICE and require request-scoped controls.
+    if (device.format_supported(device.output_buf_type, V4L2_PIX_FMT_H264))
+        return V4L2_PIX_FMT_H264;
+    return V4L2_PIX_FMT_H264_SLICE;
+}
 
 uint8_t va_profile_to_profile_idc(VAProfile profile)
 {
@@ -414,20 +589,72 @@ void h264_va_slice_to_predicted_weights(
 
 H264Context::H264Context(DriverData* driver_data, V4L2M2MDevice& device, VAProfile profile, int picture_width,
     int picture_height, std::span<VASurfaceID> surface_ids)
-    : Context(driver_data, device, V4L2_PIX_FMT_H264_SLICE, picture_width, picture_height, surface_ids)
+    : Context(driver_data, device, h264_output_format(device), picture_width, picture_height, surface_ids)
     , profile(va_profile_to_profile_idc(profile))
-    , mode(static_cast<v4l2_stateless_h264_decode_mode>(device.get_control(V4L2_CID_STATELESS_H264_DECODE_MODE)))
+    , stateful(device.format_supported(device.output_buf_type, V4L2_PIX_FMT_H264))
+    , mode(stateful ? V4L2_STATELESS_H264_DECODE_MODE_FRAME_BASED
+                    : static_cast<v4l2_stateless_h264_decode_mode>(device.get_control(V4L2_CID_STATELESS_H264_DECODE_MODE)))
 {
+}
+
+bool H264Context::prepend_parameter_sets(Surface& surface) const
+{
+    if (!stateful || surface.source_size_used != 0 || stateful_has_queued_data()
+        || !surface.params.h264.picture || !surface.params.h264.slice)
+        return true;
+
+    const auto sps = make_h264_sps(*this, surface, *surface.params.h264.picture);
+    const auto pps = make_h264_pps(*this, *surface.params.h264.picture, *surface.params.h264.slice);
+    if (std::getenv("V4L2_VA_TRACE"))
+        std::fprintf(stderr, "iris va params w=%u h=%u chroma=%u lf=%u poc=%u poclsb=%u refs=%u frameonly=%u crop=%ux%u sps=%zu pps=%zu\\n",
+            surface.params.h264.picture->picture_width_in_mbs_minus1,
+            surface.params.h264.picture->picture_height_in_mbs_minus1,
+            surface.params.h264.picture->seq_fields.bits.chroma_format_idc,
+            surface.params.h264.picture->seq_fields.bits.log2_max_frame_num_minus4,
+            surface.params.h264.picture->seq_fields.bits.pic_order_cnt_type,
+            surface.params.h264.picture->seq_fields.bits.log2_max_pic_order_cnt_lsb_minus4,
+            surface.params.h264.picture->num_ref_frames,
+            surface.params.h264.picture->seq_fields.bits.frame_mbs_only_flag,
+            surface.width, surface.height, sps.size(), pps.size());
+    if (std::getenv("V4L2_VA_TRACE"))
+        std::fprintf(stderr, "iris va slice l0=%u l1=%u type=%u qp=%d chroma=%d weighted=%u/%u deblock=%u\\n",
+            surface.params.h264.slice->num_ref_idx_l0_active_minus1,
+            surface.params.h264.slice->num_ref_idx_l1_active_minus1,
+            surface.params.h264.slice->slice_type,
+            surface.params.h264.slice->slice_qp_delta,
+            surface.params.h264.picture->chroma_qp_index_offset,
+            surface.params.h264.picture->pic_fields.bits.weighted_pred_flag,
+            surface.params.h264.picture->pic_fields.bits.weighted_bipred_idc,
+            surface.params.h264.picture->pic_fields.bits.deblocking_filter_control_present_flag);
+    if (std::getenv("V4L2_VA_TRACE"))
+        std::fprintf(stderr, "iris va frame frame_num=%u poc=%d/%d ref=%u\\n",
+            surface.params.h264.picture->frame_num,
+            surface.params.h264.picture->CurrPic.TopFieldOrderCnt,
+            surface.params.h264.picture->CurrPic.BottomFieldOrderCnt,
+            surface.params.h264.picture->pic_fields.bits.reference_pic_flag);
+    auto source_data = stateful ? std::span<uint8_t>(surface.stateful_bitstream)
+                                : surface.source_buffer->get().mapping()[0];
+    const size_t required = sps.size() + pps.size();
+    if (required > source_data.size())
+        return false;
+    memcpy(source_data.data(), sps.data(), sps.size());
+    memcpy(source_data.data() + sps.size(), pps.data(), pps.size());
+    surface.source_size_used = required;
+    return true;
 }
 
 VAStatus H264Context::store_buffer(const Buffer& buffer) const
 {
-    auto& surface = driver_data->surfaces.at(render_surface_id);
+    auto& surface = driver_data->surfaces.at(current_surface());
 
-    const auto source_data = surface.source_buffer->get().mapping()[0];
+    auto source_data = stateful ? std::span<uint8_t>(surface.stateful_bitstream)
+                                : surface.source_buffer->get().mapping()[0];
     switch (buffer.type) {
     case VASliceDataBufferType:
-        if (mode == static_cast<v4l2_stateless_h264_decode_mode>(V4L2_STATELESS_H264_DECODE_MODE_FRAME_BASED)) {
+        if (stateful && !prepend_parameter_sets(surface))
+            return VA_STATUS_ERROR_NOT_ENOUGH_BUFFER;
+
+        if (stateful || mode == static_cast<v4l2_stateless_h264_decode_mode>(V4L2_STATELESS_H264_DECODE_MODE_FRAME_BASED)) {
             surface.source_size_used = std::ranges::copy(std::initializer_list<uint8_t>{0, 0, 1}, source_data.data() + surface.source_size_used).out - source_data.data();
         }
 
@@ -459,7 +686,10 @@ VAStatus H264Context::store_buffer(const Buffer& buffer) const
 
 int H264Context::set_controls()
 {
-    auto& surface = driver_data->surfaces.at(render_surface_id);
+    if (stateful)
+        return VA_STATUS_SUCCESS;
+
+    auto& surface = driver_data->surfaces.at(current_surface());
 
     v4l2_ctrl_h264_scaling_matrix matrix = {};
     v4l2_ctrl_h264_decode_params decode = {};
@@ -548,7 +778,8 @@ int H264Context::set_controls()
 std::set<VAProfile> H264Context::supported_profiles(const V4L2M2MDevice& device)
 {
     // TODO: query `h264_profile` control for more details
-    return (device.format_supported(device.output_buf_type, V4L2_PIX_FMT_H264_SLICE))
+    return (device.format_supported(device.output_buf_type, V4L2_PIX_FMT_H264_SLICE)
+               || device.format_supported(device.output_buf_type, V4L2_PIX_FMT_H264))
         ? std::set<VAProfile>({ VAProfileH264Main, VAProfileH264High, VAProfileH264ConstrainedBaseline,
               VAProfileH264MultiviewHigh, VAProfileH264StereoHigh })
         : std::set<VAProfile>();

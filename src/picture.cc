@@ -30,11 +30,15 @@
 #include <cassert>
 #include <cstring>
 #include <functional>
+#include <cstdlib>
+#include <cstdio>
 #include <system_error>
 
 extern "C" {
 #include <linux/videodev2.h>
 #include <sys/ioctl.h>
+#include <time.h>
+#include <unistd.h>
 
 #include <va/va.h>
 }
@@ -61,13 +65,59 @@ VAStatus beginPicture(VADriverContextP va_context, VAContextID context_id, VASur
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
     auto& surface = driver_data->surfaces.at(surface_id);
+    if (std::getenv("V4L2_VA_TRACE"))
+        std::fprintf(stderr, "va begin_picture ctx=%u surface=%u status=%u initialized=%d\n", context_id, surface_id,
+            surface.status, context.initialized());
+    if (std::getenv("V4L2_VA_TRACE"))
+        error_log(va_context, "trace begin surface=%u status=%u initialized=%d\\n", surface_id, surface.status,
+            context.initialized());
 
-    if (surface.status == VASurfaceRendering) {
-        return VA_STATUS_ERROR_SURFACE_BUSY;
+    if (!context.initialized()) {
+        std::vector<VASurfaceID> surface_ids;
+        surface_ids.push_back(surface_id);
+        for (const auto& [id, candidate] : driver_data->surfaces) {
+            // Surface export may have populated destination_buffer before the
+            // first decode call. Include those still-ready targets as well;
+            // otherwise stateful batching sees only the first surface and
+            // immediately runs out of bindings on the second picture.
+            if (id != surface_id && candidate.format == surface.format && candidate.status == VASurfaceReady) {
+                surface_ids.push_back(id);
+            }
+        }
+        try {
+            context.initialize(surface_ids);
+        } catch (const std::exception& e) {
+            error_log(va_context, "Unable to initialize V4L2 queues: %s\n", e.what());
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        }
     }
 
+    if (surface.status == VASurfaceRendering) {
+        // Chromium may recycle a VA surface without an explicit vaSyncSurface
+        // call. Reap the corresponding V4L2 CAPTURE buffer before declaring it
+        // busy, otherwise the surface pool deadlocks after the first GOP.
+        if (syncSurface(va_context, surface_id) != VA_STATUS_SUCCESS
+            || surface.status == VASurfaceRendering)
+            return VA_STATUS_ERROR_SURFACE_BUSY;
+    }
+
+    if (!context.bind_surface(surface_id)) {
+        error_log(va_context, "No free V4L2 buffer for surface %u\n", surface_id);
+        return VA_STATUS_ERROR_MAX_NUM_EXCEEDED;
+    }
+
+    if ((!context.uses_stateful_streaming() || context.capture_started()) && !context.capture_draining()
+        && !surface.destination_buffer_queued) {
+        try {
+            surface.destination_buffer->get().queue();
+            surface.destination_buffer_queued = true;
+        } catch (std::system_error& e) {
+            error_log(va_context, "Unable to requeue capture buffer: %s\n", e.what());
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        }
+    }
     surface.status = VASurfaceRendering;
-    context.render_surface_id = surface_id;
+    context.begin_surface(surface_id);
 
     return VA_STATUS_SUCCESS;
 }
@@ -83,8 +133,14 @@ VAStatus renderPicture(VADriverContextP va_context, VAContextID context_id, VABu
     }
     const auto& context = *driver_data->contexts.at(context_id);
 
-    if (!driver_data->surfaces.contains(context.render_surface_id)) {
+    const auto render_surface_id = context.current_surface();
+    if (!driver_data->surfaces.contains(render_surface_id)) {
         return VA_STATUS_ERROR_INVALID_SURFACE;
+    }
+    const auto& render_surface = driver_data->surfaces.at(render_surface_id);
+    if (!render_surface.source_buffer && !context.uses_stateful_streaming()) {
+        error_log(va_context, "Surface %u has no V4L2 source buffer\n", render_surface_id);
+        return VA_STATUS_ERROR_OPERATION_FAILED;
     }
     for (i = 0; i < buffers_count; i++) {
         if (!driver_data->buffers.contains(buffers_ids[i])) {
@@ -108,11 +164,39 @@ VAStatus endPicture(VADriverContextP va_context, VAContextID context_id)
         return VA_STATUS_ERROR_INVALID_CONTEXT;
     }
     auto& context = *driver_data->contexts.at(context_id);
-    auto& surface = driver_data->surfaces.at(context.render_surface_id);
+    const auto render_surface_id = context.current_surface();
+    if (!driver_data->surfaces.contains(render_surface_id))
+        return VA_STATUS_ERROR_INVALID_SURFACE;
+    auto& surface = driver_data->surfaces.at(render_surface_id);
+    if (std::getenv("V4L2_VA_TRACE"))
+        std::fprintf(stderr, "va end_picture ctx=%u surface=%u bytes=%u stateful=%d\n", context_id, render_surface_id,
+            surface.source_size_used, context.uses_stateful_streaming());
+    if (std::getenv("V4L2_VA_TRACE"))
+        error_log(va_context, "trace end surface=%u bytes=%u request=%d\\n", render_surface_id,
+            surface.source_size_used, surface.request_fd);
+    if (std::getenv("V4L2_VA_DUMP") && surface.source_size_used > 0) {
+        char path[96];
+        std::snprintf(path, sizeof(path), "/tmp/va-au-%u.h264", render_surface_id);
+        if (FILE* file = std::fopen(path, "wb")) {
+            std::fwrite(surface.source_buffer->get().mapping()[0].data(), 1, surface.source_size_used, file);
+            std::fclose(file);
+        }
+    }
+    if (!surface.source_buffer || (!surface.destination_buffer && !context.uses_stateful_streaming())) {
+        error_log(va_context, "Surface %u has incomplete V4L2 bindings (source=%d destination=%d)\n",
+            render_surface_id, surface.source_buffer.has_value(), surface.destination_buffer.has_value());
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
 
-    gettimeofday(&surface.timestamp, NULL);
+    // V4L2's TIMESTAMP_COPY contract uses CLOCK_MONOTONIC. gettimeofday()
+    // produces wall-clock seconds since 1970, which Iris does not match to
+    // its firmware timestamps and can leave CAPTURE permanently pending.
+    timespec monotonic = {};
+    clock_gettime(CLOCK_MONOTONIC, &monotonic);
+    surface.timestamp.tv_sec = monotonic.tv_sec;
+    surface.timestamp.tv_usec = monotonic.tv_nsec / 1000;
 
-    if (context.device.media_fd >= 0) {
+    if (context.device.media_fd >= 0 && context.uses_request_api()) {
         if (surface.request_fd < 0) {
             surface.request_fd = media_request_alloc(context.device.media_fd);
         }
@@ -122,9 +206,22 @@ VAStatus endPicture(VADriverContextP va_context, VAContextID context_id)
             return status;
     }
 
+    if (context.uses_stateful_streaming()) {
+        status = context.append_stateful_picture(render_surface_id);
+        context.end_surface();
+        memset(&surface.params, 0, sizeof(surface.params));
+        return status;
+    }
+
     try {
-        surface.destination_buffer->get().queue();
+        // Iris uses the OUTPUT timestamp when matching decoded CAPTURE
+        // frames and DPB references. Keep it populated for stateful streams
+        // as well as request-api decoders.
         surface.source_buffer->get().queue(surface.request_fd, &surface.timestamp, surface.source_size_used);
+        surface.source_buffer_queued = true;
+        if (context.uses_stateful_streaming() && !context.device.output_streaming) {
+            context.device.stream_output(true);
+        }
     } catch (std::system_error& e) {
         error_log(va_context, "Unable to queue buffer: %s\n", e.what());
         return VA_STATUS_ERROR_OPERATION_FAILED;
@@ -143,9 +240,14 @@ VAStatus endPicture(VADriverContextP va_context, VAContextID context_id)
         }
     }
 
+    if (!context.uses_request_api() && !context.start_capture()) {
+        error_log(va_context, "Stateful decoder did not report a source-change event\n");
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
     surface.source_size_used = 0;
 
-    context.render_surface_id = VA_INVALID_ID;
+    context.end_surface();
     memset(&surface.params, 0, sizeof(surface.params));
 
     return VA_STATUS_SUCCESS;

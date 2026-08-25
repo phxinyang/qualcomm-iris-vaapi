@@ -28,6 +28,10 @@
 #pragma once
 
 #include <span>
+#include <map>
+#include <vector>
+#include <optional>
+#include <cstddef>
 
 extern "C" {
 #include <va/va_backend.h>
@@ -48,14 +52,48 @@ public:
         std::span<VASurfaceID> surface_ids);
     virtual ~Context();
 
+    void initialize(std::span<VASurfaceID> surface_ids);
+    bool start_capture();
+    VAStatus append_stateful_picture(VASurfaceID surface_id);
+    VAStatus flush_stateful_batch();
+    void mark_source_buffer_dequeued(unsigned index);
+    bool has_pending_stateful_batch() const { return !stateful_pending.empty(); }
+    bool stateful_has_queued_data() const { return !stateful_pending.empty() || !stateful_batches.empty(); }
+    bool capture_draining() const { return stateful_draining; }
+    void resume_after_drain();
+    bool initialized() const { return queues_initialized; }
+    bool capture_started() const { return capture_initialized; }
+    bool bind_surface(VASurfaceID surface_id);
+    void begin_surface(VASurfaceID surface_id);
+    void end_surface();
+    VASurfaceID current_surface() const;
+    std::optional<VASurfaceID> surface_for_buffer(v4l2_buf_type type, unsigned index) const;
+
     virtual VAStatus store_buffer(const Buffer& buffer) const = 0;
     virtual int set_controls() = 0;
+    // Stateful V4L2 decoders submit ordinary QBUF operations. Stateless
+    // request-api decoders attach controls and their output buffer to a media
+    // request before queueing it.
+    virtual bool uses_request_api() const { return true; }
+    virtual bool uses_stateful_streaming() const { return false; }
 
-    VASurfaceID render_surface_id;
     int picture_width;
     int picture_height;
     DriverData* driver_data;
     V4L2M2MDevice& device;
+
+private:
+    fourcc pixelformat;
+    bool queues_initialized;
+    bool capture_initialized;
+    std::map<VASurfaceID, unsigned> surface_buffer_indices;
+    std::vector<VASurfaceID> surface_ids;
+    std::map<unsigned, std::vector<VASurfaceID>> stateful_batches;
+    std::vector<VASurfaceID> stateful_pending;
+    size_t stateful_pending_size = 0;
+    timeval stateful_pending_timestamp = {};
+    bool stateful_drain_issued = false;
+    bool stateful_draining = false;
 };
 
 VAStatus createContext(VADriverContextP va_context, VAConfigID config_id, int picture_width, int picture_height,

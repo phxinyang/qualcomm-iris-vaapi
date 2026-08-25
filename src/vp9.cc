@@ -164,7 +164,7 @@ v4l2_ctrl_vp9_compressed_hdr gst_to_v4l2_compressed_header(GstVp9FrameHeader* he
 
 VAStatus VP9Context::store_buffer(const Buffer& buffer) const
 {
-    auto& surface = driver_data->surfaces.at(render_surface_id);
+    auto& surface = driver_data->surfaces.at(current_surface());
 
     const auto source_data = surface.source_buffer->get().mapping()[0];
 
@@ -198,7 +198,7 @@ VAStatus VP9Context::store_buffer(const Buffer& buffer) const
 
 int VP9Context::set_controls()
 {
-    auto& surface = driver_data->surfaces.at(render_surface_id);
+    auto& surface = driver_data->surfaces.at(current_surface());
 
     GstVp9FrameHeader header = {};
 

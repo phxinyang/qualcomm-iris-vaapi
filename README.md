@@ -35,4 +35,8 @@ The project currently supports these codecs: MPEG2, H264, VP8, (and VP9).
 VP9 support depends on a part of gstreamer that is not likely to be present in the version shipped by your distribution.
 The implementation has been tested using Intel's [vaapi-fits](https://github.com/intel/vaapi-fits) on an RK3399, which is supported by the `hantro` and `rockchip` drivers.
 Feedback on results for other platforms are very welcome, do not expect the library to simply work smoothly though.
-Future development on this project aims to improve stability, add supported codecs, and support the stateful V4L2-M2M API.
+This fork experimentally detects Qualcomm Iris stateful H.264 when the device advertises
+`V4L2_PIX_FMT_H264` rather than `V4L2_PIX_FMT_H264_SLICE`. Queue setup is lazy
+so Chromium can create a VA context before allocating render targets. HEVC,
+VP9 and AV1 stateful paths are not enabled here; use the native V4L2 or codec2
+stacks for those codecs.

@@ -204,7 +204,7 @@ size_t prefix_data(uint8_t* data, const VAPictureParameterBufferVP8* picture, co
 
 VAStatus VP8Context::store_buffer(const Buffer& buffer) const
 {
-    auto& surface = driver_data->surfaces.at(render_surface_id);
+    auto& surface = driver_data->surfaces.at(current_surface());
 
     const auto source_data = surface.source_buffer->get().mapping()[0];
     switch (buffer.type) {
@@ -250,7 +250,7 @@ VAStatus VP8Context::store_buffer(const Buffer& buffer) const
 
 int VP8Context::set_controls()
 {
-    auto& surface = driver_data->surfaces.at(render_surface_id);
+    auto& surface = driver_data->surfaces.at(current_surface());
 
     v4l2_ctrl_vp8_frame frame = va_to_v4l2_frame(driver_data, surface.params.vp8.picture, surface.params.vp8.slice,
         surface.params.vp8.iqmatrix, surface.params.vp8.probabilities);

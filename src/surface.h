@@ -30,6 +30,7 @@
 #include <functional>
 #include <optional>
 #include <span>
+#include <vector>
 
 extern "C" {
 #include <linux/videodev2.h>
@@ -50,8 +51,16 @@ struct Surface {
 
     std::optional<std::reference_wrapper<const V4L2M2MDevice::Buffer>> source_buffer;
     unsigned int source_size_used;
+    unsigned source_buffer_index;
+    bool source_buffer_queued;
+    // Stateful Iris consumes a continuous bytestream. Keep each VA picture
+    // in private scratch storage until Context batches it into one OUTPUT
+    // buffer.
+    std::vector<uint8_t> stateful_bitstream;
 
     std::optional<std::reference_wrapper<const V4L2M2MDevice::Buffer>> destination_buffer;
+    unsigned destination_buffer_index;
+    bool destination_buffer_queued;
     BufferLayout logical_destination_layout;
     uint32_t format;
 
@@ -83,7 +92,8 @@ struct Surface {
     int request_fd;
 };
 
-void createSurfacesDeferred(DriverData* driver_data, const Context& context, std::span<VASurfaceID> surface_ids);
+void createSurfacesDeferred(
+    DriverData* driver_data, const Context& context, std::span<VASurfaceID> surface_ids, unsigned buffer_count);
 VAStatus createSurfaces2(VADriverContextP context, unsigned int format, unsigned int width, unsigned int height,
     VASurfaceID* surfaces_ids, unsigned int surfaces_count, VASurfaceAttrib* attributes, unsigned int attributes_count);
 VAStatus createSurfaces(

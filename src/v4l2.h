@@ -45,9 +45,10 @@ public:
     class Buffer {
     public:
         void queue(int request_fd = -1, timeval* timestamp = nullptr, unsigned size = 0) const;
-        void dequeue() const;
+        unsigned dequeue() const;
         std::vector<int> export_(unsigned flags) const;
         std::vector<std::span<uint8_t>> mapping() const { return mapping_; }
+        unsigned index() const { return index_; }
         V4L2M2MDevice& owner() const { return owner_; }
 
         Buffer(V4L2M2MDevice& owner, v4l2_buf_type type, unsigned index);
@@ -59,6 +60,9 @@ public:
         V4L2M2MDevice& owner_;
         v4l2_buf_type type_;
         unsigned index_;
+        // QUERYBUF flags are part of the MMAP queue contract. Qualcomm's
+        // stateful decoder requires these flags on compressed OUTPUT QBUF.
+        uint32_t query_flags_;
         std::vector<std::span<uint8_t>> mapping_;
 
         friend class V4L2M2MDevice;
@@ -73,13 +77,24 @@ public:
     V4L2M2MDevice& operator=(V4L2M2MDevice&& other);
     ~V4L2M2MDevice();
     void set_format(enum v4l2_buf_type type, unsigned int pixelformat, unsigned int width, unsigned int height);
+    void refresh_capture_format();
     unsigned request_buffers(enum v4l2_buf_type type, unsigned count);
     bool format_supported(v4l2_buf_type type, unsigned pixelformat) const;
+    unsigned buffer_count(v4l2_buf_type type) const;
     const Buffer& buffer(v4l2_buf_type type, unsigned index);
     int32_t get_control(uint32_t id) const;
     void set_ext_control(int request_fd, unsigned id, void* data, unsigned size);
     void set_ext_controls(int request_fd, std::span<v4l2_ext_control> controls);
     void set_streaming(bool enable);
+    void stream_output(bool enable);
+    void stream_capture(bool enable);
+    void reset_capture_queue();
+    void subscribe_source_change();
+    void decoder_stop();
+    void decoder_start();
+    bool wait_for_source_change(int timeout_ms = 2000);
+    std::optional<unsigned> dequeue_ready(v4l2_buf_type type, int timeout_ms = 0);
+    bool last_dequeued_last() const { return last_dequeued_was_last; }
 
     int video_fd;
     int media_fd;
@@ -90,6 +105,10 @@ public:
     v4l2_format output_format;
     std::set<fourcc> supported_output_formats;
     std::set<fourcc> supported_capture_formats;
+
+    bool output_streaming = false;
+    bool capture_streaming = false;
+    bool last_dequeued_was_last = false;
 
 private:
     std::vector<Buffer> capture_buffers;

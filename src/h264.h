@@ -29,6 +29,7 @@
 #pragma once
 
 #include <set>
+#include <vector>
 
 extern "C" {
 #include <va/va.h>
@@ -64,8 +65,12 @@ public:
         int picture_height, std::span<VASurfaceID> surface_ids);
     VAStatus store_buffer(const Buffer& buffer) const override;
     int set_controls() override;
+    bool uses_request_api() const override { return !stateful; }
+    bool uses_stateful_streaming() const override { return stateful; }
+    bool prepend_parameter_sets(Surface& surface) const;
 
     uint8_t profile;
+    bool stateful;
     struct h264_dpb dpb;
     v4l2_stateless_h264_decode_mode mode;
 };
