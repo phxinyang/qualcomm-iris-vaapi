@@ -1,7 +1,8 @@
 # Qualcomm Iris VA-API Test Results
 
-Target: Fedora 44 ARM64 tablet `192.168.3.129`, Snapdragon SM8550, Iris decoder
-`/dev/video17`, kernel `7.2.0-sm8550`.
+Primary latest target: Fedora 44 ARM64 tablet `192.168.3.133`, Snapdragon
+SM8550, Iris decoder `/dev/video0`, kernel `7.2.0-sm8550`. Historical sections
+retain earlier `.129`, `.134` and `.139` tablet runs and their device numbering.
 
 ## Passed
 
@@ -270,14 +271,36 @@ critical for VP9/HEVC/AV1 and an EOS-seqnum diagnostic for H.264; the plain
 `gst-launch-1.0` pipelines are clean, so these are recorded as GStreamer
 validator diagnostics rather than Iris pixel failures.
 
-Fluster standard AV1 vectors completed 200/242 with the GStreamer V4L2 AV1
-decoder. The 42 non-passes are isolated to the suite's deliberately extreme
-cases: 16x16/odd tiny dimensions, monochrome, dynamic resolution and SVC
-layers. One downloaded H.264 subset (50 vectors) produced 29 successes; the
-remaining vectors exercised extended/interlaced profiles or dimensions that
-the firmware rejected. The standard H.264, HEVC and VP9 suites were downloaded
-in the same trash checkout for the next run; their full results are not claimed
-until the remaining corpus download completes.
+Fluster corpus results were completed with the GStreamer V4L2 decoders. The
+JSON reports are retained in the tablet scratch directory
+`~/Lab/Bridge/tmp/trash/iris-hw-suite-20260830`:
+
+| Suite / decoder | Total | Passed | Error/Fail/Timeout | Interpretation |
+| --- | ---: | ---: | ---: | --- |
+| JVT-AVC_V1 / H.264 | 135 | 40 | 95 errors | Main-profile vectors pass; failures are concentrated in field/MBAFF/PAFF, extended and other conformance profiles rejected by this node. |
+| JVT-FR-EXT / H.264 | 69 | 0 | 69 errors | Fidelity Range Extension/extended interlaced capability is not exposed by the firmware. |
+| JCT-VC-HEVC_V1 / HEVC | 147 | 112 | 34 errors, 1 fail | Main/Main10 and ordinary coding vectors pass where advertised; advanced WPP/tiles/10-bit vectors are rejected. |
+| VP9-TEST-VECTORS / VP9 | 305 | 235 | 68 errors, 1 fail, 1 timeout | Failures are 8x8 through 66x66 extreme dimensions, 4:2:2/4:4:4, dynamic resize and SVC cases. The timeout is the 16x16 all-intra stress vector. |
+| VP9-TEST-VECTORS-HIGH / VP9 | 6 | 0 | 6 errors | 10/12-bit 4:2:0/4:2:2/4:4:4 is outside the advertised 8-bit 4:2:0 capability. |
+| AV1-TEST-VECTORS / AV1 | 242 | 200 | 42 errors | Non-passes are limited to tiny dimensions, monochrome, dynamic resize and SVC-layer vectors. |
+| CHROMIUM-8bit-AV1-TEST-VECTORS / AV1 | 13 | 13 | 0 | Chromium's 8-bit AV1 coverage passes in full. |
+
+Two corpus downloads reported checksum mismatches (`brcm_freh5` in
+`JVT-FR-EXT` and `SLPPLP_A_VIDYO_2` in `JCT-VC-HEVC_V1`). Fluster keeps those
+metadata entries as errors; they are not treated as decoded hardware failures.
+
+The one HEVC checksum failure, `RAP_A_docomo_6`, was rerun three times. The
+software reference emits 86 416x240 I420 frames (`8a536a80...`); Iris emits a
+stable 85-frame sequence (`c074ee17...`) beginning at the software second
+frame. The three hardware byte streams were identical. This is a deterministic
+RAP/RASL output capability difference in the native stateful path, not a
+non-repeatable pixel corruption; it is kept as a negative capability result
+until a client/firmware contract for leading RASL pictures is established.
+
+The VP9 timeout is likewise an isolated 16x16 all-intra stress case. The
+remaining 235 vectors complete in 64.5 seconds, and no timeout appears in the
+standard VA matrix or Qualcomm mixed-codec client. These external corpus
+results therefore do not justify another production-driver change.
 
 This run adds the generic orchestration script and documents the distinction
 between codec correctness, V4L2 contract checks, and firmware capability
