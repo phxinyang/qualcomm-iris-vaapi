@@ -812,7 +812,12 @@ void Context::drain_stateful_decoder()
 
     try {
         device.decoder_stop();
+        // The STOP command drains the stateful decoder asynchronously. Mark
+        // the context before waiting for the terminal CAPTURE marker so the
+        // LAST path can restart Iris through resume_after_drain().
+        stateful_draining = true;
     } catch (const std::system_error& error) {
+        stateful_draining = false;
         if (std::getenv("V4L2_VA_TRACE"))
             std::fprintf(stderr, "stateful drain stop failed: %s\n", error.what());
         return;
