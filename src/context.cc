@@ -945,13 +945,9 @@ bool Context::stateful_input_consumed() const
     // surface, so there is nothing for a drain to recover.
     if (stateful_batches.empty())
         return false;
-    // Iris has taken every compressed buffer back. Whatever is still
-    // outstanding lives in the decoder's DPB, not in the input queue.
-    for (const auto& [index, surfaces] : stateful_batches) {
-        static_cast<void>(surfaces);
-        if (!stateful_output_dequeued.contains(index))
-            return false;
-    }
+    // A batch may still have its OUTPUT buffer in flight while Iris is in a
+    // normal reorder window. STOP is the operation that flushes both that
+    // buffer and the decoder DPB, so do not require OUTPUT DQBUF first.
     return true;
 }
 
