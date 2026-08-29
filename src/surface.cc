@@ -567,7 +567,12 @@ VAStatus syncSurface(VADriverContextP context, VASurfaceID surface_id)
             // the VA surface, otherwise the last decoded pictures are lost
             // and callers observe stale/flash frames at EOS.
             if (decode_context->try_begin_stateful_timeout_recovery()) {
-                decode_context->reset_stateful_decoder();
+                if (!decode_context->reset_stateful_decoder()) {
+                    error_log(context, "Stateful decoder drain did not reach LAST for surface %u\n", surface_id);
+                    surface.status = VASurfaceDisplaying;
+                    surface.source_size_used = 0;
+                    return VA_STATUS_ERROR_OPERATION_FAILED;
+                }
                 if (surface.status != VASurfaceRendering)
                     return VA_STATUS_SUCCESS;
             }

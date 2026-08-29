@@ -18,7 +18,11 @@ fi
 
 flush_block=$(sed -n '/VAStatus Context::flush_stateful_batch()/,/^void Context::service_stateful_queues()/p' "$context")
 timeout_block=$(sed -n '/if (surface.status == VASurfaceRendering)/,/^        }/p' "$surface")
-drain_block=$(sed -n '/void Context::drain_stateful_decoder()/,/^void Context::mark_source_buffer_dequeued()/p' "$context")
+drain_block=$(sed -n '/bool Context::drain_stateful_decoder()/,/^void Context::mark_source_buffer_dequeued()/p' "$context")
+reset_block=$(sed -n '/bool Context::reset_stateful_decoder()/,/^bool Context::drain_stateful_decoder()/p' "$context")
+resume_block=$(sed -n '/void Context::resume_after_drain()/,/^namespace {/p' "$context")
+watchdog_block=$(sed -n '/void Context::stateful_watchdog_loop()/,/^bool Context::bind_surface/p' "$context")
+reset_block=$(sed -n '/bool Context::reset_stateful_decoder()/,/^bool Context::drain_stateful_decoder()/p' "$context")
 
 if ! printf '%s\n' "$flush_block" | grep -q 'stateful_batch_limit_from_env'; then
     echo "FAIL stateful flush has no bounded batch limit" >&2
@@ -45,6 +49,30 @@ if ! printf '%s\n' "$drain_block" | grep -q 'const auto output_deadline'; then
 fi
 if ! printf '%s\n' "$drain_block" | grep -q 'mark_source_buffer_dequeued'; then
     echo "FAIL stateful drain does not retire trailing OUTPUT buffers" >&2
+    exit 1
+fi
+if ! printf '%s\n' "$drain_block" | grep -q 'if (!saw_last)'; then
+    echo "FAIL stateful drain can resume without terminal LAST" >&2
+    exit 1
+fi
+if ! printf '%s\n' "$reset_block" | grep -q 'if (!saw_last)'; then
+    echo "FAIL timeout reset can restart without terminal LAST" >&2
+    exit 1
+fi
+if ! printf '%s\n' "$resume_block" | grep -q '!stateful_last_marker_seen'; then
+    echo "FAIL resume path has no terminal LAST guard" >&2
+    exit 1
+fi
+if ! printf '%s\n' "$watchdog_block" | grep -q 'if (drained)'; then
+    echo "FAIL watchdog resumes without checking drain result" >&2
+    exit 1
+fi
+if ! printf '%s\n' "$drain_block" | grep -q 'if (!saw_last)'; then
+    echo "FAIL stateful drain can resume without terminal LAST" >&2
+    exit 1
+fi
+if ! printf '%s\n' "$reset_block" | grep -q 'if (!saw_last)'; then
+    echo "FAIL timeout reset can restart without terminal LAST" >&2
     exit 1
 fi
 

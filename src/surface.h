@@ -72,7 +72,7 @@ struct Surface {
     std::optional<std::reference_wrapper<const V4L2M2MDevice::Buffer>> destination_buffer;
     unsigned destination_buffer_index;
     bool destination_buffer_queued;
-    // Optional stable DMA-BUF backing for Chrome's exported VA surface. The
+    // Optional stable DMA-BUF backing for an exported VA surface. The
     // stateful V4L2 decoder may return any CAPTURE index for a timestamp, so
     // copy_surface_frame() updates this fixed buffer before it is displayed.
     int export_buffer_fd = -1;

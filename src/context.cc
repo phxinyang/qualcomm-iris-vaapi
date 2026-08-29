@@ -219,11 +219,11 @@ void Context::initialize(std::span<VASurfaceID> surface_ids)
 
     device.set_format(device.output_buf_type, pixelformat, picture_width, picture_height);
 
-    // Chrome can keep more decoded render targets in flight than the native
-    // smoke test. Iris accepts a 25/25 OUTPUT/CAPTURE pair once every AU has
-    // its SPS/PPS, and this covers Chrome's complete VA surface pool without
-    // transient export failures.
-    // Chrome may keep one extra render target while recycling decoded
+    // Asynchronous VA clients can keep more decoded render targets in flight
+    // than the native smoke test. Iris accepts a 25/25 OUTPUT/CAPTURE pair
+    // once every AU has its SPS/PPS, and this covers a complete VA surface
+    // pool without transient export failures.
+    // A client may keep one extra render target while recycling decoded
     // frames. Keep a margin above the usual 24-surface pool so late export
     // requests do not fail with VA_STATUS_ERROR_INVALID_SURFACE.
     const unsigned capture_buffers = uses_stateful_streaming()
@@ -232,8 +232,8 @@ void Context::initialize(std::span<VASurfaceID> surface_ids)
     const unsigned output_buffers = uses_stateful_streaming()
         ? 32u
         : static_cast<unsigned>(surface_ids.size());
-    // Allocate the CAPTURE pool before the first SOURCE_CHANGE so Chromium can
-    // export VA surfaces during context setup. The pool is queued only after
+    // Allocate the CAPTURE pool before the first SOURCE_CHANGE so a VA client
+    // can export surfaces during context setup. The pool is queued only after
     // the first compressed AU has been submitted.
     createSurfacesDeferred(driver_data, *this, surface_ids, capture_buffers);
 
@@ -284,15 +284,15 @@ bool Context::start_capture()
         return false;
 
     // Reuse the preallocated CAPTURE pool so exported dmabuf FDs remain stable
-    // for Chromium. SOURCE_CHANGE is the point at which Iris allows CAPTURE to
+    // for the client. SOURCE_CHANGE is the point at which Iris allows CAPTURE to
     // be queued and streamed.
     for (auto& [surface_id, buffer_index] : surface_buffer_indices)
         bind_surface(surface_id);
     if (stateful_capture_scheduled()) {
         // Stateful V4L2 has no VA render-target argument. Queue only the
         // capture buffers belonging to surfaces already submitted in OUTPUT,
-        // so Iris writes each decoded frame into the DMA-BUF Chrome exported
-        // for that VA surface instead of choosing an unrelated pool slot.
+        // so Iris writes each decoded frame into the DMA-BUF the VA client
+        // exported for that surface instead of choosing an unrelated slot.
         std::set<unsigned> scheduled;
         for (const auto& [batch_index, batch_surfaces] : stateful_batches) {
             for (const auto surface_id : batch_surfaces) {
@@ -342,8 +342,8 @@ VAStatus Context::append_stateful_picture(VASurfaceID surface_id)
     if (stateful_pending_size > std::numeric_limits<size_t>::max() - surface.source_size_used)
         return VA_STATUS_ERROR_NOT_ENOUGH_BUFFER;
     surface.stateful_frame_type = stateful_frame_type(surface_id);
-    // CLOCK_MONOTONIC is stored with microsecond precision in timeval, while
-    // Chromium can submit several AUs inside one microsecond. Keep timestamps
+    // CLOCK_MONOTONIC is stored with microsecond precision in timeval, while an
+    // asynchronous client can submit several AUs inside one microsecond. Keep timestamps
     // strictly increasing so the timestamp -> VA-surface map cannot overwrite
     // an earlier AU.
     if (surface.timestamp.tv_sec < stateful_last_timestamp.tv_sec
@@ -369,14 +369,18 @@ VAStatus Context::flush_stateful_batch()
 {
     if (!uses_stateful_streaming() || stateful_pending.empty())
         return VA_STATUS_SUCCESS;
+    // STOP is a drain operation. Until its CAPTURE LAST marker arrives the
+    // firmware cannot accept a new OUTPUT stream, so report backpressure to a
+    // generic VA client instead of silently dropping the staged picture.
     if (stateful_draining)
-        return VA_STATUS_SUCCESS;
+        return VA_STATUS_ERROR_HW_BUSY;
 
     try {
         // VA-API does not require the producer to call vaSyncSurface before it
-        // submits the next picture. Chrome therefore fills the OUTPUT queue
-        // while decoded CAPTURE/OUTPUT buffers are already ready; service
-        // them first so stateful_batches reflects the driver's queue state.
+        // submits the next picture. An asynchronous producer can therefore
+        // fill the OUTPUT queue while decoded CAPTURE/OUTPUT buffers are
+        // already ready; service them first so stateful_batches reflects the
+        // driver's queue state.
         service_stateful_queues();
 
         unsigned batch_index = std::numeric_limits<unsigned>::max();
@@ -411,7 +415,8 @@ VAStatus Context::flush_stateful_batch()
                 if (std::getenv("V4L2_VA_TRACE"))
                     std::fprintf(stderr, "stateful reset before IDR surface=%u\n", surface_id);
                 reset_stateful_timeout_recovery();
-                reset_stateful_decoder();
+                if (!reset_stateful_decoder())
+                    return VA_STATUS_ERROR_HW_BUSY;
             }
             // Keep the complete AU, including its SPS/PPS, in the aggregate
             // stream. Iris accepts repeated parameter sets and needs the PPS
@@ -454,8 +459,8 @@ VAStatus Context::flush_stateful_batch()
             device.stream_output(true);
         if (!capture_initialized) {
             // OUTPUT STREAMON raises Iris' initial SOURCE_CHANGE event. Unlike
-            // the native finite-file helper, Chrome keeps the stream open, so
-            // do not issue DECODER_CMD_STOP here: STOP drains the firmware and
+            // a native finite-file helper, a live VA client keeps the stream
+            // open, so do not issue DECODER_CMD_STOP here: STOP drains the firmware and
             // marks the first batch LAST, after which further QBUF calls fail.
             if (!start_capture())
                 return VA_STATUS_ERROR_OPERATION_FAILED;
@@ -497,9 +502,9 @@ void Context::service_stateful_queues()
         if (completed && driver_data->surfaces.contains(*completed)) {
             auto& surface = driver_data->surfaces.at(*completed);
             copy_surface_frame(surface, device.buffer(device.capture_buf_type, *capture_index));
-            // With the stable DMA-BUF path Chrome consumes a private copy, so
-            // the V4L2 CAPTURE slot must be returned immediately. Holding it
-            // on the VA surface eventually exhausts the capture queue when
+            // With the stable DMA-BUF path the VA client consumes a private
+            // copy, so the V4L2 CAPTURE slot must be returned immediately.
+            // Holding it on the VA surface eventually exhausts the capture queue when
             // several decoders or looping videos are active.
             if (copy_surfaces_enabled() && surface.export_buffer_fd >= 0 && surface.export_buffer_mapping) {
                 device.buffer(device.capture_buf_type, *capture_index).queue();
@@ -672,11 +677,22 @@ void Context::remove_stateful_batch_order(unsigned index)
     }
 }
 
-void Context::reset_stateful_decoder()
+bool Context::reset_stateful_decoder()
 {
     if (!uses_stateful_streaming() || !capture_initialized)
-        return;
-    device.decoder_stop();
+        return false;
+    if (stateful_draining)
+        return false;
+    try {
+        device.decoder_stop();
+        stateful_draining = true;
+        stateful_last_marker_seen = false;
+    } catch (const std::system_error& error) {
+        if (std::getenv("V4L2_VA_TRACE"))
+            std::fprintf(stderr, "stateful reset stop failed: %s\n", error.what());
+        return false;
+    }
+    bool saw_last = false;
     for (unsigned attempt = 0; attempt < 200; attempt++) {
         auto capture_index = device.dequeue_ready(device.capture_buf_type, 20);
         if (capture_index) {
@@ -707,6 +723,7 @@ void Context::reset_stateful_decoder()
             }
             if (device.last_dequeued_last()) {
                 stateful_last_marker_seen = true;
+                saw_last = true;
                 break;
             }
         }
@@ -733,6 +750,14 @@ void Context::reset_stateful_decoder()
     }
     if (std::getenv("V4L2_VA_TRACE") && !stateful_batches.empty())
         std::fprintf(stderr, "stateful reset output drain incomplete remaining=%zu\n", stateful_batches.size());
+    if (!saw_last) {
+        // V4L2 forbids DECODER_CMD_START until the terminal CAPTURE marker is
+        // dequeued. Leave the decoder stopped so a caller cannot accidentally
+        // restart with stale OUTPUT buffers after a firmware timeout.
+        if (std::getenv("V4L2_VA_TRACE"))
+            std::fprintf(stderr, "stateful reset incomplete last=0; decoder remains stopped\n");
+        return false;
+    }
     stateful_batches.clear();
     stateful_batch_timestamps.clear();
     stateful_output_dequeued.clear();
@@ -781,16 +806,18 @@ void Context::reset_stateful_decoder()
         device.decoder_start();
         stateful_queue_restart_pending = false;
     }
+    stateful_draining = false;
     if (stateful_last_marker_seen && std::getenv("V4L2_VA_TRACE"))
         std::fprintf(stderr, "stateful drain complete last=1 batches=%zu\n", stateful_batches.size());
     stateful_submitted_count = 0;
     stateful_completed_count = 0;
+    return true;
 }
 
-void Context::drain_stateful_decoder()
+bool Context::drain_stateful_decoder()
 {
     if (!capture_initialized)
-        return;
+        return false;
 
     // A timeout recovery may already have STOP-drained the decoder and seen
     // its terminal CAPTURE LAST marker. If no new AU was submitted afterward,
@@ -799,28 +826,30 @@ void Context::drain_stateful_decoder()
     if (stateful_last_marker_seen && stateful_batches.empty() && stateful_pending.empty()) {
         if (std::getenv("V4L2_VA_TRACE"))
             std::fprintf(stderr, "stateful drain already complete last=1 batches=0\n");
-        return;
+        return true;
     }
 
-    // Chrome's EOS flush emits the final reordered pictures through
-    // SurfaceReady(), but it has no VA call that tells this backend that no
-    // more access units will arrive. STREAMOFF would therefore implicitly
-    // stop Iris and discard the tail. Submit any AU still staged, then use
-    // the stateful STOP drain before tearing down the queues.
+    // Some VA clients stop calling into the backend after submitting their
+    // final access unit and have no explicit EOS entry point. STREAMOFF would
+    // implicitly stop Iris and discard the tail. Submit any AU still staged,
+    // then use the stateful STOP drain before tearing down the queues.
     if (!stateful_pending.empty() && flush_stateful_batch() != VA_STATUS_SUCCESS)
-        return;
+        return false;
 
     try {
-        device.decoder_stop();
-        // The STOP command drains the stateful decoder asynchronously. Mark
-        // the context before waiting for the terminal CAPTURE marker so the
-        // LAST path can restart Iris through resume_after_drain().
-        stateful_draining = true;
+        if (!stateful_draining) {
+            device.decoder_stop();
+            // The STOP command drains the stateful decoder asynchronously. Mark
+            // the context before waiting for the terminal CAPTURE marker so the
+            // LAST path can restart Iris through resume_after_drain().
+            stateful_draining = true;
+            stateful_last_marker_seen = false;
+        }
     } catch (const std::system_error& error) {
         stateful_draining = false;
         if (std::getenv("V4L2_VA_TRACE"))
             std::fprintf(stderr, "stateful drain stop failed: %s\n", error.what());
-        return;
+        return false;
     }
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -878,6 +907,9 @@ void Context::drain_stateful_decoder()
 
     if (std::getenv("V4L2_VA_TRACE"))
         std::fprintf(stderr, "stateful drain complete last=%d batches=%zu\n", saw_last, stateful_batches.size());
+    if (!saw_last)
+        return false;
+    return true;
 }
 
 void Context::mark_source_buffer_dequeued(unsigned index)
@@ -903,7 +935,9 @@ void Context::mark_source_buffer_dequeued(unsigned index)
 
 void Context::resume_after_drain()
 {
-    if (!stateful_draining)
+    // A START is legal only after the terminal CAPTURE LAST marker. Keep this
+    // guard even when a caller invokes resume directly after a bounded wait.
+    if (!stateful_draining || !stateful_last_marker_seen)
         return;
     // STREAMON/STOP returns completed CAPTURE buffers to userspace. Requeue
     // only targets that are no longer being rendered before restarting the
@@ -936,25 +970,29 @@ int stateful_eos_idle_ms()
         if (end != value && *end == '\0' && parsed >= 10 && parsed <= 5000)
             return static_cast<int>(parsed);
     }
-    // Claude's trace measured normal Chrome batch gaps up to ~325 ms and the
-    // stale tail beginning around ~458 ms after the last submission. Keep the
-    // default between those observations; callers can tune it explicitly.
+    // Validation measured normal client batch gaps up to ~325 ms and the stale
+    // tail beginning around ~458 ms after the last submission. Keep the default
+    // between those observations; callers can tune it explicitly.
     return 400;
 }
 
 bool stateful_eos_drain_enabled()
 {
-    const char* value = std::getenv("V4L2_VA_EOS_DRAIN");
+    // Keep the short name for existing deployments. The explicit stateful
+    // name makes the scope clear for clients using VP9, H.264, or HEVC.
+    const char* value = std::getenv("V4L2_VA_STATEFUL_EOS_DRAIN");
+    if (!value)
+        value = std::getenv("V4L2_VA_EOS_DRAIN");
     return value && std::strcmp(value, "1") == 0;
 }
 
 }
 
 // Iris only publishes the pictures still held for reordering after a STOP
-// drain. Chrome has no VA call that announces the end of the stream, and it
-// stops calling into this backend entirely once the last access unit has been
-// submitted, so nothing would collect those frames: their VA surfaces keep the
-// previous content and the compositor replays stale pictures at EOS.
+// drain. A client without an explicit EOS call can stop invoking this backend
+// once the last access unit has been submitted, so nothing would collect those
+// frames: their VA surfaces keep the previous content and the compositor
+// replays stale pictures at EOS.
 bool Context::stateful_input_consumed() const
 {
     if (!uses_stateful_streaming() || !capture_initialized)
@@ -962,6 +1000,12 @@ bool Context::stateful_input_consumed() const
     // An access unit still staged for the next OUTPUT buffer means the
     // producer is mid-batch, not finished.
     if (!stateful_pending.empty())
+        return false;
+    // Require a small amount of decode history before treating an idle queue
+    // as EOS. Parameter-set negotiation and firmware DPB allocation can leave
+    // a new HEVC/VP9 session quiet for hundreds of milliseconds; a cold-start
+    // drain would discard its first pictures.
+    if (stateful_submitted_count < 8 || stateful_completed_count == 0)
         return false;
     // Nothing outstanding: every submitted picture already reached its
     // surface, so there is nothing for a drain to recover.
@@ -1041,8 +1085,11 @@ void Context::stateful_watchdog_loop()
         if (!consumed || !stateful_eos_drain_enabled())
             continue;
 
-        drain_stateful_decoder();
-        resume_after_drain();
+        const bool drained = drain_stateful_decoder();
+        if (drained)
+            resume_after_drain();
+        else if (std::getenv("V4L2_VA_TRACE"))
+            std::fprintf(stderr, "stateful watchdog drain incomplete; decoder remains stopped\n");
         std::lock_guard<std::mutex> lock(stateful_watchdog_mutex_);
         stateful_watchdog_handled_ = true;
     }

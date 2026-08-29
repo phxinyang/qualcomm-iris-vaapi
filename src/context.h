@@ -84,8 +84,10 @@ public:
     bool has_stateful_history() const { return stateful_submitted_count != 0; }
     unsigned stateful_submitted_frames() const { return stateful_submitted_count; }
     unsigned stateful_completed_frames() const { return stateful_completed_count; }
-    void reset_stateful_decoder();
-    void drain_stateful_decoder();
+    // A stateful STOP is complete only after CAPTURE returns V4L2_BUF_FLAG_LAST.
+    // Keep the result explicit so callers never restart a decoder on timeout.
+    bool reset_stateful_decoder();
+    bool drain_stateful_decoder();
     void resume_after_drain();
     // Chrome never calls back into the backend once it has submitted the last
     // access unit, so an idle watchdog is the only place that can notice the
