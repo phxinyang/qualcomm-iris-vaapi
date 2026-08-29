@@ -234,3 +234,52 @@ This follow-up is recorded on branch `test/iris-stateful-followup` in commits
 `95de0d4` (state-machine safety), `e753088` (watchdog/source guards),
 `0288082` and `c2f1211` (generic client documentation), and `cafa6b9`
 (generic trace-checker arguments).
+
+## Dedicated hardware suite (2026-08-30, `/dev/video0`)
+
+The complete hardware plan from the earlier Claude investigation was run on
+the Fedora 44 ARM64 SM8550 tablet at `192.168.3.133`. The repeatable entry
+point is `test/iris-hardware-suite.sh`; its logs and generated media are kept
+under `~/Lab/Bridge/tmp/trash` and are not repository inputs.
+
+Qualcomm's upstream `v4l-video-test-app` (`b1f1a04`) was built natively with
+shared Fedora FFmpeg/JsonCpp libraries (the upstream CMake file requests static
+libraries that are not shipped by Fedora). Its JSON decoder client passed all
+four advertised codecs:
+
+- H.264: 32/32 decoded frames, 44,236,800-byte NV12 dump;
+- VP9, HEVC and AV1: 48/48 frames each, 4,147,200-byte NV12 dumps.
+
+Every dump matched an FFmpeg software `nv12` decode byte-for-byte. A second
+Qualcomm run with two concurrent H.264 contexts passed both clients and both
+outputs matched the software reference. A mixed four-context run (H.264,
+VP9, HEVC, AV1) also returned four `SUCCESS` results and all four dumps matched
+their software references.
+
+The V4L2 contract checks reported 47/48 tests succeeded. The sole reported
+failure is the `v4l2-compliance` stateful decoder control-class check, while
+the same device exposes `min_number_of_capture_buffers` (`0x00980927`) through
+`v4l2-ctl`; the verbose report and raw control inventory are retained for
+follow-up with v4l-utils. No ioctl, format, queue, buffer or decoder-command
+failure was reported.
+
+Native GStreamer pipelines (`v4l2h264dec`, `v4l2vp9dec`, `v4l2h265dec`,
+`v4l2av1dec`) all reached EOS. GstValidate reached EOS as well, but on this
+GStreamer 1.28 build it reports a `gst_structure_remove_field: IS_MUTABLE`
+critical for VP9/HEVC/AV1 and an EOS-seqnum diagnostic for H.264; the plain
+`gst-launch-1.0` pipelines are clean, so these are recorded as GStreamer
+validator diagnostics rather than Iris pixel failures.
+
+Fluster standard AV1 vectors completed 200/242 with the GStreamer V4L2 AV1
+decoder. The 42 non-passes are isolated to the suite's deliberately extreme
+cases: 16x16/odd tiny dimensions, monochrome, dynamic resolution and SVC
+layers. One downloaded H.264 subset (50 vectors) produced 29 successes; the
+remaining vectors exercised extended/interlaced profiles or dimensions that
+the firmware rejected. The standard H.264, HEVC and VP9 suites were downloaded
+in the same trash checkout for the next run; their full results are not claimed
+until the remaining corpus download completes.
+
+This run adds the generic orchestration script and documents the distinction
+between codec correctness, V4L2 contract checks, and firmware capability
+boundaries. It does not change the production driver based on external-tool
+diagnostics.

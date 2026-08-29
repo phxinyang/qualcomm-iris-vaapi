@@ -145,6 +145,43 @@ initiates a drain, both queues remain active until CAPTURE
 `V4L2_BUF_FLAG_LAST`, and only then may a stateful decoder be restarted.
 `STREAMOFF`/`close()` implicitly stops and discards buffered data.
 
+## Full target hardware suite
+
+`iris-hardware-suite.sh` combines the repository matrices with a V4L2
+capability inventory, `v4l2-compliance`, native GStreamer EOS checks, the
+Qualcomm `v4l-video-test-app`, and optional Fluster conformance runs. It is
+device-agnostic and defaults to `/dev/video0`; set `V4L2_DEVICE` (or
+`LIBVA_V4L2_VIDEO_PATH`) for another node. All logs and generated media stay
+under `$HOME/Lab/Bridge/tmp/trash`:
+
+```
+V4L2_DEVICE=/dev/video0 \
+IRIS_HARDWARE_SUITE_DIR=$HOME/Lab/Bridge/tmp/trash/iris-hardware-suite \
+./test/iris-hardware-suite.sh
+```
+
+The repository matrices are enabled by default. Set `IRIS_RUN_REPO_MATRICES=0`
+when only external tools are desired. To add the Qualcomm JSON client, point
+`IRIS_V4L_TEST_BINARY` at `iris_v4l2_test` and provide a whitespace-separated
+`IRIS_V4L_TEST_CONFIGS` list. Set `IRIS_V4L_TEST_CWD` to the Qualcomm
+checkout root when a JSON file uses relative `InputPath`/`Outputpath` values.
+To add Fluster, set `FLUSTER_DIR`,
+`IRIS_FLUSTER_SUITES` and `IRIS_FLUSTER_DECODERS`, for example:
+
+```
+FLUSTER_DIR=$HOME/Lab/Bridge/tmp/trash/fluster \
+IRIS_FLUSTER_SUITES='JVT-AVC_V1 JCT-VC-HEVC_V1 VP9-TEST-VECTORS AV1-TEST-VECTORS' \
+IRIS_FLUSTER_DECODERS='GStreamer-H.264-V4L2' \
+./test/iris-hardware-suite.sh
+```
+
+Fluster's non-zero result is retained as a capability warning because its
+corpus intentionally includes profiles, bit depths, dimensions and dynamic
+resolution modes that a particular Iris firmware may not implement. The raw
+JSON and log are the review artifacts. `v4l2-compliance` is strict except for
+the known stateful mem2mem control classification; set
+`IRIS_ALLOW_KNOWN_COMPLIANCE_LIMIT=0` to make that result fail the suite.
+
 ## Open-source test corpora
 
 There is no single corpus that covers both codec conformance and browser
