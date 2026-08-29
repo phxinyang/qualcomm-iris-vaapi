@@ -7,7 +7,7 @@
 set -eu
 
 if [ "$#" -ne 1 ]; then
-    echo "usage: $0 CHROME_TRACE_LOG" >&2
+    echo "usage: $0 CLIENT_TRACE_LOG" >&2
     exit 2
 fi
 
