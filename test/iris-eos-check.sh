@@ -1,7 +1,7 @@
 #!/bin/sh
 
-# Validate a V4L2 stateful trace against the EOS contract used by the
-# Chromium video decoder tests: every submitted access unit must complete,
+# Validate a V4L2 stateful trace against the generic EOS contract (also used by
+# Chromium's video decoder tests): every submitted access unit must complete,
 # followed by one terminal CAPTURE LAST marker after decoder STOP.
 
 set -eu

@@ -51,7 +51,7 @@ struct Surface {
     unsigned width;
     unsigned height;
     // VA surfaces are global, while each V4L2 stateful session has its own
-    // capture queue. Chrome creates contexts before allocating its frame
+    // capture queue. A client may create contexts before allocating its frame
     // pools, so retain the best-effort context association made at creation
     // time to prevent exportSurfaceHandle() from binding a surface to the
     // first decoder merely because dimensions match.

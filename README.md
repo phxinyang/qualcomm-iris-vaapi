@@ -78,7 +78,7 @@ The implementation has been tested using Intel's [vaapi-fits](https://github.com
 Feedback on results for other platforms are very welcome, do not expect the library to simply work smoothly though.
 This fork experimentally detects Qualcomm Iris stateful H.264 when the device advertises
 `V4L2_PIX_FMT_H264` rather than `V4L2_PIX_FMT_H264_SLICE`. Queue setup is lazy
-so Chromium can create a VA context before allocating render targets. The
+so a client can create a VA context before allocating render targets. The
 stateful VP9 path is enabled when the Iris device advertises `V4L2_PIX_FMT_VP9`.
 AV1 is not enabled by default: VA-API supplies AV1 tile payloads while Iris'
 stateful node requires complete OBU temporal units. An incomplete experimental
@@ -86,7 +86,7 @@ translator can be selected with `V4L2_VA_ENABLE_AV1_STATEFUL=1`, but it is not
 part of the supported matrix; use the native V4L2 or codec2 stack for AV1. The HEVC
 implementation synthesizes parameter sets and short-term reference-picture
 sets from VA metadata and passes the target Iris 48-frame content/EOS matrix.
-Chrome builds without Linux HEVC codec support cannot select this profile.
+Clients without Linux HEVC codec support cannot select this profile.
 `V4L2_VA_RESET_ON_IDR=1` enables an experimental queue
 reset on detected new IDRs for debugging seek/replay behavior; it is not
 recommended as the default on kernels with different flush semantics.
