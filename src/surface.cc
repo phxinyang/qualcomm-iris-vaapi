@@ -583,7 +583,6 @@ VAStatus syncSurface(VADriverContextP context, VASurfaceID surface_id)
             // by the status transition below instead.
             surface.status = VASurfaceDisplaying;
             surface.source_size_used = 0;
-            decode_context->discard_stateful_surface(surface_id);
             return VA_STATUS_SUCCESS;
         }
     } catch (std::runtime_error& e) {
