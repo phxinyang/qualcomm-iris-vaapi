@@ -22,10 +22,9 @@ Target: Fedora 44 ARM64 tablet `192.168.3.129`, Snapdragon SM8550, Iris decoder
   30s. Reloading an already-ended page can make Chrome seek to a restored
   position (for example 26.464s); that pause/seek/play sequence is browser
   media-session restoration, not a decoder stall.
-- The default eight-AU batches completed a 30-second run without queue errors
-  and preserve the smooth playback cadence of the earlier stable build.
-  `V4L2_VA_BATCH_SIZE=1` remains available for timestamp-association
-  diagnostics.
+- The default one-AU batches preserve exact timestamp association and completed
+  a 30-second run without queue errors. `V4L2_VA_BATCH_SIZE=2..8` remains
+  available for explicit throughput experiments; `1` is the production value.
 - The stateful Iris path associates OUTPUT and CAPTURE buffers by timestamp and
   repeats SPS/PPS for every H.264 access unit. CAPTURE timestamps with no live
   OUTPUT entry are deliberately dropped; nearest-timestamp fallback was
@@ -191,10 +190,11 @@ Target: Fedora ARM64 tablet `192.168.3.133`, Snapdragon SM8550, Iris decoder
 `/dev/video0`; driver built in
 `/home/xinyang/Lab/Bridge/tmp/trash/iris-restore-20260830/build/src`.
 
-- Stateful Chrome EOS drain is opt-in with `V4L2_VA_EOS_DRAIN=1`. The default
-  idle threshold is 400ms, based on the measured 325ms maximum normal batch gap
-  and the 458ms stale-tail onset. A 30s H.264 run reached `ended=true` with
-  72/72 tail frames and zero repeated hashes; the trace had one STOP/LAST/START,
+- Stateful EOS drain is opt-in with `V4L2_VA_STATEFUL_EOS_DRAIN=1` (the legacy
+  `V4L2_VA_EOS_DRAIN=1` alias remains supported). The default idle threshold is
+  400ms, based on the measured 325ms maximum normal batch gap and the 458ms
+  stale-tail onset. A 30s H.264 browser run reached `ended=true` with 72/72
+  tail frames and zero repeated hashes; the trace had one STOP/LAST/START,
   zero timeouts and zero timestamp misses.
 - The drain implementation now waits for trailing OUTPUT DQBUF after the
   terminal CAPTURE LAST marker before issuing START, as required by the Linux
@@ -211,5 +211,21 @@ Target: Fedora ARM64 tablet `192.168.3.133`, Snapdragon SM8550, Iris decoder
 - The H.264 structure matrix (all-I, IP/GOP12, B=2, B=4) passed 48/48 with exact
   software MD5. HEVC with `V4L2_VA_SYNC_TIMEOUT_MS=100` also passed 48/48 and
   strict EOS with one recovery STOP/START pair.
-- Enabling the optional EOS watchdog for every codec is intentionally not the
-  default: a diagnostic run caused HEVC to drain during its normal startup gap.
+- The EOS watchdog remains opt-in because VA-API has no portable end-of-input
+  callback. Its startup guard now requires eight submitted AUs and one
+  completed frame, so normal HEVC startup gaps are not treated as EOS.
+- The generic watchdog now requires eight submitted AUs and one completed
+  frame, and both timeout recovery and idle drain refuse to issue START until
+  CAPTURE `V4L2_BUF_FLAG_LAST` is observed. Default and watchdog-enabled
+  H.264/VP9/HEVC matrices on `/dev/video0` passed 48/48 with exact software
+  MD5; the forced 100ms timeout HEVC matrix also passed strict EOS and content
+  checks. MPEG-2/VP8 remain correctly reported as unavailable on this node,
+  while native AV1 reaches EOS and VA AV1 remains skipped for its tile/OBU
+  payload contract.
+
+The state-machine changes follow the Linux stateful decoder contract and the
+queue handling used by reference clients:
+
+- Linux V4L2 stateful decoder drain: <https://www.kernel.org/doc/html/v6.4/userspace-api/media/v4l/dev-decoder.html>
+- Chromium stateful V4L2 client: <https://chromium.googlesource.com/chromium/src/+/a576d2ae67f9a89b4ac118460c7e4e4763f8c22a/media/gpu/v4l2/v4l2_stateful_video_decoder.cc>
+- GStreamer V4L2 decoder: <https://github.com/GStreamer/gst-plugins-good/blob/master/sys/v4l2/gstv4l2videodec.c>

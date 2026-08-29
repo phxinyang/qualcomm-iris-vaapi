@@ -27,41 +27,43 @@ This can be overriden by explicitly specifying a device pair to use:
 export LIBVA_V4L2_VIDEO_PATH=/dev/videoX LIBVA_V4L2_MEDIA_PATH=/dev/mediaY
 ```
 
-For Qualcomm Iris stateful H.264, each OUTPUT buffer contains up to eight
-access units by default. This preserves the playback throughput of the stable
-Iris path. `V4L2_VA_BATCH_SIZE=1` is available for timestamp-association
-diagnostics, while `V4L2_VA_BATCH_SIZE=2..8` selects an explicit batch size.
+For Qualcomm Iris stateful codecs, each OUTPUT buffer contains one access unit
+by default. This preserves exact timestamp and display-order association when
+Iris returns several CAPTURE frames for a reordered stream. Set
+`V4L2_VA_BATCH_SIZE=2..8` only for throughput experiments; `1` is the safe
+diagnostic and production setting.
 Keep `V4L2_VA_TRACE` disabled during normal playback because it is intentionally
 verbose.
 
 The backend allocates a stable system DMA-BUF for each exported VA surface and
 copies completed Iris CAPTURE frames into a private CPU snapshot, publishes
 that snapshot before returning the rotating V4L2 CAPTURE slot, and retains a
-`vaSyncSurface()` retry path if publication fails. This keeps Chrome's imported
-buffer immutable while it is eligible for composition and is required for
-Chromium's multi-decoder frame pools because Iris can return a different
-CAPTURE index for each timestamp. The browser-facing default uses the stable
-snapshot path; set `V4L2_VA_COPY_SURFACES=0` only for clients that explicitly
-manage the rotating V4L2 CAPTURE buffer lifetime themselves.
+`vaSyncSurface()` retry path if publication fails. This keeps an imported
+buffer immutable while it is eligible for composition and supports clients
+whose VA surface pools outlive the rotating CAPTURE indices. The stable
+snapshot path is the default; set `V4L2_VA_COPY_SURFACES=0` only for clients
+that explicitly manage rotating V4L2 CAPTURE buffer lifetime themselves.
 The complete CAPTURE pool is queued by default so firmware reorder and EOS
 drain cannot run out of free slots.
 
 Stateful Iris may hold a reordered B/P frame until a later AU is submitted.
 `vaSyncSurface()` therefore uses a bounded 1000 ms wait by default, allowing
-Chrome's producer to continue after a stalled reorder point instead of
-deadlocking a looping or seeked video. Override it with
+an asynchronous producer to continue after a stalled reorder point instead of
+deadlocking a looping or seeked stream. Override it with
 `V4L2_VA_SYNC_TIMEOUT_MS=100..60000` when diagnosing another application.
 CAPTURE frames are matched to the exact monotonic timestamp copied into their
 OUTPUT AU. A frame that arrives after its surface was dropped is discarded and
 the CAPTURE slot is requeued; binding it to the nearest live timestamp causes
 old frames to flash in a newer surface and shifts the rest of the stream.
 
-Chrome does not issue a VA call that marks end-of-stream after its final access
-unit. On Iris, enable the opt-in idle drain for this browser path with
-`V4L2_VA_EOS_DRAIN=1`; the default 400 ms threshold is based on measured
-Chrome batch gaps and can be tuned with `V4L2_VA_EOS_IDLE_MS=10..5000`.
-Keep the watchdog opt-in for applications/codecs with longer startup gaps, such
-as the HEVC path; regular VA clients still drain synchronously at teardown.
+Some VA clients do not issue a separate end-of-stream call after their final
+access unit. On Iris, enable the opt-in idle drain with
+`V4L2_VA_STATEFUL_EOS_DRAIN=1` (the legacy `V4L2_VA_EOS_DRAIN=1` name is also
+accepted). The default 400 ms threshold is based on measured client batch
+gaps and can be tuned with `V4L2_VA_EOS_IDLE_MS=10..5000`. The watchdog only
+arms after eight submitted AUs and one completed frame, so codec startup gaps
+cannot be mistaken for EOS. All stateful clients still perform synchronous
+STOP draining during context teardown.
 
 Note that some applications need further configuration to load the library.
 In particular, gstreamer based applications have a whitelist for supported drivers, that can be disabled manually (`GST_VAAPI_ALL_DRIVERS=1`).

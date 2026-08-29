@@ -98,24 +98,24 @@ LIBVA_V4L2_VIDEO_PATH=/dev/video17 \
 ./build/test/v4l2-context-isolation
 ```
 
-For a browser-facing end-of-stream teardown check, launch the single-pass
-`test/iris-ending-probe.html` page with `V4L2_VA_TRACE=1`, wait for its
-`ended` event, then validate the driver trace:
+For an end-of-stream teardown check, run a client to completion with
+`V4L2_VA_TRACE=1`, then validate the driver trace. The HTML probe is useful for
+browser playback, but the same check applies to FFmpeg or another VA client:
 
 ```
-test/iris-ending-check.sh /path/to/chrome-trace.log
+test/iris-ending-check.sh /path/to/client-trace.log
 ```
 
-The check rejects bounded sync timeouts and timestamp misses during Chrome's
-stateful surface recycling, and requires at least one immediate stateful
-surface teardown record.
+The check rejects bounded sync timeouts and timestamp misses during stateful
+surface recycling, and requires at least one immediate stateful surface
+teardown record.
 
 For a browser context-recycling run (for example, repeated seeks or loop
 teardown), validate that every destroyed VA context is reclaimed after its
 surfaces disappear:
 
 ```
-test/iris-context-retirement-check.sh /path/to/chrome-trace.log
+test/iris-context-retirement-check.sh /path/to/client-trace.log
 ```
 
 The trace must be collected after the final surface teardown; the check fails
@@ -123,8 +123,8 @@ if any destroyed context remains deferred until `vaTerminate()`.
 
 For a visual hardware/software comparison, serve the project root and open
 `test/compare.html?mode=hardware` and `test/compare.html?mode=software` in
-separate Chrome profiles. The page labels the active decoder and uses the same
-30-second H.264 sample in both windows.
+separate browser profiles. The page labels the active decoder and uses the
+same 30-second H.264 sample in both windows.
 
 For a stateful EOS/drain regression check, run FFmpeg with `V4L2_VA_TRACE=1`
 and validate the resulting trace. The check expects one CAPTURE completion for
@@ -141,10 +141,9 @@ test/iris-eos-check.sh /path/to/ffmpeg-burst-trace.log 720 --allow-bounded-sync
 ```
 
 This follows the Linux stateful decoder contract: `VIDIOC_DECODER_CMD(STOP)`
-initiates a drain, while `STREAMOFF`/`close()` implicitly stops and discards
-buffered data. Chromium's reference video decoder tests apply the same EOS
-oracle by waiting for flush completion and comparing decoded-frame count and
-per-frame MD5 metadata.
+initiates a drain, both queues remain active until CAPTURE
+`V4L2_BUF_FLAG_LAST`, and only then may a stateful decoder be restarted.
+`STREAMOFF`/`close()` implicitly stops and discards buffered data.
 
 ## Open-source test corpora
 
