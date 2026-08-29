@@ -77,7 +77,6 @@ public:
     V4L2M2MDevice& operator=(V4L2M2MDevice&& other);
     ~V4L2M2MDevice();
     void set_format(enum v4l2_buf_type type, unsigned int pixelformat, unsigned int width, unsigned int height);
-    void refresh_capture_format();
     unsigned request_buffers(enum v4l2_buf_type type, unsigned count);
     bool format_supported(v4l2_buf_type type, unsigned pixelformat) const;
     unsigned buffer_count(v4l2_buf_type type) const;
@@ -95,20 +94,26 @@ public:
     bool wait_for_source_change(int timeout_ms = 2000);
     std::optional<unsigned> dequeue_ready(v4l2_buf_type type, int timeout_ms = 0);
     bool last_dequeued_last() const { return last_dequeued_was_last; }
+    bool last_dequeued_error() const { return last_dequeued_error_; }
+    uint32_t last_dequeued_flags() const { return last_dequeued_flags_; }
+    const timeval& last_dequeued_timestamp() const { return last_dequeued_timestamp_; }
 
     int video_fd;
     int media_fd;
     const uint32_t capabilities;
     const v4l2_buf_type capture_buf_type;
     const v4l2_buf_type output_buf_type;
-    v4l2_format capture_format;
-    v4l2_format output_format;
+    v4l2_format capture_format = {};
+    v4l2_format output_format = {};
     std::set<fourcc> supported_output_formats;
     std::set<fourcc> supported_capture_formats;
 
     bool output_streaming = false;
     bool capture_streaming = false;
     bool last_dequeued_was_last = false;
+    bool last_dequeued_error_ = false;
+    uint32_t last_dequeued_flags_ = 0;
+    timeval last_dequeued_timestamp_ = {};
 
 private:
     std::vector<Buffer> capture_buffers;

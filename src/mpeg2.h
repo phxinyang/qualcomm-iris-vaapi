@@ -45,7 +45,11 @@ public:
 
     MPEG2Context(DriverData* driver_data, V4L2M2MDevice& device, int picture_width, int picture_height,
         std::span<VASurfaceID> surface_ids)
-        : Context(driver_data, device, V4L2_PIX_FMT_MPEG2_SLICE, picture_width, picture_height, surface_ids) {};
+        : Context(driver_data, device, V4L2_PIX_FMT_MPEG2_SLICE, picture_width, picture_height, surface_ids)
+    {
+        if (!surface_ids.empty())
+            initialize(surface_ids);
+    }
     VAStatus store_buffer(const Buffer& buffer) const override;
     int set_controls() override;
 };

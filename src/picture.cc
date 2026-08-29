@@ -93,11 +93,12 @@ VAStatus beginPicture(VADriverContextP va_context, VAContextID context_id, VASur
     }
 
     if (surface.status == VASurfaceRendering) {
-        // Chromium may recycle a VA surface without an explicit vaSyncSurface
-        // call. Reap the corresponding V4L2 CAPTURE buffer before declaring it
-        // busy, otherwise the surface pool deadlocks after the first GOP.
-        if (syncSurface(va_context, surface_id) != VA_STATUS_SUCCESS
-            || surface.status == VASurfaceRendering)
+        // A Surface owns one input bitstream scratch area. It cannot safely be
+        // reused while the previous picture is still in flight: appending the
+        // next AU would retain the previous AU's bytes and eventually make the
+        // stateful OUTPUT batch invalid. Reap the completed CAPTURE frame
+        // before accepting a new picture for either V4L2 mode.
+        if (syncSurface(va_context, surface_id) != VA_STATUS_SUCCESS || surface.status == VASurfaceRendering)
             return VA_STATUS_ERROR_SURFACE_BUSY;
     }
 
@@ -178,7 +179,10 @@ VAStatus endPicture(VADriverContextP va_context, VAContextID context_id)
         char path[96];
         std::snprintf(path, sizeof(path), "/tmp/va-au-%u.h264", render_surface_id);
         if (FILE* file = std::fopen(path, "wb")) {
-            std::fwrite(surface.source_buffer->get().mapping()[0].data(), 1, surface.source_size_used, file);
+            const uint8_t* dump_src = context.uses_stateful_streaming()
+                ? surface.stateful_bitstream.data()
+                : surface.source_buffer->get().mapping()[0].data();
+            std::fwrite(dump_src, 1, surface.source_size_used, file);
             std::fclose(file);
         }
     }

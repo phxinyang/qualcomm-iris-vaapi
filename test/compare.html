@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>硬解 / 软件解码对比</title>
+<style>
+  :root { color-scheme: dark; font: 16px sans-serif; }
+  body { margin: 0; background: #101419; color: #f5f7fa; }
+  header { padding: 12px 18px; background: #1c242d; border-bottom: 1px solid #36424f; }
+  h1 { margin: 0; font-size: 22px; }
+  .mode { color: #84d8a4; font-size: 14px; margin-top: 4px; }
+  video { display: block; width: min(100vw, 960px); height: auto; background: #000; }
+</style>
+<header>
+  <h1 id="title">解码对比</h1>
+  <div class="mode" id="mode"></div>
+</header>
+<video id="v" controls autoplay muted playsinline preload="auto" width="960"
+  src="../Big_Buck_Bunny_1080p_30sec.mp4"></video>
+<script>
+const params = new URLSearchParams(location.search);
+const hardware = params.get('mode') === 'hardware';
+document.title = hardware ? '硬解 VA-API' : '软件解码';
+document.getElementById('title').textContent = hardware ? '硬解 VA-API' : '软件解码';
+document.getElementById('mode').textContent = hardware
+  ? 'Qualcomm Iris / V4L2 VA-API / /dev/video0'
+  : 'Chrome FFmpegVideoDecoder';
+const video = document.getElementById('v');
+video.loop = params.get('loop') === '1';
+video.play().catch(() => {});
+</script>

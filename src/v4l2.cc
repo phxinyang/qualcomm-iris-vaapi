@@ -224,12 +224,15 @@ void V4L2M2MDevice::Buffer::queue(int request_fd, timeval* timestamp, unsigned s
         .m = { .planes = planes },
         .length = static_cast<uint32_t>(mapping_.size()),
     };
+    // Native Iris clients submit both queues with FIELD_NONE. FIELD_ANY is
+    // accepted for the initial CAPTURE QBUF but can make a later buffer fail
+    // validation in the firmware.
+    buffer.field = V4L2_FIELD_NONE;
 
     if (V4L2_TYPE_IS_MULTIPLANAR(type_)) {
         for (unsigned i = 0; i < mapping_.size(); i++) {
-            // MMAP QBUF must always carry the mapped plane length. Iris also
-            // validates this before CAPTURE STREAMON, so leaving it zero on
-            // the initial (not-yet-streaming) capture queue prevents output.
+            // MMAP QBUF carries the mapped plane length; bytesused carries the
+            // compressed payload size for OUTPUT and is zero for CAPTURE.
             buffer.m.planes[i].length = mapping_[i].size();
             buffer.m.planes[i].bytesused = size;
         }
@@ -322,6 +325,9 @@ V4L2M2MDevice::V4L2M2MDevice(V4L2M2MDevice&& other)
     , output_streaming(other.output_streaming)
     , capture_streaming(other.capture_streaming)
     , last_dequeued_was_last(other.last_dequeued_was_last)
+    , last_dequeued_error_(other.last_dequeued_error_)
+    , last_dequeued_flags_(other.last_dequeued_flags_)
+    , last_dequeued_timestamp_(other.last_dequeued_timestamp_)
 {
     other.capture_buffers.clear();
     other.output_buffers.clear();
@@ -330,6 +336,9 @@ V4L2M2MDevice::V4L2M2MDevice(V4L2M2MDevice&& other)
     other.output_streaming = false;
     other.capture_streaming = false;
     other.last_dequeued_was_last = false;
+    other.last_dequeued_error_ = false;
+    other.last_dequeued_flags_ = 0;
+    other.last_dequeued_timestamp_ = {};
 }
 
 V4L2M2MDevice& V4L2M2MDevice::operator=(V4L2M2MDevice&& other)
@@ -374,14 +383,6 @@ void V4L2M2MDevice::set_format(v4l2_buf_type type, unsigned int pixelformat, uns
         format->fmt.pix_mp.plane_fmt[0].sizeimage = SOURCE_SIZE_MAX;
 
     errno_wrapper(ioctl, video_fd, VIDIOC_S_FMT, format);
-}
-
-void V4L2M2MDevice::refresh_capture_format()
-{
-    // After a V4L2_EVENT_SRC_CH_RESOLUTION event the driver has already
-    // selected the final CAPTURE geometry (e.g. padded 640x384). Re-read it
-    // so start_capture() renegotiates the pool with the correct size.
-    capture_format = get_format(video_fd, capture_buf_type);
 }
 
 unsigned V4L2M2MDevice::request_buffers(v4l2_buf_type type, unsigned count)
@@ -507,12 +508,16 @@ void V4L2M2MDevice::subscribe_source_change()
 void V4L2M2MDevice::decoder_stop()
 {
     v4l2_decoder_cmd command = { .cmd = V4L2_DEC_CMD_STOP };
+    if (std::getenv("V4L2_VA_TRACE"))
+        std::fprintf(stderr, "v4l2 decoder STOP\n");
     errno_wrapper(ioctl, video_fd, VIDIOC_DECODER_CMD, &command);
 }
 
 void V4L2M2MDevice::decoder_start()
 {
     v4l2_decoder_cmd command = { .cmd = V4L2_DEC_CMD_START };
+    if (std::getenv("V4L2_VA_TRACE"))
+        std::fprintf(stderr, "v4l2 decoder START\n");
     errno_wrapper(ioctl, video_fd, VIDIOC_DECODER_CMD, &command);
 }
 
@@ -523,11 +528,15 @@ bool V4L2M2MDevice::wait_for_source_change(int timeout_ms)
         .events = POLLPRI,
     };
     const int result = poll(&pollfd, 1, timeout_ms);
+    if (std::getenv("V4L2_VA_TRACE"))
+        std::fprintf(stderr, "v4l2 source poll timeout=%d result=%d revents=0x%x\n", timeout_ms, result, pollfd.revents);
     if (result <= 0 || !(pollfd.revents & POLLPRI))
         return false;
 
     v4l2_event event = {};
     while (ioctl(video_fd, VIDIOC_DQEVENT, &event) == 0) {
+        if (std::getenv("V4L2_VA_TRACE"))
+            std::fprintf(stderr, "v4l2 event type=%u changes=0x%x\n", event.type, event.u.src_change.changes);
         if (event.type == V4L2_EVENT_SOURCE_CHANGE
             && (event.u.src_change.changes & V4L2_EVENT_SRC_CH_RESOLUTION)) {
             return true;
@@ -539,6 +548,9 @@ bool V4L2M2MDevice::wait_for_source_change(int timeout_ms)
 std::optional<unsigned> V4L2M2MDevice::dequeue_ready(v4l2_buf_type type, int timeout_ms)
 {
     last_dequeued_was_last = false;
+    last_dequeued_error_ = false;
+    last_dequeued_flags_ = 0;
+    last_dequeued_timestamp_ = {};
     pollfd pollfd = {
         .fd = video_fd,
         .events = V4L2_TYPE_IS_CAPTURE(type) ? POLLIN : POLLOUT,
@@ -564,11 +576,20 @@ std::optional<unsigned> V4L2M2MDevice::dequeue_ready(v4l2_buf_type type, int tim
             return std::nullopt;
         throw std::system_error(errno, std::generic_category());
     }
-    if (buffer.flags & V4L2_BUF_FLAG_ERROR)
-        throw std::runtime_error("Dequeued buffer marked erroneous by driver.");
+    last_dequeued_error_ = (buffer.flags & V4L2_BUF_FLAG_ERROR) != 0;
+    last_dequeued_flags_ = buffer.flags;
+    if (last_dequeued_error_) {
+        if (std::getenv("V4L2_VA_TRACE"))
+            std::fprintf(stderr, "v4l2 dq ERROR type=%u index=%u flags=0x%x last=%d ts=%lld.%06ld seq=%u\n", type,
+                buffer.index, buffer.flags, (buffer.flags & V4L2_BUF_FLAG_LAST) != 0,
+                static_cast<long long>(buffer.timestamp.tv_sec), static_cast<long>(buffer.timestamp.tv_usec),
+                buffer.sequence);
+    }
+    last_dequeued_timestamp_ = buffer.timestamp;
     last_dequeued_was_last = (buffer.flags & V4L2_BUF_FLAG_LAST) != 0;
     if (std::getenv("V4L2_VA_TRACE"))
-        std::fprintf(stderr, "v4l2 dq type=%u index=%u flags=0x%x last=%d\\n", type, buffer.index,
-            buffer.flags, last_dequeued_was_last);
+        std::fprintf(stderr, "v4l2 dq type=%u index=%u flags=0x%x last=%d ts=%lld.%06ld seq=%u\\n", type,
+            buffer.index, buffer.flags, last_dequeued_was_last, static_cast<long long>(buffer.timestamp.tv_sec),
+            static_cast<long>(buffer.timestamp.tv_usec), buffer.sequence);
     return buffer.index;
 }

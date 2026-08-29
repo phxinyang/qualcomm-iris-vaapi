@@ -63,10 +63,17 @@ VAStatus copy_surface_to_image(DriverData* driver_data, const Surface& surface, 
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
     for (i = 0; i < surface.logical_destination_layout.size(); i++) {
-        const auto& mapping = surface.destination_buffer->get().mapping();
-
-        const auto source = mapping[surface.logical_destination_layout[i].physical_plane_index].data()
-            + surface.logical_destination_layout[i].offset;
+        const uint8_t* source = nullptr;
+        if (surface.export_buffer_mapping && i < surface.export_plane_offsets.size()) {
+            source = static_cast<const uint8_t*>(surface.export_buffer_mapping)
+                + surface.export_plane_offsets[i];
+        } else if (surface.destination_buffer) {
+            const auto& mapping = surface.destination_buffer->get().mapping();
+            source = mapping[surface.logical_destination_layout[i].physical_plane_index].data()
+                + surface.logical_destination_layout[i].offset;
+        } else {
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        }
         const auto dest = buffer.data.get() + image->offsets[i];
 
         // Image planes may be smaller than buffer due to decoding blocks
@@ -159,8 +166,9 @@ VAStatus deriveImage(VADriverContextP context, VASurfaceID surface_id, VAImage* 
     }
     auto& surface = driver_data->surfaces.at(surface_id);
 
-    // Attempt to derive image from uninitialized surface
-    if (!surface.destination_buffer) {
+    // Attempt to derive image from an uninitialized surface. A stateful
+    // surface may have only its stable export backing after CAPTURE recycling.
+    if (!surface.destination_buffer && !surface.export_buffer_mapping) {
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
 

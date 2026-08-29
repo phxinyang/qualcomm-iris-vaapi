@@ -28,6 +28,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 
 extern "C" {
@@ -36,11 +37,15 @@ extern "C" {
 }
 
 struct Buffer {
+    struct FreeDeleter {
+        void operator()(uint8_t* pointer) const noexcept { std::free(pointer); }
+    };
+
     Buffer(VABufferType type, unsigned count, unsigned size, VASurfaceID derived_surface_id);
 
     VABufferType type;
     unsigned count;
-    std::unique_ptr<uint8_t> data;
+    std::unique_ptr<uint8_t, FreeDeleter> data;
     unsigned int size;
     VASurfaceID derived_surface_id;
     VABufferInfo info;

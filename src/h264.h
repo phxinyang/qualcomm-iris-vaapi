@@ -67,10 +67,13 @@ public:
     int set_controls() override;
     bool uses_request_api() const override { return !stateful; }
     bool uses_stateful_streaming() const override { return stateful; }
+    bool stateful_sequence_start(VASurfaceID surface_id) override;
     bool prepend_parameter_sets(Surface& surface) const;
 
     uint8_t profile;
     bool stateful;
     struct h264_dpb dpb;
     v4l2_stateless_h264_decode_mode mode;
+    bool stateful_seen_frame = false;
+    unsigned stateful_last_frame_num = 0;
 };

@@ -1,0 +1,9 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Iris H.264 test - Big Buck Bunny 30s</title>
+<video id="v" controls autoplay muted playsinline preload="auto" width="960" src="../Big_Buck_Bunny_1080p_30sec.mp4"></video>
+<script>
+const video = document.getElementById('v');
+video.loop = new URLSearchParams(location.search).get('loop') === '1';
+video.play().catch(() => {});
+</script>

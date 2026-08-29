@@ -28,6 +28,7 @@
 #pragma once
 
 #include <functional>
+#include <cstddef>
 #include <optional>
 #include <span>
 #include <vector>
@@ -57,10 +58,22 @@ struct Surface {
     // in private scratch storage until Context batches it into one OUTPUT
     // buffer.
     std::vector<uint8_t> stateful_bitstream;
+    // VA submits pictures in decode order while Iris returns CAPTURE in
+    // display order. Retain the VA coding type for capture association.
+    unsigned stateful_frame_type = 255; // 0=P, 1=B, 2=I/IDR, 255=unknown
 
     std::optional<std::reference_wrapper<const V4L2M2MDevice::Buffer>> destination_buffer;
     unsigned destination_buffer_index;
     bool destination_buffer_queued;
+    // Stateful Iris returns a rotating CAPTURE index. Keep the browser-facing
+    // VA export on a private, stable DMA-BUF and publish completed frames into
+    // it before returning the CAPTURE slot to the decoder.
+    int export_buffer_fd = -1;
+    void* export_buffer_mapping = nullptr;
+    size_t export_buffer_size = 0;
+    std::vector<unsigned> export_plane_offsets;
+    std::vector<uint8_t> pending_frame;
+    bool pending_frame_ready = false;
     BufferLayout logical_destination_layout;
     uint32_t format;
 
@@ -91,6 +104,12 @@ struct Surface {
 
     int request_fd;
 };
+
+bool ensure_stateful_bitstream_capacity(Surface& surface, size_t required);
+bool stage_surface_frame(Surface& surface, const V4L2M2MDevice::Buffer& capture);
+bool publish_surface_frame(Surface& surface);
+void copy_surface_frame(Surface& surface, const V4L2M2MDevice::Buffer& capture);
+bool copy_surfaces_enabled();
 
 void createSurfacesDeferred(
     DriverData* driver_data, const Context& context, std::span<VASurfaceID> surface_ids, unsigned buffer_count);
