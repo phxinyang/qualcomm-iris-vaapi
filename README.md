@@ -56,6 +56,13 @@ OUTPUT AU. A frame that arrives after its surface was dropped is discarded and
 the CAPTURE slot is requeued; binding it to the nearest live timestamp causes
 old frames to flash in a newer surface and shifts the rest of the stream.
 
+Chrome does not issue a VA call that marks end-of-stream after its final access
+unit. On Iris, enable the opt-in idle drain for this browser path with
+`V4L2_VA_EOS_DRAIN=1`; the default 400 ms threshold is based on measured
+Chrome batch gaps and can be tuned with `V4L2_VA_EOS_IDLE_MS=10..5000`.
+Keep the watchdog opt-in for applications/codecs with longer startup gaps, such
+as the HEVC path; regular VA clients still drain synchronously at teardown.
+
 Note that some applications need further configuration to load the library.
 In particular, gstreamer based applications have a whitelist for supported drivers, that can be disabled manually (`GST_VAAPI_ALL_DRIVERS=1`).
 
