@@ -184,3 +184,28 @@ The reusable `test/iris-structure-matrix.sh` was run on the same `/dev/video0`
 with 640x360/48-frame inputs. Its all-I, IP-only, B=2 and B=4 cases all passed
 48/48 frames with exact software MD5, zero timestamp misses and zero bounded
 sync timeouts.
+
+## Latest follow-up (2026-08-30, `test/iris-stateful-followup`)
+
+Target: Fedora ARM64 tablet `192.168.3.133`, Snapdragon SM8550, Iris decoder
+`/dev/video0`; driver built in
+`/home/xinyang/Lab/Bridge/tmp/trash/iris-restore-20260830/build/src`.
+
+- Stateful Chrome EOS drain is opt-in with `V4L2_VA_EOS_DRAIN=1`. The default
+  idle threshold is 400ms, based on the measured 325ms maximum normal batch gap
+  and the 458ms stale-tail onset. A 30s H.264 run reached `ended=true` with
+  72/72 tail frames and zero repeated hashes; the trace had one STOP/LAST/START,
+  zero timeouts and zero timestamp misses.
+- A 115s `loop=true` Chrome probe crossed three 30s loop seeks with 2741 frame
+  callbacks, zero gaps over 200ms, zero dropped frames and no trace timeout or
+  timestamp miss.
+- The standard 48-frame VA matrix passed H.264, VP9 and HEVC with exact software
+  framemd5 equality. Each had 48 OUTPUT, 49 CAPTURE, one terminal LAST, and no
+  capture errors, timeouts or timestamp misses. Native AV1 reached GStreamer
+  EOS; VA AV1 remains skipped because the VA tile payload lacks Iris' required
+  complete OBU temporal unit.
+- The H.264 structure matrix (all-I, IP/GOP12, B=2, B=4) passed 48/48 with exact
+  software MD5. HEVC with `V4L2_VA_SYNC_TIMEOUT_MS=100` also passed 48/48 and
+  strict EOS with one recovery STOP/START pair.
+- Enabling the optional EOS watchdog for every codec is intentionally not the
+  default: a diagnostic run caused HEVC to drain during its normal startup gap.
