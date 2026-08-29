@@ -196,6 +196,10 @@ Target: Fedora ARM64 tablet `192.168.3.133`, Snapdragon SM8550, Iris decoder
   and the 458ms stale-tail onset. A 30s H.264 run reached `ended=true` with
   72/72 tail frames and zero repeated hashes; the trace had one STOP/LAST/START,
   zero timeouts and zero timestamp misses.
+- The drain implementation now waits for trailing OUTPUT DQBUF after the
+  terminal CAPTURE LAST marker before issuing START, as required by the Linux
+  stateful V4L2 contract. The post-change `matrix-general-followup` repeated
+  the H.264, VP9 and HEVC checks with no regressions.
 - A 115s `loop=true` Chrome probe crossed three 30s loop seeks with 2741 frame
   callbacks, zero gaps over 200ms, zero dropped frames and no trace timeout or
   timestamp miss.
