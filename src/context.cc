@@ -917,7 +917,10 @@ int stateful_eos_idle_ms()
         if (end != value && *end == '\0' && parsed >= 10 && parsed <= 5000)
             return static_cast<int>(parsed);
     }
-    return 120;
+    // Claude's trace measured normal Chrome batch gaps up to ~325 ms and the
+    // stale tail beginning around ~458 ms after the last submission. Keep the
+    // default between those observations; callers can tune it explicitly.
+    return 400;
 }
 
 bool stateful_eos_drain_enabled()
