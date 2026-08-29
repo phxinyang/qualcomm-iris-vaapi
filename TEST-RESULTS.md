@@ -231,5 +231,6 @@ queue handling used by reference clients:
 - GStreamer V4L2 decoder: <https://github.com/GStreamer/gst-plugins-good/blob/master/sys/v4l2/gstv4l2videodec.c>
 
 This follow-up is recorded on branch `test/iris-stateful-followup` in commits
-`95de0d4` (state-machine safety and source guards) and `0288082` (generic
-documentation and tablet validation results).
+`95de0d4` (state-machine safety), `e753088` (watchdog/source guards),
+`0288082` and `c2f1211` (generic client documentation), and `cafa6b9`
+(generic trace-checker arguments).
