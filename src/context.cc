@@ -832,7 +832,7 @@ void Context::drain_stateful_decoder()
                 continue;
 
             auto completed = surface_for_timestamp(device.last_dequeued_timestamp(), device.last_dequeued_flags());
-            const bool capture_last = device.last_dequeued_last();
+            const bool capture_was_last = device.last_dequeued_last();
             if (completed && driver_data->surfaces.contains(*completed)) {
                 auto& surface = driver_data->surfaces.at(*completed);
                 copy_surface_frame(surface, device.buffer(device.capture_buf_type, *capture_index));
@@ -847,7 +847,7 @@ void Context::drain_stateful_decoder()
             while (auto output_index = device.dequeue_ready(device.output_buf_type, 0))
                 mark_source_buffer_dequeued(*output_index);
 
-            if (capture_last) {
+            if (capture_was_last) {
                 saw_last = true;
                 stateful_last_marker_seen = true;
                 break;
