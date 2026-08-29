@@ -229,3 +229,7 @@ queue handling used by reference clients:
 - Linux V4L2 stateful decoder drain: <https://www.kernel.org/doc/html/v6.4/userspace-api/media/v4l/dev-decoder.html>
 - Chromium stateful V4L2 client: <https://chromium.googlesource.com/chromium/src/+/a576d2ae67f9a89b4ac118460c7e4e4763f8c22a/media/gpu/v4l2/v4l2_stateful_video_decoder.cc>
 - GStreamer V4L2 decoder: <https://github.com/GStreamer/gst-plugins-good/blob/master/sys/v4l2/gstv4l2videodec.c>
+
+This follow-up is recorded on branch `test/iris-stateful-followup` in commits
+`95de0d4` (state-machine safety and source guards) and `0288082` (generic
+documentation and tablet validation results).
