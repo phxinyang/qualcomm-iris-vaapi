@@ -55,3 +55,4 @@ struct Format {
 
 extern const std::array<Format, 2> formats;
 const Format& lookup_format(fourcc v4l2_fourcc);
+void adjust_capture_layout(BufferLayout& layout, const v4l2_pix_format_mplane& format);

@@ -33,6 +33,7 @@
 #include <climits>
 #include <cstring>
 #include <ctime>
+#include <limits>
 #include <vector>
 
 extern "C" {
@@ -600,6 +601,14 @@ H264Context::H264Context(DriverData* driver_data, V4L2M2MDevice& device, VAProfi
         initialize(surface_ids);
 }
 
+unsigned H264Context::stateful_frame_type(VASurfaceID surface_id) const
+{
+    if (!stateful || !driver_data->surfaces.contains(surface_id))
+        return 255;
+    const auto* slice = driver_data->surfaces.at(surface_id).params.h264.slice;
+    return slice ? slice->slice_type % 5 : 255;
+}
+
 bool H264Context::stateful_sequence_start(VASurfaceID surface_id)
 {
     if (!stateful || !driver_data->surfaces.contains(surface_id))
@@ -653,10 +662,9 @@ bool H264Context::stateful_sequence_start(VASurfaceID surface_id)
         }
         std::fprintf(stderr, "\\n");
     }
-    // Chromium's VA parser supplies the slice payload without the original
-    // IDR NAL header (the AU appears as SPS/PPS + type-1). The first picture
-    // of a new random-access sequence is still distinguishable in VA's
-    // metadata: an I slice with frame_num and POC reset to zero. A normal
+    // The first picture of a new random-access sequence is distinguishable in
+    // VA metadata even when the application omits an IDR NAL from the slice
+    // payload: an I slice with frame_num and POC reset to zero. A normal
     // frame_num wrap does not reset POC, so it is not treated as a restart.
     const bool metadata_start = slice_type == 2 && frame_num == 0 && poc == 0;
     const bool restart = stateful_seen_frame && (idr || metadata_start);
@@ -719,9 +727,11 @@ bool H264Context::prepend_parameter_sets(Surface& surface) const
             surface.params.h264.picture->CurrPic.TopFieldOrderCnt,
             surface.params.h264.picture->CurrPic.BottomFieldOrderCnt,
             surface.params.h264.picture->pic_fields.bits.reference_pic_flag);
+    const size_t required = sps.size() + pps.size();
+    if (stateful && !ensure_stateful_bitstream_capacity(surface, required))
+        return false;
     auto source_data = stateful ? std::span<uint8_t>(surface.stateful_bitstream)
                                 : surface.source_buffer->get().mapping()[0];
-    const size_t required = sps.size() + pps.size();
     if (required > source_data.size())
         return false;
     memcpy(source_data.data(), sps.data(), sps.size());
@@ -738,37 +748,37 @@ VAStatus H264Context::store_buffer(const Buffer& buffer) const
         std::fprintf(stderr, "h264 store type=%u size=%u count=%u before=%u cap=%zu stateful=%d\\n", buffer.type,
             buffer.size, buffer.count, surface.source_size_used, surface.stateful_bitstream.size(), stateful);
 
-    auto source_data = stateful ? std::span<uint8_t>(surface.stateful_bitstream)
-                                : surface.source_buffer->get().mapping()[0];
     switch (buffer.type) {
-    case VASliceDataBufferType:
-        if (std::getenv("V4L2_VA_TRACE")) {
-            std::fprintf(stderr, "h264 slice bytes");
-            const auto* bytes = static_cast<const uint8_t*>(buffer.data.get());
-            const auto count = std::min<size_t>(buffer.size * buffer.count, 12);
-            for (size_t i = 0; i < count; i++)
-                std::fprintf(stderr, " %02x", bytes[i]);
-            std::fprintf(stderr, "\n");
-        }
+    case VASliceDataBufferType: {
         if (stateful && !prepend_parameter_sets(surface)) {
             if (std::getenv("V4L2_VA_TRACE"))
                 std::fprintf(stderr, "h264 store prepend failed\\n");
             return VA_STATUS_ERROR_NOT_ENOUGH_BUFFER;
         }
 
-        if (stateful || mode == static_cast<v4l2_stateless_h264_decode_mode>(V4L2_STATELESS_H264_DECODE_MODE_FRAME_BASED)) {
-            surface.source_size_used = std::ranges::copy(std::initializer_list<uint8_t>{0, 0, 1}, source_data.data() + surface.source_size_used).out - source_data.data();
-        }
-
-        if (surface.source_size_used + buffer.size * buffer.count > source_data.size()) {
+        const size_t bytes = static_cast<size_t>(buffer.size) * buffer.count;
+        const size_t prefix = (stateful || mode == static_cast<v4l2_stateless_h264_decode_mode>(V4L2_STATELESS_H264_DECODE_MODE_FRAME_BASED)) ? 3 : 0;
+        if (surface.source_size_used > std::numeric_limits<size_t>::max() - prefix
+            || surface.source_size_used + prefix > std::numeric_limits<size_t>::max() - bytes)
+            return VA_STATUS_ERROR_NOT_ENOUGH_BUFFER;
+        const size_t required = surface.source_size_used + prefix + bytes;
+        if (stateful && !ensure_stateful_bitstream_capacity(surface, required))
+            return VA_STATUS_ERROR_NOT_ENOUGH_BUFFER;
+        auto source_data = stateful ? std::span<uint8_t>(surface.stateful_bitstream)
+                                    : surface.source_buffer->get().mapping()[0];
+        if (required > source_data.size()) {
             if (std::getenv("V4L2_VA_TRACE"))
                 std::fprintf(stderr, "h264 store data overflow before=%u add=%u cap=%zu\\n", surface.source_size_used,
                     buffer.size * buffer.count, source_data.size());
             return VA_STATUS_ERROR_NOT_ENOUGH_BUFFER;
         }
-        memcpy(source_data.data() + surface.source_size_used, buffer.data.get(), buffer.size * buffer.count);
-        surface.source_size_used += buffer.size * buffer.count;
+        if (prefix != 0)
+            std::ranges::copy(std::initializer_list<uint8_t>{0, 0, 1}, source_data.data() + surface.source_size_used);
+        surface.source_size_used += prefix;
+        memcpy(source_data.data() + surface.source_size_used, buffer.data.get(), bytes);
+        surface.source_size_used += bytes;
         break;
+    }
 
     case VAPictureParameterBufferType:
         surface.params.h264.picture = reinterpret_cast<VAPictureParameterBufferH264*>(buffer.data.get());

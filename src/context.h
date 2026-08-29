@@ -34,6 +34,7 @@
 #include <optional>
 #include <cstddef>
 #include <deque>
+#include <mutex>
 
 extern "C" {
 #include <va/va_backend.h>
@@ -44,11 +45,16 @@ extern "C" {
 
 struct DriverData;
 
+// Stateful capture normally keeps the complete CAPTURE pool queued. The
+// optional scheduled mode is deliberately opt-in because it can starve
+// firmware reorder/flush paths when a surface is not yet associated.
+bool stateful_capture_scheduled();
+
 class Context {
 public:
     static Context* create(DriverData* driver_data, VAProfile profile, int picture_width, int picture_height,
         std::span<VASurfaceID> surface_ids);
-    static std::set<VAProfile> supported_profiles(const std::vector<V4L2M2MDevice>& devices);
+    static std::set<VAProfile> supported_profiles(const std::deque<V4L2M2MDevice>& devices);
 
     Context(DriverData* driver_data, V4L2M2MDevice& device, fourcc pixelformat, int picture_width, int picture_height,
         std::span<VASurfaceID> surface_ids);
@@ -62,25 +68,34 @@ public:
     // CAPTURE/OUTPUT buffers before claiming another OUTPUT slot.
     void service_stateful_queues();
     void discard_stateful_error_frame();
+    void remove_stateful_batch_order(unsigned index);
     void mark_source_buffer_dequeued(unsigned index);
     bool has_pending_stateful_batch() const { return !stateful_pending.empty(); }
     bool capture_draining() const { return stateful_draining; }
     bool has_queued_stateful_output() const;
+    // Permit at most one HEVC timeout recovery after enough history has been
+    // submitted to distinguish a startup delay from a trailing reorder.
+    bool try_begin_stateful_timeout_recovery();
+    void reset_stateful_timeout_recovery() { stateful_timeout_recovery_used = false; }
     void discard_stateful_surface(VASurfaceID surface_id);
     bool has_stateful_history() const { return stateful_submitted_count != 0; }
+    unsigned stateful_submitted_frames() const { return stateful_submitted_count; }
+    unsigned stateful_completed_frames() const { return stateful_completed_count; }
     void reset_stateful_decoder();
-    // Flush the firmware reorder queue before STREAMOFF. Stateful V4L2
-    // STREAMOFF discards any frames still held in the decoder DPB.
     void drain_stateful_decoder();
     void resume_after_drain();
     bool initialized() const { return queues_initialized; }
     bool capture_started() const { return capture_initialized; }
+    std::recursive_mutex& synchronization_mutex() const { return synchronization_mutex_; }
     bool bind_surface(VASurfaceID surface_id);
     void begin_surface(VASurfaceID surface_id);
     void end_surface();
     VASurfaceID current_surface() const;
     std::optional<VASurfaceID> surface_for_buffer(v4l2_buf_type type, unsigned index) const;
-    std::optional<VASurfaceID> surface_for_timestamp(const timeval& timestamp, uint32_t capture_flags = 0);
+    // Copy the timestamp before matching. V4L2 DQBUF updates the device's
+    // scratch timestamp on every dequeue, and callers may service another
+    // queue while resolving the current CAPTURE buffer.
+    std::optional<VASurfaceID> surface_for_timestamp(timeval timestamp, uint32_t capture_flags = 0);
     std::optional<VASurfaceID> surface_for_capture_flags(uint32_t capture_flags);
 
     virtual VAStatus store_buffer(const Buffer& buffer) const = 0;
@@ -90,6 +105,8 @@ public:
     // request before queueing it.
     virtual bool uses_request_api() const { return true; }
     virtual bool uses_stateful_streaming() const { return false; }
+    virtual bool stateful_timeout_drain() const { return uses_stateful_streaming(); }
+    virtual unsigned stateful_frame_type(VASurfaceID) const { return 255; }
     virtual bool stateful_sequence_start(VASurfaceID) { return false; }
 
     int picture_width;
@@ -116,9 +133,12 @@ private:
     size_t stateful_pending_size = 0;
     bool stateful_draining = false;
     unsigned stateful_submitted_count = 0;
+    unsigned stateful_completed_count = 0;
     bool stateful_last_marker_seen = false;
+    bool stateful_timeout_recovery_used = false;
     bool stateful_queue_restart_pending = false;
     timeval stateful_last_timestamp = {};
+    mutable std::recursive_mutex synchronization_mutex_;
 };
 
 VAStatus createContext(VADriverContextP va_context, VAConfigID config_id, int picture_width, int picture_height,

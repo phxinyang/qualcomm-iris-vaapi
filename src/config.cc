@@ -49,6 +49,8 @@ VAStatus createConfig(VADriverContextP context, VAProfile profile, VAEntrypoint 
     auto driver_data = static_cast<DriverData*>(context->pDriverData);
     int i, index;
 
+    std::lock_guard<std::recursive_mutex> guard(driver_data->mutex);
+
     const auto& supported = Context::supported_profiles(driver_data->devices);
     if (std::ranges::find(supported, profile) == supported.end()) {
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
@@ -61,7 +63,6 @@ VAStatus createConfig(VADriverContextP context, VAProfile profile, VAEntrypoint 
         attributes_count = Config::max_attributes;
     }
 
-    std::lock_guard<std::mutex> guard(driver_data->mutex);
     *config_id = smallest_free_key(driver_data->configs);
     auto [config, inserted] = driver_data->configs.emplace(std::make_pair(*config_id,
         Config {
@@ -87,7 +88,7 @@ VAStatus destroyConfig(VADriverContextP context, VAConfigID config_id)
 {
     auto driver_data = static_cast<DriverData*>(context->pDriverData);
 
-    std::lock_guard<std::mutex> guard(driver_data->mutex);
+    std::lock_guard<std::recursive_mutex> guard(driver_data->mutex);
     if (!driver_data->configs.erase(config_id)) {
         return VA_STATUS_ERROR_INVALID_CONFIG;
     }
@@ -98,6 +99,8 @@ VAStatus destroyConfig(VADriverContextP context, VAConfigID config_id)
 VAStatus queryConfigProfiles(VADriverContextP context, VAProfile* profiles_, int* profile_count)
 {
     auto driver_data = static_cast<DriverData*>(context->pDriverData);
+
+    std::lock_guard<std::recursive_mutex> guard(driver_data->mutex);
 
     std::span<VAProfile> profiles(profiles_, V4L2_MAX_PROFILES);
     const auto& supported = Context::supported_profiles(driver_data->devices);
@@ -113,6 +116,7 @@ VAStatus queryConfigEntrypoints(
     VADriverContextP context, VAProfile profile, VAEntrypoint* entrypoints, int* entrypoints_count)
 {
     auto driver_data = static_cast<DriverData*>(context->pDriverData);
+    std::lock_guard<std::recursive_mutex> guard(driver_data->mutex);
     const auto& supported = Context::supported_profiles(driver_data->devices);
     if (std::ranges::find(supported, profile) != supported.end()) {
         entrypoints[0] = VAEntrypointVLD;
@@ -128,6 +132,8 @@ VAStatus queryConfigAttributes(VADriverContextP context, VAConfigID config_id, V
     VAEntrypoint* entrypoint, VAConfigAttrib* attributes, int* attributes_count)
 {
     auto driver_data = static_cast<DriverData*>(context->pDriverData);
+
+    std::lock_guard<std::recursive_mutex> guard(driver_data->mutex);
 
     if (!driver_data->configs.contains(config_id)) {
         return VA_STATUS_ERROR_INVALID_CONFIG;

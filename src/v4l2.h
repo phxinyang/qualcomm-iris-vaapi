@@ -41,6 +41,10 @@ extern "C" {
 using fourcc = uint32_t;
 
 class V4L2M2MDevice {
+private:
+    std::string video_path_;
+    std::optional<std::string> media_path_;
+
 public:
     class Buffer {
     public:
@@ -76,6 +80,9 @@ public:
     V4L2M2MDevice(V4L2M2MDevice&& other);
     V4L2M2MDevice& operator=(V4L2M2MDevice&& other);
     ~V4L2M2MDevice();
+    // Open an independent V4L2 fd for a new VA context while retaining the
+    // same capability probe and device selection.
+    V4L2M2MDevice clone_for_context() const;
     void set_format(enum v4l2_buf_type type, unsigned int pixelformat, unsigned int width, unsigned int height);
     unsigned request_buffers(enum v4l2_buf_type type, unsigned count);
     bool format_supported(v4l2_buf_type type, unsigned pixelformat) const;
@@ -108,6 +115,11 @@ public:
     std::set<fourcc> supported_output_formats;
     std::set<fourcc> supported_capture_formats;
 
+private:
+    std::vector<Buffer> capture_buffers;
+    std::vector<Buffer> output_buffers;
+
+public:
     bool output_streaming = false;
     bool capture_streaming = false;
     bool last_dequeued_was_last = false;
@@ -115,7 +127,4 @@ public:
     uint32_t last_dequeued_flags_ = 0;
     timeval last_dequeued_timestamp_ = {};
 
-private:
-    std::vector<Buffer> capture_buffers;
-    std::vector<Buffer> output_buffers;
 };

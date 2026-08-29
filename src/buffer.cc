@@ -77,7 +77,7 @@ VAStatus createBuffer(VADriverContextP context, VAContextID context_id, VABuffer
         return VA_STATUS_ERROR_UNSUPPORTED_BUFFERTYPE;
     }
 
-    std::lock_guard<std::mutex> guard(driver_data->mutex);
+    std::lock_guard<std::recursive_mutex> guard(driver_data->mutex);
     *buffer_id = smallest_free_key(driver_data->buffers);
     auto [buffer, inserted] = driver_data->buffers.emplace(std::make_pair(*buffer_id, Buffer(type, count, size)));
     if (!inserted || !buffer->second.data) {
@@ -95,7 +95,7 @@ VAStatus destroyBuffer(VADriverContextP context, VABufferID buffer_id)
 {
     auto driver_data = static_cast<DriverData*>(context->pDriverData);
 
-    std::lock_guard<std::mutex> guard(driver_data->mutex);
+    std::lock_guard<std::recursive_mutex> guard(driver_data->mutex);
     auto buffer_it = driver_data->buffers.find(buffer_id);
     if (buffer_it == driver_data->buffers.end()) {
         return VA_STATUS_ERROR_INVALID_BUFFER;
@@ -108,6 +108,8 @@ VAStatus destroyBuffer(VADriverContextP context, VABufferID buffer_id)
 VAStatus mapBuffer(VADriverContextP context, VABufferID buffer_id, void** data_map)
 {
     auto driver_data = static_cast<DriverData*>(context->pDriverData);
+
+    std::lock_guard<std::recursive_mutex> guard(driver_data->mutex);
 
     if (!driver_data->buffers.contains(buffer_id)) {
         return VA_STATUS_ERROR_INVALID_BUFFER;
@@ -123,6 +125,8 @@ VAStatus unmapBuffer(VADriverContextP context, VABufferID buffer_id)
 {
     auto driver_data = static_cast<DriverData*>(context->pDriverData);
 
+    std::lock_guard<std::recursive_mutex> guard(driver_data->mutex);
+
     /* Our buffers are always mapped. */
     if (!driver_data->buffers.contains(buffer_id)) {
         return VA_STATUS_ERROR_INVALID_BUFFER;
@@ -134,6 +138,8 @@ VAStatus unmapBuffer(VADriverContextP context, VABufferID buffer_id)
 VAStatus bufferSetNumElements(VADriverContextP context, VABufferID buffer_id, unsigned int count)
 {
     auto driver_data = static_cast<DriverData*>(context->pDriverData);
+
+    std::lock_guard<std::recursive_mutex> guard(driver_data->mutex);
 
     if (!driver_data->buffers.contains(buffer_id)) {
         return VA_STATUS_ERROR_INVALID_BUFFER;
@@ -150,6 +156,8 @@ VAStatus bufferInfo(
     VADriverContextP context, VABufferID buffer_id, VABufferType* type, unsigned int* size, unsigned int* count)
 {
     auto driver_data = static_cast<DriverData*>(context->pDriverData);
+
+    std::lock_guard<std::recursive_mutex> guard(driver_data->mutex);
 
     if (!driver_data->buffers.contains(buffer_id)) {
         return VA_STATUS_ERROR_INVALID_BUFFER;

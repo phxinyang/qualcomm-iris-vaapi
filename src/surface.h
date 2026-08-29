@@ -37,6 +37,7 @@ extern "C" {
 #include <linux/videodev2.h>
 
 #include <va/va_backend.h>
+#include <va/va_dec_av1.h>
 }
 
 #include "context.h"
@@ -49,6 +50,12 @@ struct Surface {
     VASurfaceStatus status;
     unsigned width;
     unsigned height;
+    // VA surfaces are global, while each V4L2 stateful session has its own
+    // capture queue. Chrome creates contexts before allocating its frame
+    // pools, so retain the best-effort context association made at creation
+    // time to prevent exportSurfaceHandle() from binding a surface to the
+    // first decoder merely because dimensions match.
+    VAContextID owner_context = VA_INVALID_ID;
 
     std::optional<std::reference_wrapper<const V4L2M2MDevice::Buffer>> source_buffer;
     unsigned int source_size_used;
@@ -65,15 +72,16 @@ struct Surface {
     std::optional<std::reference_wrapper<const V4L2M2MDevice::Buffer>> destination_buffer;
     unsigned destination_buffer_index;
     bool destination_buffer_queued;
-    // Stateful Iris returns a rotating CAPTURE index. Keep the browser-facing
-    // VA export on a private, stable DMA-BUF and publish completed frames into
-    // it before returning the CAPTURE slot to the decoder.
+    // Optional stable DMA-BUF backing for Chrome's exported VA surface. The
+    // stateful V4L2 decoder may return any CAPTURE index for a timestamp, so
+    // copy_surface_frame() updates this fixed buffer before it is displayed.
     int export_buffer_fd = -1;
     void* export_buffer_mapping = nullptr;
     size_t export_buffer_size = 0;
+    // Offsets of logical VA planes in the optional contiguous export buffer.
+    // For a single physical NV12 plane these retain the V4L2 offsets; for
+    // NV12M they are packed consecutively into the stable buffer.
     std::vector<unsigned> export_plane_offsets;
-    std::vector<uint8_t> pending_frame;
-    bool pending_frame_ready = false;
     BufferLayout logical_destination_layout;
     uint32_t format;
 
@@ -100,16 +108,22 @@ struct Surface {
             VADecPictureParameterBufferVP9* picture;
             VASliceParameterBufferVP9* slice;
         } vp9;
+        struct {
+            VAPictureParameterBufferHEVC* picture;
+            VASliceParameterBufferHEVC* slice;
+        } hevc;
+        struct {
+            VADecPictureParameterBufferAV1* picture;
+            VASliceParameterBufferAV1* slice;
+        } av1;
     } params;
 
     int request_fd;
 };
 
+// Stateful access units start in a small private buffer and grow only when a
+// codec produces an AU larger than the default staging size.
 bool ensure_stateful_bitstream_capacity(Surface& surface, size_t required);
-bool stage_surface_frame(Surface& surface, const V4L2M2MDevice::Buffer& capture);
-bool publish_surface_frame(Surface& surface);
-void copy_surface_frame(Surface& surface, const V4L2M2MDevice::Buffer& capture);
-bool copy_surfaces_enabled();
 
 void createSurfacesDeferred(
     DriverData* driver_data, const Context& context, std::span<VASurfaceID> surface_ids, unsigned buffer_count);
@@ -122,6 +136,9 @@ VAStatus syncSurface(VADriverContextP context, VASurfaceID surface_id);
 VAStatus querySurfaceAttributes(
     VADriverContextP context, VAConfigID config, VASurfaceAttrib* attributes, unsigned int* attributes_count);
 VAStatus querySurfaceStatus(VADriverContextP context, VASurfaceID surface_id, VASurfaceStatus* status);
+
+void copy_surface_frame(Surface& surface, const V4L2M2MDevice::Buffer& capture);
+bool copy_surfaces_enabled();
 VAStatus putSurface(VADriverContextP context, VASurfaceID surface_id, void* draw, short src_x, short src_y,
     unsigned short src_width, unsigned short src_height, short dst_x, short dst_y, unsigned short dst_width,
     unsigned short dst_height, VARectangle* cliprects, unsigned int cliprects_count, unsigned int flags);

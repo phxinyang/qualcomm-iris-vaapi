@@ -67,6 +67,7 @@ public:
     int set_controls() override;
     bool uses_request_api() const override { return !stateful; }
     bool uses_stateful_streaming() const override { return stateful; }
+    unsigned stateful_frame_type(VASurfaceID surface_id) const override;
     bool stateful_sequence_start(VASurfaceID surface_id) override;
     bool prepend_parameter_sets(Surface& surface) const;
 

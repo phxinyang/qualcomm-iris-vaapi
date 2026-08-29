@@ -63,3 +63,18 @@ const Format& lookup_format(fourcc v4l2_fourcc)
     }
     return *it;
 }
+
+void adjust_capture_layout(BufferLayout& layout, const v4l2_pix_format_mplane& format)
+{
+    if (layout.size() != 2 || format.num_planes != 1 || format.plane_fmt[0].bytesperline == 0)
+        return;
+    const unsigned pitch = format.plane_fmt[0].bytesperline;
+    const unsigned luma_size = pitch * format.height;
+    layout[0].size = luma_size;
+    layout[0].pitch = pitch;
+    layout[1].offset = luma_size;
+    layout[1].pitch = pitch;
+    layout[1].size = format.plane_fmt[0].sizeimage > luma_size
+        ? format.plane_fmt[0].sizeimage - luma_size
+        : pitch * (format.height / 2);
+}

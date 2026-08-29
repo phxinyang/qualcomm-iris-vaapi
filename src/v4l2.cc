@@ -26,6 +26,7 @@
 #include "v4l2.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cerrno>
 #include <cstdlib>
 #include <cstdio>
@@ -172,7 +173,9 @@ std::vector<std::pair<std::string, std::optional<std::string>>> V4L2M2MDevice::e
     for (auto&& media_device : enumerate_media_devices(ctx.get())) {
         for (auto&& video_device : enumerate_video_devices(ctx.get(), media_device)) {
             int fd = errno_wrapper(open, video_device.c_str(), O_RDONLY);
-            if (query_capabilities(fd) & required_capabilities) {
+            const bool supported = (query_capabilities(fd) & required_capabilities) != 0;
+            close(fd);
+            if (supported) {
                 result.emplace_back(video_device, media_device);
             }
         }
@@ -295,7 +298,9 @@ std::vector<int> V4L2M2MDevice::Buffer::export_(unsigned flags) const
 }
 
 V4L2M2MDevice::V4L2M2MDevice(const std::string& video_path, const std::optional<std::string>& media_path)
-    : video_fd(errno_wrapper(open, video_path.c_str(), O_RDWR | O_NONBLOCK))
+    : video_path_(video_path)
+    , media_path_(media_path)
+    , video_fd(errno_wrapper(open, video_path.c_str(), O_RDWR | O_NONBLOCK))
     , media_fd((media_path) ? errno_wrapper(open, media_path->c_str(), O_RDWR | O_NONBLOCK) : -1)
     , capabilities(query_capabilities(video_fd))
     , capture_buf_type(
@@ -306,12 +311,14 @@ V4L2M2MDevice::V4L2M2MDevice(const std::string& video_path, const std::optional<
     , output_format(get_format(video_fd, output_buf_type))
 {
     if (!(capabilities & required_capabilities)) {
-        std::runtime_error("Missing device capabilities");
+        throw std::runtime_error("Missing device capabilities");
     }
 }
 
 V4L2M2MDevice::V4L2M2MDevice(V4L2M2MDevice&& other)
-    : video_fd(std::move(other.video_fd))
+    : video_path_(std::move(other.video_path_))
+    , media_path_(std::move(other.media_path_))
+    , video_fd(std::move(other.video_fd))
     , media_fd(std::move(other.media_fd))
     , capabilities(std::move(other.capabilities))
     , capture_buf_type(std::move(other.capture_buf_type))
@@ -339,6 +346,11 @@ V4L2M2MDevice::V4L2M2MDevice(V4L2M2MDevice&& other)
     other.last_dequeued_error_ = false;
     other.last_dequeued_flags_ = 0;
     other.last_dequeued_timestamp_ = {};
+}
+
+V4L2M2MDevice V4L2M2MDevice::clone_for_context() const
+{
+    return V4L2M2MDevice(video_path_, media_path_);
 }
 
 V4L2M2MDevice& V4L2M2MDevice::operator=(V4L2M2MDevice&& other)
@@ -551,45 +563,63 @@ std::optional<unsigned> V4L2M2MDevice::dequeue_ready(v4l2_buf_type type, int tim
     last_dequeued_error_ = false;
     last_dequeued_flags_ = 0;
     last_dequeued_timestamp_ = {};
-    pollfd pollfd = {
-        .fd = video_fd,
-        .events = V4L2_TYPE_IS_CAPTURE(type) ? POLLIN : POLLOUT,
-    };
-    const int result = poll(&pollfd, 1, timeout_ms);
-    if (std::getenv("V4L2_VA_TRACE"))
-        std::fprintf(stderr, "v4l2 poll type=%u timeout=%d result=%d revents=0x%x\\n", type, timeout_ms, result,
-            pollfd.revents);
-    if (result <= 0)
-        return std::nullopt;
-
-    v4l2_plane planes[VIDEO_MAX_PLANES] = {};
-    v4l2_buffer buffer = {
-        .type = type,
-        .memory = V4L2_MEMORY_MMAP,
-        .m = { .planes = planes },
-        .length = VIDEO_MAX_PLANES,
-    };
-    if (ioctl(video_fd, VIDIOC_DQBUF, &buffer) < 0) {
-        if (std::getenv("V4L2_VA_TRACE"))
-            std::fprintf(stderr, "v4l2 dq type=%u errno=%d\\n", type, errno);
-        if (errno == EAGAIN)
+    const auto deadline = std::chrono::steady_clock::now()
+        + std::chrono::milliseconds(std::max(timeout_ms, 0));
+    for (;;) {
+        // Some Iris kernels do not wake POLLIN for a completed CAPTURE buffer
+        // on a descriptor that also has writable OUTPUT space. Keep the poll
+        // as a short sleep, then try the authoritative non-blocking DQBUF.
+        const auto remaining = timeout_ms > 0
+            ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count()
+            : 0;
+        if (timeout_ms > 0 && remaining <= 0)
             return std::nullopt;
+        const int wait_ms = timeout_ms > 0 ? static_cast<int>(std::min<long long>(remaining, 5)) : 0;
+        pollfd pollfd = {
+            .fd = video_fd,
+            .events = static_cast<short>(V4L2_TYPE_IS_CAPTURE(type) ? (POLLIN | POLLPRI) : POLLOUT),
+        };
+        const int result = poll(&pollfd, 1, wait_ms);
+        if (std::getenv("V4L2_VA_TRACE") && result > 0)
+            std::fprintf(stderr, "v4l2 poll type=%u timeout=%d result=%d revents=0x%x\n", type, wait_ms, result,
+                pollfd.revents);
+        if (result < 0) {
+            if (errno == EINTR)
+                continue;
+            throw std::system_error(errno, std::generic_category());
+        }
+
+        v4l2_plane planes[VIDEO_MAX_PLANES] = {};
+        v4l2_buffer buffer = {
+            .type = type,
+            .memory = V4L2_MEMORY_MMAP,
+            .m = { .planes = planes },
+            .length = VIDEO_MAX_PLANES,
+        };
+        if (ioctl(video_fd, VIDIOC_DQBUF, &buffer) == 0) {
+            last_dequeued_error_ = (buffer.flags & V4L2_BUF_FLAG_ERROR) != 0;
+            last_dequeued_flags_ = buffer.flags;
+            last_dequeued_timestamp_ = buffer.timestamp;
+            last_dequeued_was_last = (buffer.flags & V4L2_BUF_FLAG_LAST) != 0;
+            if (last_dequeued_error_ && std::getenv("V4L2_VA_TRACE"))
+                std::fprintf(stderr, "v4l2 dq ERROR type=%u index=%u flags=0x%x last=%d ts=%lld.%06ld seq=%u\n", type,
+                    buffer.index, buffer.flags, last_dequeued_was_last,
+                    static_cast<long long>(buffer.timestamp.tv_sec), static_cast<long>(buffer.timestamp.tv_usec),
+                    buffer.sequence);
+            if (std::getenv("V4L2_VA_TRACE"))
+                std::fprintf(stderr, "v4l2 dq type=%u index=%u flags=0x%x last=%d ts=%lld.%06ld seq=%u\n", type,
+                    buffer.index, buffer.flags, last_dequeued_was_last,
+                    static_cast<long long>(buffer.timestamp.tv_sec), static_cast<long>(buffer.timestamp.tv_usec),
+                    buffer.sequence);
+            return buffer.index;
+        }
+        if (std::getenv("V4L2_VA_TRACE") && errno != EAGAIN)
+            std::fprintf(stderr, "v4l2 dq type=%u errno=%d\n", type, errno);
+        if (errno == EAGAIN) {
+            if (timeout_ms <= 0)
+                return std::nullopt;
+            continue;
+        }
         throw std::system_error(errno, std::generic_category());
     }
-    last_dequeued_error_ = (buffer.flags & V4L2_BUF_FLAG_ERROR) != 0;
-    last_dequeued_flags_ = buffer.flags;
-    if (last_dequeued_error_) {
-        if (std::getenv("V4L2_VA_TRACE"))
-            std::fprintf(stderr, "v4l2 dq ERROR type=%u index=%u flags=0x%x last=%d ts=%lld.%06ld seq=%u\n", type,
-                buffer.index, buffer.flags, (buffer.flags & V4L2_BUF_FLAG_LAST) != 0,
-                static_cast<long long>(buffer.timestamp.tv_sec), static_cast<long>(buffer.timestamp.tv_usec),
-                buffer.sequence);
-    }
-    last_dequeued_timestamp_ = buffer.timestamp;
-    last_dequeued_was_last = (buffer.flags & V4L2_BUF_FLAG_LAST) != 0;
-    if (std::getenv("V4L2_VA_TRACE"))
-        std::fprintf(stderr, "v4l2 dq type=%u index=%u flags=0x%x last=%d ts=%lld.%06ld seq=%u\\n", type,
-            buffer.index, buffer.flags, last_dequeued_was_last, static_cast<long long>(buffer.timestamp.tv_sec),
-            static_cast<long>(buffer.timestamp.tv_usec), buffer.sequence);
-    return buffer.index;
 }

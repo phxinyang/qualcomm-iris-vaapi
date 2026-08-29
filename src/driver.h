@@ -30,6 +30,8 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <deque>
+#include <vector>
 
 extern "C" {
 #include <linux/videodev2.h>
@@ -46,7 +48,7 @@ extern "C" {
 class Context;
 
 #define V4L2_STR_VENDOR "v4l2"
-#define V4L2_MAX_PROFILES 11
+#define V4L2_MAX_PROFILES 32
 #define V4L2_MAX_ENTRYPOINTS 5
 #define V4L2_MAX_IMAGE_FORMATS 10
 #define V4L2_MAX_SUBPIC_FORMATS 4
@@ -57,12 +59,35 @@ struct DriverData {
 
     std::map<VAConfigID, Config> configs;
     std::map<VAContextID, std::unique_ptr<Context>> contexts;
+    // Keep destroyed VA contexts alive until their surfaces disappear. FFmpeg
+    // can still call vaSyncSurface for frames queued before vaDestroyContext;
+    // retaining the object prevents a use-after-free while those calls drain.
+    std::vector<std::unique_ptr<Context>> retired_contexts;
     std::map<VASurfaceID, Surface> surfaces;
     std::map<VABufferID, Buffer> buffers;
     std::map<VAImageID, VAImage> images;
-    std::vector<V4L2M2MDevice> devices;
-    std::mutex mutex;
+    // The first entries are capability probes. Each VA context appends its
+    // own V4L2 session; deque keeps references held by Context stable while
+    // new sessions are added.
+    std::deque<V4L2M2MDevice> devices;
+    // VA calls for a decoder stay on the thread that created its context in
+    // Chromium. Use that association when createSurfaces() (which has no
+    // context argument) races frame-pool allocation for multiple decoders.
+    std::map<long, VAContextID> context_threads;
+    // createSurfaces() has no VAContextID argument. When multiple Chrome
+    // decoders allocate pools concurrently, assign surfaces round-robin to
+    // the contexts created by those decoders until beginPicture() confirms
+    // the association.
+    size_t surface_context_cursor = 0;
+    // VA image/surface operations can call buffer helpers while holding the
+    // driver map lock (for example vaDestroyImage -> destroyBuffer).
+    std::recursive_mutex mutex;
 };
+
+// Destroyed VA contexts retain their V4L2 session until every surface that
+// references one of the session's buffers has gone away. This keeps late VA
+// calls safe without leaving an idle stateful decoder running indefinitely.
+void reap_retired_contexts(DriverData* driver_data);
 
 extern "C" VAStatus VA_DRIVER_INIT_FUNC(VADriverContextP context);
 VAStatus terminate(VADriverContextP va_context);

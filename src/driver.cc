@@ -70,6 +70,31 @@ DriverData::DriverData(const std::vector<std::pair<std::string, std::optional<st
     }
 }
 
+void reap_retired_contexts(DriverData* driver_data)
+{
+    for (auto context = driver_data->retired_contexts.begin(); context != driver_data->retired_contexts.end();) {
+        const auto& candidate = *context;
+        bool referenced = false;
+        for (const auto& [surface_id, surface] : driver_data->surfaces) {
+            const auto references_device = [&](const auto& buffer) {
+                return buffer && &buffer->get().owner() == &candidate->device;
+            };
+            if (references_device(surface.source_buffer) || references_device(surface.destination_buffer)) {
+                referenced = true;
+                break;
+            }
+        }
+        if (referenced) {
+            ++context;
+            continue;
+        }
+
+        if (std::getenv("V4L2_VA_TRACE"))
+            std::fprintf(stderr, "va reap retired context ptr=%p fd=%d\n", candidate.get(), candidate->device.video_fd);
+        context = driver_data->retired_contexts.erase(context);
+    }
+}
+
 /* Set default visibility for the init function only. */
 VAStatus __attribute__((visibility("default"))) VA_DRIVER_INIT_FUNC(VADriverContextP context);
 
@@ -154,31 +179,44 @@ extern "C" VAStatus VA_DRIVER_INIT_FUNC(VADriverContextP context)
     return VA_STATUS_SUCCESS;
 }
 
+// libva's loader has historically looked up the stable 1.0 driver entrypoint
+// even when the application/library headers are newer. Export the compatibility
+// symbol in addition to the versioned symbol selected by Meson so one binary
+// works across libva 1.x distributions (including the tablet's 1.23 loader).
+extern "C" __attribute__((visibility("default"))) VAStatus __vaDriverInit_1_0(VADriverContextP context)
+{
+    return VA_DRIVER_INIT_FUNC(context);
+}
+
 VAStatus terminate(VADriverContextP va_context)
 {
     auto driver_data = static_cast<DriverData*>(va_context->pDriverData);
 
     /* Cleanup leftover buffers. */
-    for (auto&& [id, config] : driver_data->configs) {
-        destroyConfig(va_context, id);
+    while (!driver_data->configs.empty())
+        destroyConfig(va_context, driver_data->configs.begin()->first);
+
+    while (!driver_data->contexts.empty())
+        destroyContext(va_context, driver_data->contexts.begin()->first);
+
+    // Each destroy helper erases its entry from the corresponding map. Use a
+    // loop over the current first entry instead of invalidating a range-for
+    // iterator while tearing down the VA object tables.
+    while (!driver_data->surfaces.empty()) {
+        VASurfaceID id = driver_data->surfaces.begin()->first;
+        destroySurfaces(va_context, &id, 1);
     }
 
-    for (auto&& [id, ctx] : driver_data->contexts) {
-        destroyContext(va_context, id);
-    }
+    // Contexts retain references to their V4L2 buffers. Reap them only after
+    // every surface has been erased, so no VA surface can observe a cleared
+    // buffer vector while Context::~Context() drains the stateful session.
+    driver_data->retired_contexts.clear();
 
-    for (auto&& [id, surface] : driver_data->surfaces) {
-        VASurfaceID id_ = id;
-        destroySurfaces(va_context, &id_, 1);
-    }
+    while (!driver_data->buffers.empty())
+        destroyBuffer(va_context, driver_data->buffers.begin()->first);
 
-    for (auto&& [id, buffer] : driver_data->buffers) {
-        destroyBuffer(va_context, id);
-    }
-
-    for (auto&& [id, image] : driver_data->images) {
-        destroyImage(va_context, id);
-    }
+    while (!driver_data->images.empty())
+        destroyImage(va_context, driver_data->images.begin()->first);
 
     delete driver_data;
     va_context->pDriverData = nullptr;

@@ -42,6 +42,16 @@ extern "C" {
 
 namespace {
 
+fourcc vp9_output_format(const V4L2M2MDevice& device)
+{
+    // Iris exposes complete VP9 frames (VP90), not the stateless VP9_FRAME
+    // request format. Keep the existing request-api path for devices that
+    // expose VP9_FRAME and use the ordinary stateful stream for Iris.
+    if (device.format_supported(device.output_buf_type, V4L2_PIX_FMT_VP9))
+        return V4L2_PIX_FMT_VP9;
+    return V4L2_PIX_FMT_VP9_FRAME;
+}
+
 /**
  * The structured data libVA passed doesn't contain all information we need, so we parse the headers ourselves (i.e.
  * have gstreamer do it).
@@ -133,6 +143,15 @@ v4l2_ctrl_vp9_frame va_to_v4l2_frame(DriverData* data, VADecPictureParameterBuff
 
 } // namespace
 
+VP9Context::VP9Context(DriverData* driver_data, V4L2M2MDevice& device, int picture_width, int picture_height,
+    std::span<VASurfaceID> surface_ids)
+    : Context(driver_data, device, vp9_output_format(device), picture_width, picture_height, surface_ids)
+    , stateful(device.format_supported(device.output_buf_type, V4L2_PIX_FMT_VP9))
+{
+    if (!surface_ids.empty())
+        initialize(surface_ids);
+}
+
 v4l2_ctrl_vp9_compressed_hdr gst_to_v4l2_compressed_header(GstVp9FrameHeader* header)
 {
     v4l2_ctrl_vp9_compressed_hdr result = {
@@ -166,7 +185,8 @@ VAStatus VP9Context::store_buffer(const Buffer& buffer) const
 {
     auto& surface = driver_data->surfaces.at(current_surface());
 
-    const auto source_data = surface.source_buffer->get().mapping()[0];
+    auto source_data = stateful ? std::span<uint8_t>(surface.stateful_bitstream)
+                                : surface.source_buffer->get().mapping()[0];
 
     switch (buffer.type) {
     case VAPictureParameterBufferType:
@@ -198,6 +218,8 @@ VAStatus VP9Context::store_buffer(const Buffer& buffer) const
 
 int VP9Context::set_controls()
 {
+    if (stateful)
+        return VA_STATUS_SUCCESS;
     auto& surface = driver_data->surfaces.at(current_surface());
 
     GstVp9FrameHeader header = {};
@@ -233,7 +255,8 @@ int VP9Context::set_controls()
 std::set<VAProfile> VP9Context::supported_profiles(const V4L2M2MDevice& device)
 {
     // TODO: query `va_profile` control for more details
-    return (device.format_supported(device.output_buf_type, V4L2_PIX_FMT_VP9_FRAME))
+    return (device.format_supported(device.output_buf_type, V4L2_PIX_FMT_VP9_FRAME)
+            || device.format_supported(device.output_buf_type, V4L2_PIX_FMT_VP9))
         ? std::set<VAProfile>(
               { VAProfileVP9Profile0, VAProfileVP9Profile1, VAProfileVP9Profile2, VAProfileVP9Profile3 })
         : std::set<VAProfile>();

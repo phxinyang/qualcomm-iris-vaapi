@@ -37,6 +37,7 @@
 extern "C" {
 #include <linux/videodev2.h>
 #include <sys/ioctl.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -56,18 +57,33 @@ VAStatus beginPicture(VADriverContextP va_context, VAContextID context_id, VASur
 {
     auto driver_data = static_cast<DriverData*>(va_context->pDriverData);
 
+    // Surface/context lifetime is shared with destroySurfaces() and
+    // destroyContext(). Keep the same driver -> context lock order used by
+    // syncSurface() so map lookups cannot race teardown.
+    std::lock_guard<std::recursive_mutex> driver_guard(driver_data->mutex);
+
     if (!driver_data->contexts.contains(context_id)) {
         return VA_STATUS_ERROR_INVALID_CONTEXT;
     }
     auto& context = *driver_data->contexts.at(context_id);
+    std::lock_guard<std::recursive_mutex> guard(context.synchronization_mutex());
 
     if (!driver_data->surfaces.contains(surface_id)) {
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
     auto& surface = driver_data->surfaces.at(surface_id);
+    const auto owner_context = driver_data->contexts.find(surface.owner_context);
+    if (surface.owner_context != VA_INVALID_ID && surface.owner_context != context_id
+        && owner_context != driver_data->contexts.end()
+        && owner_context->second->uses_stateful_streaming() && context.uses_stateful_streaming()) {
+        if (std::getenv("V4L2_VA_TRACE"))
+            std::fprintf(stderr, "va surface context mismatch surface=%u owner=%u caller=%u\n", surface_id,
+                surface.owner_context, context_id);
+        return VA_STATUS_ERROR_INVALID_SURFACE;
+    }
     if (std::getenv("V4L2_VA_TRACE"))
-        std::fprintf(stderr, "va begin_picture ctx=%u surface=%u status=%u initialized=%d\n", context_id, surface_id,
-            surface.status, context.initialized());
+        std::fprintf(stderr, "va begin_picture tid=%ld ctx=%u surface=%u status=%u initialized=%d\n",
+            static_cast<long>(syscall(SYS_gettid)), context_id, surface_id, surface.status, context.initialized());
     if (std::getenv("V4L2_VA_TRACE"))
         error_log(va_context, "trace begin surface=%u status=%u initialized=%d\\n", surface_id, surface.status,
             context.initialized());
@@ -129,10 +145,13 @@ VAStatus renderPicture(VADriverContextP va_context, VAContextID context_id, VABu
     int rc;
     int i;
 
+    std::lock_guard<std::recursive_mutex> driver_guard(driver_data->mutex);
+
     if (!driver_data->contexts.contains(context_id)) {
         return VA_STATUS_ERROR_INVALID_CONTEXT;
     }
     const auto& context = *driver_data->contexts.at(context_id);
+    std::lock_guard<std::recursive_mutex> guard(context.synchronization_mutex());
 
     const auto render_surface_id = context.current_surface();
     if (!driver_data->surfaces.contains(render_surface_id)) {
@@ -161,10 +180,13 @@ VAStatus endPicture(VADriverContextP va_context, VAContextID context_id)
     auto driver_data = static_cast<DriverData*>(va_context->pDriverData);
     VAStatus status;
 
+    std::lock_guard<std::recursive_mutex> driver_guard(driver_data->mutex);
+
     if (!driver_data->contexts.contains(context_id)) {
         return VA_STATUS_ERROR_INVALID_CONTEXT;
     }
     auto& context = *driver_data->contexts.at(context_id);
+    std::lock_guard<std::recursive_mutex> guard(context.synchronization_mutex());
     const auto render_surface_id = context.current_surface();
     if (!driver_data->surfaces.contains(render_surface_id))
         return VA_STATUS_ERROR_INVALID_SURFACE;
@@ -176,8 +198,9 @@ VAStatus endPicture(VADriverContextP va_context, VAContextID context_id)
         error_log(va_context, "trace end surface=%u bytes=%u request=%d\\n", render_surface_id,
             surface.source_size_used, surface.request_fd);
     if (std::getenv("V4L2_VA_DUMP") && surface.source_size_used > 0) {
-        char path[96];
-        std::snprintf(path, sizeof(path), "/tmp/va-au-%u.h264", render_surface_id);
+        const char* dump_dir = std::getenv("V4L2_VA_DUMP");
+        char path[256];
+        std::snprintf(path, sizeof(path), "%s/va-au-%u.bin", dump_dir, render_surface_id);
         if (FILE* file = std::fopen(path, "wb")) {
             const uint8_t* dump_src = context.uses_stateful_streaming()
                 ? surface.stateful_bitstream.data()
@@ -212,6 +235,16 @@ VAStatus endPicture(VADriverContextP va_context, VAContextID context_id)
 
     if (context.uses_stateful_streaming()) {
         status = context.append_stateful_picture(render_surface_id);
+        if (status != VA_STATUS_SUCCESS) {
+            // A codec translator can reject a VA payload before an OUTPUT AU
+            // is queued (for example AV1 tile data without its OBU headers).
+            // Release the rendering target immediately so the caller gets a
+            // clean decode error instead of repeatedly seeing SURFACE_BUSY or
+            // invalid-surface failures on the same target.
+            context.discard_stateful_surface(render_surface_id);
+            surface.status = VASurfaceReady;
+            surface.source_size_used = 0;
+        }
         context.end_surface();
         memset(&surface.params, 0, sizeof(surface.params));
         return status;

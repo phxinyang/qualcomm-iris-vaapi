@@ -36,6 +36,9 @@ sources = [
 	'mpeg2.cc',
 	'h264.cc',
 	'vp8.cc',
+	'vp9_stateful.cc',
+	'hevc.cc',
+	'av1.cc',
 ]
 
 headers = [
@@ -54,6 +57,9 @@ headers = [
 	'mpeg2.h',
 	'h264.h',
 	'vp8.h',
+	'vp9_stateful.h',
+	'hevc.h',
+	'av1.h',
 ]
 cpp_args = [
 	'-Wall',

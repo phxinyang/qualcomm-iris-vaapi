@@ -51,6 +51,8 @@ VAStatus copy_surface_to_image(DriverData* driver_data, const Surface& surface, 
     unsigned int i;
 
     if (!driver_data->buffers.contains(image->buf)) {
+        if (std::getenv("V4L2_VA_TRACE"))
+            std::fprintf(stderr, "va image copy invalid buffer=%u surface=%p\n", image->buf, &surface);
         return VA_STATUS_ERROR_INVALID_BUFFER;
     }
     auto& buffer = driver_data->buffers.at(image->buf);
@@ -62,25 +64,40 @@ VAStatus copy_surface_to_image(DriverData* driver_data, const Surface& surface, 
                 surface.width, surface.height);
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
+    if (!surface.destination_buffer && !(surface.export_buffer_fd >= 0 && surface.export_buffer_mapping))
+        return VA_STATUS_ERROR_OPERATION_FAILED;
     for (i = 0; i < surface.logical_destination_layout.size(); i++) {
+        const auto& plane = surface.logical_destination_layout[i];
         const uint8_t* source = nullptr;
-        if (surface.export_buffer_mapping && i < surface.export_plane_offsets.size()) {
-            source = static_cast<const uint8_t*>(surface.export_buffer_mapping)
-                + surface.export_plane_offsets[i];
-        } else if (surface.destination_buffer) {
-            const auto& mapping = surface.destination_buffer->get().mapping();
-            source = mapping[surface.logical_destination_layout[i].physical_plane_index].data()
-                + surface.logical_destination_layout[i].offset;
+        if (surface.export_buffer_mapping) {
+            // Stateful Iris capture slots rotate and are immediately requeued
+            // after completion. Read the stable copy used for VA exports.
+            const size_t offset = i < surface.export_plane_offsets.size()
+                ? surface.export_plane_offsets[i]
+                : plane.offset;
+            if (offset + plane.size > surface.export_buffer_size)
+                return VA_STATUS_ERROR_OPERATION_FAILED;
+            source = static_cast<const uint8_t*>(surface.export_buffer_mapping) + offset;
         } else {
-            return VA_STATUS_ERROR_OPERATION_FAILED;
+            const auto& mapping = surface.destination_buffer->get().mapping();
+            if (plane.physical_plane_index >= mapping.size())
+                return VA_STATUS_ERROR_OPERATION_FAILED;
+            const size_t offset = mapping.size() == 1 ? plane.offset : 0;
+            if (offset + plane.size > mapping[plane.physical_plane_index].size())
+                return VA_STATUS_ERROR_OPERATION_FAILED;
+            source = mapping[plane.physical_plane_index].data() + offset;
         }
-        const auto dest = buffer.data.get() + image->offsets[i];
-
-        // Image planes may be smaller than buffer due to decoding blocks
-        const auto size
-            = ((i < (surface.logical_destination_layout.size() - 1)) ? image->offsets[i + 1] : image->data_size)
-            - image->offsets[i];
-        std::copy_n(source, size, dest);
+        auto* dest = buffer.data.get() + image->offsets[i];
+        // Capture planes can have a padded stride/height (for example 384x192
+        // for a 320x180 surface). VAImage is tightly packed at the visible
+        // dimensions, so copy row by row instead of leaking padding into the
+        // next image row.
+        const unsigned rows = i == 0 ? image->height : image->height / 2;
+        const unsigned row_bytes = i == 0 ? image->width : image->width;
+        const unsigned source_pitch = plane.pitch ? plane.pitch : row_bytes;
+        for (unsigned row = 0; row < rows; ++row)
+            std::copy_n(source + static_cast<size_t>(row) * source_pitch,
+                std::min<unsigned>(row_bytes, source_pitch), dest + static_cast<size_t>(row) * row_bytes);
     }
 
     return VA_STATUS_SUCCESS;
@@ -91,6 +108,7 @@ VAStatus copy_surface_to_image(DriverData* driver_data, const Surface& surface, 
 VAStatus createImage(VADriverContextP context, VAImageFormat* format, int width, int height, VAImage* image)
 {
     auto driver_data = static_cast<DriverData*>(context->pDriverData);
+    std::lock_guard<std::recursive_mutex> driver_guard(driver_data->mutex);
 
     memset(image, 0, sizeof(*image));
     image->format = *format;
@@ -123,7 +141,7 @@ VAStatus createImage(VADriverContextP context, VAImageFormat* format, int width,
         return status;
     }
 
-    std::lock_guard<std::mutex> guard(driver_data->mutex);
+    std::lock_guard<std::recursive_mutex> guard(driver_data->mutex);
     image->image_id = smallest_free_key(driver_data->images);
     auto [image_it, inserted] = driver_data->images.emplace(std::make_pair(image->image_id, *image));
     if (!inserted) {
@@ -136,6 +154,7 @@ VAStatus createImage(VADriverContextP context, VAImageFormat* format, int width,
 VAStatus destroyImage(VADriverContextP context, VAImageID image_id)
 {
     auto driver_data = static_cast<DriverData*>(context->pDriverData);
+    std::lock_guard<std::recursive_mutex> driver_guard(driver_data->mutex);
 
     if (!driver_data->images.contains(image_id)) {
         return VA_STATUS_ERROR_INVALID_IMAGE;
@@ -147,7 +166,7 @@ VAStatus destroyImage(VADriverContextP context, VAImageID image_id)
         return status;
     }
 
-    std::lock_guard<std::mutex> guard(driver_data->mutex);
+    std::lock_guard<std::recursive_mutex> guard(driver_data->mutex);
     if (!driver_data->images.erase(image_id)) {
         return VA_STATUS_ERROR_INVALID_IMAGE;
     }
@@ -158,6 +177,7 @@ VAStatus destroyImage(VADriverContextP context, VAImageID image_id)
 VAStatus deriveImage(VADriverContextP context, VASurfaceID surface_id, VAImage* image)
 {
     auto driver_data = static_cast<DriverData*>(context->pDriverData);
+    std::lock_guard<std::recursive_mutex> driver_guard(driver_data->mutex);
     VAImageFormat format;
     VAStatus status;
 
@@ -166,9 +186,8 @@ VAStatus deriveImage(VADriverContextP context, VASurfaceID surface_id, VAImage* 
     }
     auto& surface = driver_data->surfaces.at(surface_id);
 
-    // Attempt to derive image from an uninitialized surface. A stateful
-    // surface may have only its stable export backing after CAPTURE recycling.
-    if (!surface.destination_buffer && !surface.export_buffer_mapping) {
+    // Attempt to derive image from uninitialized surface
+    if (!surface.destination_buffer) {
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
 
@@ -215,6 +234,7 @@ VAStatus getImage(VADriverContextP context, VASurfaceID surface_id, int x, int y
     unsigned int height, VAImageID image_id)
 {
     auto driver_data = static_cast<DriverData*>(context->pDriverData);
+    std::lock_guard<std::recursive_mutex> driver_guard(driver_data->mutex);
 
     if (!driver_data->surfaces.contains(surface_id)) {
         return VA_STATUS_ERROR_INVALID_SURFACE;
@@ -224,6 +244,16 @@ VAStatus getImage(VADriverContextP context, VASurfaceID surface_id, int x, int y
         return VA_STATUS_ERROR_INVALID_IMAGE;
     }
     auto& image = driver_data->images.at(image_id);
+
+    if (std::getenv("V4L2_VA_TRACE"))
+        std::fprintf(stderr, "va get_image surface=%u image=%u buf=%u status=%u\n", surface_id, image_id, image.buf,
+            driver_data->surfaces.at(surface_id).status);
+
+    if (driver_data->surfaces.at(surface_id).status == VASurfaceRendering) {
+        const auto sync_status = syncSurface(context, surface_id);
+        if (sync_status != VA_STATUS_SUCCESS)
+            return sync_status;
+    }
 
     if (x != 0 || y != 0 || width != image.width || height != image.height)
         return VA_STATUS_ERROR_UNIMPLEMENTED;
