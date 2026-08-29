@@ -18,6 +18,7 @@ fi
 
 flush_block=$(sed -n '/VAStatus Context::flush_stateful_batch()/,/^void Context::service_stateful_queues()/p' "$context")
 timeout_block=$(sed -n '/if (surface.status == VASurfaceRendering)/,/^        }/p' "$surface")
+drain_block=$(sed -n '/void Context::drain_stateful_decoder()/,/^void Context::mark_source_buffer_dequeued()/p' "$context")
 
 if ! printf '%s\n' "$flush_block" | grep -q 'stateful_batch_limit_from_env'; then
     echo "FAIL stateful flush has no bounded batch limit" >&2
@@ -36,6 +37,14 @@ fi
 # immediately after CAPTURE dequeue so draining cannot continue into EPIPE.
 if ! grep -q 'const bool capture_was_last = device.last_dequeued_last();' "$context"; then
     echo "FAIL stateful drain does not preserve CAPTURE LAST before OUTPUT DQBUF" >&2
+    exit 1
+fi
+if ! printf '%s\n' "$drain_block" | grep -q 'const auto output_deadline'; then
+    echo "FAIL stateful drain does not wait for trailing OUTPUT DQBUF" >&2
+    exit 1
+fi
+if ! printf '%s\n' "$drain_block" | grep -q 'mark_source_buffer_dequeued'; then
+    echo "FAIL stateful drain does not retire trailing OUTPUT buffers" >&2
     exit 1
 fi
 

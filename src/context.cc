@@ -857,6 +857,25 @@ void Context::drain_stateful_decoder()
         }
     }
 
+    // Iris may publish the terminal CAPTURE marker before recycling the last
+    // compressed OUTPUT buffer. The stateful contract requires both queues to
+    // be drained before START, otherwise a generic caller can hit EBUSY or
+    // lose the final batch on a slow firmware scheduler tick.
+    if (saw_last && !stateful_batches.empty()) {
+        const auto output_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        while (!stateful_batches.empty() && std::chrono::steady_clock::now() < output_deadline) {
+            try {
+                auto output_index = device.dequeue_ready(device.output_buf_type, 20);
+                if (output_index)
+                    mark_source_buffer_dequeued(*output_index);
+            } catch (...) {
+                break;
+            }
+        }
+        if (std::getenv("V4L2_VA_TRACE") && !stateful_batches.empty())
+            std::fprintf(stderr, "stateful drain output incomplete remaining=%zu\n", stateful_batches.size());
+    }
+
     if (std::getenv("V4L2_VA_TRACE"))
         std::fprintf(stderr, "stateful drain complete last=%d batches=%zu\n", saw_last, stateful_batches.size());
 }
