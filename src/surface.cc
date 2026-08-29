@@ -668,6 +668,9 @@ VAStatus querySurfaceStatus(VADriverContextP context, VASurfaceID surface_id, VA
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
     auto& surface = driver_data->surfaces.at(surface_id);
+    if (std::getenv("V4L2_VA_TRACE"))
+        std::fprintf(stderr, "va query_status id=%u status=%u dest=%d\n", surface_id, surface.status,
+            surface.destination_buffer ? 1 : 0);
     if (surface.status == VASurfaceRendering && surface.destination_buffer) {
         auto& device = surface.destination_buffer->get().owner();
         for (auto& [context_id, decode_context] : driver_data->contexts) {

@@ -172,6 +172,10 @@ bool stateful_capture_scheduled()
 
 Context::~Context()
 {
+    // Join before taking any decoder lock. destroyContext() already holds the
+    // driver mutex here, and the watchdog only ever try_locks, so it can make
+    // progress to its stop check.
+    stop_stateful_watchdog();
     if (queues_initialized) {
         std::lock_guard<std::recursive_mutex> guard(synchronization_mutex_);
         // Virtual dispatch is already in the base destructor here, so
@@ -460,8 +464,9 @@ VAStatus Context::flush_stateful_batch()
         // Do not probe for backpressure from the producer path. A stateful
         // decoder normally keeps a small reorder window queued even while
         // playback is healthy; waiting here and issuing STOP would stall the
-        // stream repeatedly. Drains are driven by vaSyncSurface() timeouts or
-        // explicit context teardown instead.
+        // stream repeatedly. Drains are driven by vaSyncSurface() timeouts,
+        // the end-of-stream idle watchdog, or explicit context teardown.
+        note_stateful_submission();
     } catch (const std::system_error& error) {
         if (std::getenv("V4L2_VA_TRACE"))
             std::fprintf(stderr, "stateful flush failed: %s\n", error.what());
@@ -897,8 +902,130 @@ void Context::resume_after_drain()
         flush_stateful_batch();
 }
 
-bool Context::bind_surface(VASurfaceID surface_id)
+namespace {
+
+int stateful_eos_idle_ms()
 {
+    if (const char* value = std::getenv("V4L2_VA_EOS_IDLE_MS")) {
+        char* end = nullptr;
+        const unsigned long parsed = std::strtoul(value, &end, 10);
+        if (end != value && *end == '\0' && parsed >= 10 && parsed <= 5000)
+            return static_cast<int>(parsed);
+    }
+    return 120;
+}
+
+bool stateful_eos_drain_enabled()
+{
+    const char* value = std::getenv("V4L2_VA_EOS_DRAIN");
+    return value && std::strcmp(value, "1") == 0;
+}
+
+}
+
+// Iris only publishes the pictures still held for reordering after a STOP
+// drain. Chrome has no VA call that announces the end of the stream, and it
+// stops calling into this backend entirely once the last access unit has been
+// submitted, so nothing would collect those frames: their VA surfaces keep the
+// previous content and the compositor replays stale pictures at EOS.
+bool Context::stateful_input_consumed() const
+{
+    if (!uses_stateful_streaming() || !capture_initialized)
+        return false;
+    // An access unit still staged for the next OUTPUT buffer means the
+    // producer is mid-batch, not finished.
+    if (!stateful_pending.empty())
+        return false;
+    // Nothing outstanding: every submitted picture already reached its
+    // surface, so there is nothing for a drain to recover.
+    if (stateful_batches.empty())
+        return false;
+    // Iris has taken every compressed buffer back. Whatever is still
+    // outstanding lives in the decoder's DPB, not in the input queue.
+    for (const auto& [index, surfaces] : stateful_batches) {
+        static_cast<void>(surfaces);
+        if (!stateful_output_dequeued.contains(index))
+            return false;
+    }
+    return true;
+}
+
+void Context::note_stateful_submission()
+{
+    if (!uses_stateful_streaming())
+        return;
+    {
+        std::lock_guard<std::mutex> lock(stateful_watchdog_mutex_);
+        stateful_last_submission_ = std::chrono::steady_clock::now();
+        stateful_watchdog_handled_ = false;
+        if (!stateful_watchdog_.joinable() && !stateful_watchdog_stop_)
+            stateful_watchdog_ = std::thread(&Context::stateful_watchdog_loop, this);
+    }
+    stateful_watchdog_cv_.notify_all();
+}
+
+void Context::stop_stateful_watchdog()
+{
+    {
+        std::lock_guard<std::mutex> lock(stateful_watchdog_mutex_);
+        stateful_watchdog_stop_ = true;
+    }
+    stateful_watchdog_cv_.notify_all();
+    if (stateful_watchdog_.joinable())
+        stateful_watchdog_.join();
+}
+
+void Context::stateful_watchdog_loop()
+{
+    const auto idle_threshold = std::chrono::milliseconds(stateful_eos_idle_ms());
+    while (true) {
+        {
+            std::unique_lock<std::mutex> lock(stateful_watchdog_mutex_);
+            stateful_watchdog_cv_.wait_for(
+                lock, std::chrono::milliseconds(25), [this] { return stateful_watchdog_stop_; });
+            if (stateful_watchdog_stop_)
+                return;
+            if (stateful_watchdog_handled_)
+                continue;
+            if (std::chrono::steady_clock::now() - stateful_last_submission_ < idle_threshold)
+                continue;
+        }
+
+        // Never block the VA-API thread. destroyContext() destroys this
+        // context while it holds the driver mutex and then joins this thread,
+        // so waiting for either lock here would deadlock teardown.
+        std::unique_lock<std::recursive_mutex> driver_guard(driver_data->mutex, std::try_to_lock);
+        if (!driver_guard.owns_lock())
+            continue;
+        std::unique_lock<std::recursive_mutex> guard(synchronization_mutex_, std::try_to_lock);
+        if (!guard.owns_lock())
+            continue;
+
+        {
+            std::lock_guard<std::mutex> lock(stateful_watchdog_mutex_);
+            if (stateful_watchdog_stop_ || stateful_watchdog_handled_)
+                continue;
+            if (std::chrono::steady_clock::now() - stateful_last_submission_ < idle_threshold)
+                continue;
+        }
+
+        const bool consumed = stateful_input_consumed();
+        if (std::getenv("V4L2_VA_TRACE"))
+            std::fprintf(stderr,
+                "stateful watchdog idle pending=%zu batches=%zu output_dequeued=%zu capture_done=%zu consumed=%d\n",
+                stateful_pending.size(), stateful_batches.size(), stateful_output_dequeued.size(),
+                stateful_capture_done.size(), consumed ? 1 : 0);
+        if (!consumed || !stateful_eos_drain_enabled())
+            continue;
+
+        drain_stateful_decoder();
+        resume_after_drain();
+        std::lock_guard<std::mutex> lock(stateful_watchdog_mutex_);
+        stateful_watchdog_handled_ = true;
+    }
+}
+
+bool Context::bind_surface(VASurfaceID surface_id){
     if (!queues_initialized || !driver_data->surfaces.contains(surface_id))
         return false;
     if (surface_buffer_indices.contains(surface_id)) {

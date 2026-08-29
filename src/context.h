@@ -33,8 +33,11 @@
 #include <vector>
 #include <optional>
 #include <cstddef>
+#include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <thread>
 
 extern "C" {
 #include <va/va_backend.h>
@@ -84,6 +87,11 @@ public:
     void reset_stateful_decoder();
     void drain_stateful_decoder();
     void resume_after_drain();
+    // Chrome never calls back into the backend once it has submitted the last
+    // access unit, so an idle watchdog is the only place that can notice the
+    // end of a stream and STOP-drain the pictures Iris still holds.
+    void note_stateful_submission();
+    bool stateful_input_consumed() const;
     bool initialized() const { return queues_initialized; }
     bool capture_started() const { return capture_initialized; }
     std::recursive_mutex& synchronization_mutex() const { return synchronization_mutex_; }
@@ -139,6 +147,15 @@ private:
     bool stateful_queue_restart_pending = false;
     timeval stateful_last_timestamp = {};
     mutable std::recursive_mutex synchronization_mutex_;
+
+    void stateful_watchdog_loop();
+    void stop_stateful_watchdog();
+    std::thread stateful_watchdog_;
+    std::mutex stateful_watchdog_mutex_;
+    std::condition_variable stateful_watchdog_cv_;
+    std::chrono::steady_clock::time_point stateful_last_submission_ = {};
+    bool stateful_watchdog_stop_ = false;
+    bool stateful_watchdog_handled_ = false;
 };
 
 VAStatus createContext(VADriverContextP va_context, VAConfigID config_id, int picture_width, int picture_height,

@@ -191,9 +191,13 @@ VAStatus endPicture(VADriverContextP va_context, VAContextID context_id)
     if (!driver_data->surfaces.contains(render_surface_id))
         return VA_STATUS_ERROR_INVALID_SURFACE;
     auto& surface = driver_data->surfaces.at(render_surface_id);
-    if (std::getenv("V4L2_VA_TRACE"))
-        std::fprintf(stderr, "va end_picture ctx=%u surface=%u bytes=%u stateful=%d\n", context_id, render_surface_id,
-            surface.source_size_used, context.uses_stateful_streaming());
+    if (std::getenv("V4L2_VA_TRACE")) {
+        struct timespec wall = {};
+        clock_gettime(CLOCK_REALTIME, &wall);
+        std::fprintf(stderr, "va end_picture ctx=%u surface=%u bytes=%u stateful=%d wall=%lld%03ld\n", context_id,
+            render_surface_id, surface.source_size_used, context.uses_stateful_streaming(),
+            static_cast<long long>(wall.tv_sec), wall.tv_nsec / 1000000);
+    }
     if (std::getenv("V4L2_VA_TRACE"))
         error_log(va_context, "trace end surface=%u bytes=%u request=%d\\n", render_surface_id,
             surface.source_size_used, surface.request_fd);
