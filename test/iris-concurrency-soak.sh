@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Long-running concurrent VA decode qualification for Iris. The production
+# Long-running concurrent H.264/HEVC VA decode qualification for Iris. The production
 # defaults run each selected scenario for two wall-clock hours. Shorter values
 # are accepted for development, but are labelled SHORTENED in the artifacts.
 #
@@ -145,7 +145,7 @@ formats=$(v4l2-ctl --list-formats-out-ext -d "$device" 2>/dev/null) || {
 }
 required_formats=H264
 if [ "$scenario" = all ] || [ "$scenario" = mixed ]; then
-    required_formats='H264 VP90 HEVC'
+    required_formats='H264 HEVC'
 fi
 for required in $required_formats; do
     if ! printf '%s\n' "$formats" | grep -q "'$required'"; then
@@ -161,9 +161,6 @@ ffmpeg -y -hide_banner -loglevel error -f lavfi -i "testsrc2=size=640x360:rate=$
     -frames:v "$frames" -c:v "${IRIS_H264_ENCODER:-libx264}" -preset ultrafast \
     -tune zerolatency -g "$fps" -bf 0 -pix_fmt yuv420p -an "$media_dir/h264.mp4"
 if [ "$scenario" = all ] || [ "$scenario" = mixed ]; then
-    ffmpeg -y -hide_banner -loglevel error -f lavfi -i "testsrc2=size=640x360:rate=$fps" \
-        -frames:v "$frames" -c:v "${IRIS_VP9_ENCODER:-libvpx-vp9}" -deadline realtime \
-        -cpu-used 8 -g "$fps" -b:v 1M -pix_fmt yuv420p -an "$media_dir/vp9.webm"
     ffmpeg -y -hide_banner -loglevel error -f lavfi -i "testsrc2=size=640x360:rate=$fps" \
         -frames:v "$frames" -c:v "${IRIS_HEVC_ENCODER:-libx265}" -preset ultrafast \
         -x265-params "keyint=$fps:min-keyint=$fps:scenecut=0" -pix_fmt yuv420p -an \
@@ -206,7 +203,6 @@ preflight() {
 
 preflight h264 "$media_dir/h264.mp4"
 if [ "$scenario" = all ] || [ "$scenario" = mixed ]; then
-    preflight vp9 "$media_dir/vp9.webm"
     preflight hevc "$media_dir/hevc.mkv"
 fi
 
@@ -295,10 +291,9 @@ run_scenario() {
             start_job dual-h264-b "$media_dir/h264.mp4"
             ;;
         mixed)
-            jobs='mixed-h264 mixed-vp9 mixed-hevc'
-            job_count=3
+            jobs='mixed-h264 mixed-hevc'
+            job_count=2
             start_job mixed-h264 "$media_dir/h264.mp4"
-            start_job mixed-vp9 "$media_dir/vp9.webm"
             start_job mixed-hevc "$media_dir/hevc.mkv"
             ;;
     esac

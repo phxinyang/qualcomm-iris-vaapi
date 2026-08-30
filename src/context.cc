@@ -210,11 +210,12 @@ bool Context::capture_slots_scheduled() const
 
 bool Context::zero_copy_codec_supported() const
 {
-    // The current one-slot CAPTURE ownership model is validated on Iris H.264
-    // and VP9. HEVC/AV1 can hold several reordered pictures in firmware and
+    // The current one-slot CAPTURE ownership model is validated on Iris H.264.
+    // VP9 is withdrawn from VA advertisement because session/source-change
+    // churn reboots the target; HEVC/AV1 can hold several pictures and
     // require a multi-slot ownership protocol that is deliberately left on
     // the stable-copy path until it can be proven without fd aliasing.
-    return pixelformat == V4L2_PIX_FMT_H264 || pixelformat == V4L2_PIX_FMT_VP9;
+    return pixelformat == V4L2_PIX_FMT_H264;
 }
 
 void Context::queue_zero_copy_capture()

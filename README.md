@@ -56,8 +56,8 @@ memcpy is removed while the exported fd and CPU mapping stay unchanged. The
 experiment is restricted to single-plane NV12 and automatically falls back to
 MMAP plus the stable copy if allocation, plane validation, or QBUF fails. It is
 disabled by default and is not required for Chrome or other clients.
-The current ownership contract is validated for no-B H.264 and VP9 streams.
-H.264 streams with B-frame reordering must leave this switch off, while HEVC
+The current ownership contract is validated for no-B H.264 streams. H.264
+streams with B-frame reordering must leave this switch off, while HEVC
 and AV1 are automatically kept on the stable-copy path until a multi-slot
 DMA-BUF ownership protocol is validated.
 If a stateful stream requests a dynamic-resolution reconfiguration while the
@@ -73,10 +73,9 @@ Surface size attributes are read from the selected V4L2 capture format with
 minimum and maximum instead of assuming a 2048-pixel ceiling. Stateful clients
 may also reuse one VA context across an H.264 resolution change: the backend
 drains the old queue and rebuilds its V4L2 capture/output pools for the new
-surface geometry before submitting the next access unit. VP9 is deliberately
-fail-closed for an in-place coded-size change on the qualified Iris target
-because the native kernel/firmware path reboots the device; clients must retire
-the VA context and create one for the new geometry.
+surface geometry before submitting the next access unit. VP9 VA capability is
+withdrawn on the qualified Iris target because both source changes and repeated
+VA context recreation reboot the device.
 
 Stateful Iris may hold a reordered B/P frame until a later AU is submitted.
 `vaSyncSurface()` therefore uses a bounded 2000 ms wait by default, allowing
@@ -132,20 +131,24 @@ supported configurations:
 | `V4L2_VA_CAPTURE_SCHEDULED` | off | Let the queue service own CAPTURE slot rotation instead of binding a slot to the surface. |
 | `V4L2_VA_RESET_OUTPUT_STREAM` | off | Use a STREAMOFF/STREAMON pair on both queues when restarting a stateful sequence, instead of requeueing in place. |
 | `V4L2_VA_RESET_ON_IDR` | off | Reset the queues on every detected IDR. Measured to fire on ordinary mid-stream scene-change IDRs and cascade into timeouts; do not enable by default. |
-| `V4L2_VA_ZERO_COPY` | off | Experimental no-B H.264/VP9 single-plane NV12 DMA-BUF CAPTURE path with one-AU batching. Keeps a surface's buffer pinned until reuse; setup or batch-contract failures fall back to MMAP. |
+| `V4L2_VA_ZERO_COPY` | off | Experimental no-B H.264 single-plane NV12 DMA-BUF CAPTURE path with one-AU batching. Keeps a surface's buffer pinned until reuse; setup or batch-contract failures fall back to MMAP. |
 
 ## Status
-The project currently supports these codecs: MPEG2, H264, VP8, Qualcomm Iris
-stateful VP9, and stateful HEVC on nodes that advertise the corresponding V4L2
-formats. Set `V4L2_VA_DISABLE_HEVC_STATEFUL=1` to disable the generated
+The project currently supports these codecs: MPEG2, H264, VP8, and Qualcomm
+Iris stateful HEVC on nodes that advertise the corresponding V4L2 formats.
+Set `V4L2_VA_DISABLE_HEVC_STATEFUL=1` to disable the generated
 parameter-set HEVC path on firmware with a non-standard contract.
-VP9 support depends on a part of gstreamer that is not likely to be present in the version shipped by your distribution.
+The target node can decode fixed-resolution VP9 natively, but VA Profile 0 is
+withdrawn: repeated VP9 source changes and VA context recreation reproducibly
+reboot the qualified kernel/firmware. Applications therefore fall back to
+software VP9 instead of exposing a device-wide crash path.
 The implementation has been tested using Intel's [vaapi-fits](https://github.com/intel/vaapi-fits) on an RK3399, which is supported by the `hantro` and `rockchip` drivers.
 Feedback on results for other platforms are very welcome, do not expect the library to simply work smoothly though.
 This fork experimentally detects Qualcomm Iris stateful H.264 when the device advertises
 `V4L2_PIX_FMT_H264` rather than `V4L2_PIX_FMT_H264_SLICE`. Queue setup is lazy
 so a client can create a VA context before allocating render targets. The
-stateful VP9 path is enabled when the Iris device advertises `V4L2_PIX_FMT_VP9`.
+dormant stateful VP9 translator remains in the tree for firmware diagnosis,
+but it is not advertised through VA-API.
 AV1 is not enabled by default: VA-API supplies AV1 tile payloads while Iris'
 stateful node requires complete OBU temporal units. An incomplete experimental
 translator can be selected with `V4L2_VA_ENABLE_AV1_STATEFUL=1`, but it is not

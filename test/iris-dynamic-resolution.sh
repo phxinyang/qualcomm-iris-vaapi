@@ -3,9 +3,9 @@
 # Exercise 640x360 <-> 1280x720 sequence changes on the Iris stateful decoder.
 # H.264 passes only when native V4L2/GStreamer decodes the complete changing-
 # resolution stream, one FFmpeg VA process matches software, and fresh VA
-# decoder contexts repeatedly decode each geometry. Native in-place VP9
-# source changes reboot the target kernel/firmware, so VP9 deliberately skips
-# that unsafe lane and qualifies only the VA context-recreation contract.
+# decoder contexts repeatedly decode each geometry. Both native and VA VP9
+# dynamic/session-churn probes reboot the target kernel/firmware, so requesting
+# VP9 fails before any compressed stream is submitted.
 # Missing formats, elements or advertised support are failures, never SKIPs.
 
 set -eu
@@ -18,7 +18,7 @@ root=${IRIS_DYNAMIC_DIR:-$(iris_artifact_dir dynamic-resolution)}
 switches=${IRIS_DYNAMIC_SWITCHES:-100}
 frames_per_segment=${IRIS_DYNAMIC_FRAMES_PER_SEGMENT:-2}
 timeout_seconds=${IRIS_DYNAMIC_TIMEOUT_SECONDS:-600}
-codecs=${IRIS_DYNAMIC_CODECS:-"h264 vp9"}
+codecs=${IRIS_DYNAMIC_CODECS:-h264}
 
 case "$switches:$frames_per_segment:$timeout_seconds" in
     *[!0-9:]*|0:*|*:0:*|*:0)
@@ -278,12 +278,8 @@ for codec in $codecs; do
             run_va_new_contexts h264 mkv
             ;;
         vp9)
-            require_format VP90 vp9
-            make_concat_stream vp9 "${IRIS_VP9_ENCODER:-libvpx-vp9}" webm \
-                '-deadline realtime -cpu-used 8 -g 1 -b:v 2M -pix_fmt yuv420p'
-            echo 'SKIP vp9 native-baseline unsafe-in-place-dynamic-resolution'
-            run_va_single_process vp9
-            run_va_new_contexts vp9 webm
+            echo 'FAIL VP9 dynamic qualification is disabled: target kernel/firmware reboots' >&2
+            exit 1
             ;;
         *)
             echo "FAIL unknown IRIS_DYNAMIC_CODECS entry: $codec" >&2

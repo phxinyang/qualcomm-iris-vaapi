@@ -59,6 +59,14 @@ if grep -q "capture\[\^:\]\*error|undefined symbol" "$concurrency_soak" \
     echo "FAIL concurrency soak treats successful CAPTURE logs as errors" >&2
     exit 1
 fi
+if grep -Eq 'mixed-vp9|preflight vp9|VP90' "$concurrency_soak"; then
+    echo "FAIL concurrency qualification still exercises withdrawn VP9 VA" >&2
+    exit 1
+fi
+if grep -Eq '/dev/video[0-9]+' "$root/test/compare.html"; then
+    echo "FAIL browser comparison UI hardcodes a V4L2 node" >&2
+    exit 1
+fi
 
 if ! grep -Fq "awk -F, 'NF >= 2 { print \$1 \",\" \$2 }'" "$dynamic_resolution"; then
     echo "FAIL dynamic-resolution switch count does not normalize ffprobe side-data columns" >&2
@@ -75,8 +83,8 @@ if grep -q 'va-same-context\|same-context path' "$dynamic_resolution" \
     exit 1
 fi
 if ! grep -q 'stateful resize rejected codec=vp9' "$context" \
-    || ! grep -q 'SKIP vp9 native-baseline unsafe-in-place-dynamic-resolution' "$dynamic_resolution"; then
-    echo "FAIL VP9 in-place dynamic resolution does not fail closed" >&2
+    || ! grep -q 'FAIL VP9 dynamic qualification is disabled' "$dynamic_resolution"; then
+    echo "FAIL VP9 dynamic resolution does not fail closed" >&2
     exit 1
 fi
 vp9_reject_line=$(grep -n 'stateful resize rejected codec=vp9' "$context" | cut -d: -f1)

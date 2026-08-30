@@ -42,13 +42,11 @@ extern "C" {
 
 namespace {
 
-fourcc vp9_output_format(const V4L2M2MDevice& device)
+fourcc vp9_output_format(const V4L2M2MDevice&)
 {
-    // Iris exposes complete VP9 frames (VP90), not the stateless VP9_FRAME
-    // request format. Keep the existing request-api path for devices that
-    // expose VP9_FRAME and use the ordinary stateful stream for Iris.
-    if (device.format_supported(device.output_buf_type, V4L2_PIX_FMT_VP9))
-        return V4L2_PIX_FMT_VP9;
+    // This class implements the request API. Stateful VP90 is intentionally
+    // handled only by VP9StatefulContext, whose VA capability is withdrawn on
+    // the qualified Iris target because session/source-change churn reboots it.
     return V4L2_PIX_FMT_VP9_FRAME;
 }
 
@@ -260,8 +258,7 @@ int VP9Context::set_controls()
 std::set<VAProfile> VP9Context::supported_profiles(const V4L2M2MDevice& device)
 {
     // TODO: query `va_profile` control for more details
-    return (device.format_supported(device.output_buf_type, V4L2_PIX_FMT_VP9_FRAME)
-            || device.format_supported(device.output_buf_type, V4L2_PIX_FMT_VP9))
+    return device.format_supported(device.output_buf_type, V4L2_PIX_FMT_VP9_FRAME)
         ? std::set<VAProfile>(
               { VAProfileVP9Profile0, VAProfileVP9Profile1, VAProfileVP9Profile2, VAProfileVP9Profile3 })
         : std::set<VAProfile>();

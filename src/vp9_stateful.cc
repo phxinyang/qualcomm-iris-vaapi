@@ -46,20 +46,11 @@ VAStatus VP9StatefulContext::store_buffer(const Buffer& buffer) const
 
 std::set<VAProfile> VP9StatefulContext::supported_profiles(const V4L2M2MDevice& device)
 {
-    if (!device.format_supported(device.output_buf_type, V4L2_PIX_FMT_VP9))
-        return {};
-
-    // This backend currently publishes only an 8-bit 4:2:0 VA surface
-    // contract.  Profiles 1/2/3 require chroma layouts and/or bit depths that
-    // cannot be represented by NV12, even if the compressed decoder menu
-    // lists them.
-    const bool has_8bit_420_surface = device.format_supported(device.capture_buf_type, V4L2_PIX_FMT_NV12)
-        || device.format_supported(device.capture_buf_type, V4L2_PIX_FMT_NV12M);
-    if (!has_8bit_420_surface)
-        return {};
-
-    const auto menu = device.menu_control_values(V4L2_CID_MPEG_VIDEO_VP9_PROFILE);
-    if (!menu || !menu->contains(V4L2_MPEG_VIDEO_VP9_PROFILE_0))
-        return {};
-    return { VAProfileVP9Profile0 };
+    // Fixed-resolution Profile 0 decodes correctly, but repeated VP9 source
+    // changes and VA context recreation reproducibly reboot the qualified
+    // Iris kernel/firmware. Do not advertise a browser-visible capability
+    // that can take down the whole device; keep the implementation dormant
+    // for firmware diagnostics until that platform defect is fixed.
+    (void)device;
+    return {};
 }

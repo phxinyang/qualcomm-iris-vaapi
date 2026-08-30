@@ -35,8 +35,9 @@ Chrome build; playback alone is not evidence that hardware decode was used.
 
 ## Qualcomm Iris codec matrix
 
-On the tablet, `/dev/video17` advertises H.264, HEVC, VP9 and AV1 OUTPUT
-formats. Run the native AV1 baseline with the GStreamer stateful client:
+On the tablet, the node selected by `iris_resolve_device` advertises H.264,
+HEVC, VP9 and AV1 OUTPUT formats. Run the native AV1 baseline with the
+GStreamer stateful client:
 
 ```
 gst-launch-1.0 -e filesrc location=$HOME/Lab/Bridge/tmp/trash/iris-av1-matrix/test.webm ! \
@@ -84,7 +85,10 @@ its reference chain is intentionally a negative random-access test.
 The VA-API matrix is run with the same `LIBVA_*` variables and FFmpeg's VAAPI
 decoder. A codec counts as passed only when FFmpeg exits successfully, emits
 the expected frame count, and the trace has no capture errors or timestamp
-mismatches. MPEG-2 and VP8 are marked `SKIP` when the target node does not
+mismatches. Fixed-resolution VP9 still runs through the native V4L2 baseline,
+but its VA lane is an intentional `SKIP`: repeated session/source-change tests
+reboot the target, so the driver no longer advertises VP9 Profile 0. MPEG-2 and
+VP8 are marked `SKIP` when the target node does not
 enumerate their OUTPUT formats. AV1 is currently `BASELINE-PASS / VA-SKIP`:
 the VA AV1 API provides tile payloads, whereas Iris stateful AV1 requires a
 complete OBU temporal unit; enabling the experimental translator is expected
@@ -96,18 +100,16 @@ revisions leave a reorder queue warm when a GStreamer session closes; the
 ordering keeps the VA cold-start and EOS checks deterministic.
 
 The production dynamic-resolution gate is `iris-dynamic-resolution.sh`. It
-generates H.264 and VP9 streams that alternate 640x360 and 1280x720 exactly 100
-times. H.264 requires byte-identical native V4L2/software output, exact frame
+generates an H.264 stream that alternates 640x360 and 1280x720 exactly 100
+times and requires byte-identical native V4L2/software output, exact frame
 MD5 from one FFmpeg VA process across all changes, and exact output from 101
-fresh VA decoder processes. Native in-place VP9 source changes reboot the
-qualified Iris kernel/firmware even in a 10-switch probe, so the script does
-not repeat that unsafe lane: the driver rejects in-place VP9 geometry changes
-before queue teardown and the gate verifies FFmpeg's VA context-recreation
-path instead. Unsupported formats or missing required elements fail the run;
-they are not recorded as passes or skips. Use
+fresh VA decoder processes. Both native and VA VP9 dynamic probes rebooted the
+qualified Iris kernel/firmware, so the script rejects VP9 before decoding and
+the driver withdraws its VA profile. Unsupported H.264 formats or missing
+required elements fail the run; they are not recorded as passes or skips. Use
 `IRIS_DYNAMIC_SWITCHES` only to shorten a development run.
 
-For multi-context and long-run qualification, use:
+For dual-H.264 and mixed H.264+HEVC long-run qualification, use:
 
 ```
 ./test/iris-concurrency-soak.sh dual-h264
@@ -124,9 +126,11 @@ labelled explicitly and is not release evidence.
 For the stateful multi-context regression probe on the tablet:
 
 ```
+. ./test/lib/iris-env.sh
+device=$(iris_resolve_device)
 LIBVA_DRIVER_NAME=v4l2 \
 LIBVA_DRIVERS_PATH=$PWD/build/src \
-LIBVA_V4L2_VIDEO_PATH=/dev/video17 \
+LIBVA_V4L2_VIDEO_PATH="$device" \
 ./build/test/v4l2-context-isolation
 ```
 

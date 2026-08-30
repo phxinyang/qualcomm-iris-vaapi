@@ -22,7 +22,7 @@ const hardware = params.get('mode') === 'hardware';
 document.title = hardware ? '硬解 VA-API' : '软件解码';
 document.getElementById('title').textContent = hardware ? '硬解 VA-API' : '软件解码';
 document.getElementById('mode').textContent = hardware
-  ? 'Qualcomm Iris / V4L2 VA-API / /dev/video0'
+  ? 'Qualcomm Iris / V4L2 VA-API / auto-detected Iris node'
   : 'Chrome FFmpegVideoDecoder';
 const video = document.getElementById('v');
 video.loop = params.get('loop') === '1';

@@ -79,7 +79,7 @@ firmware diagnostics; always record which decoder path was used.
 
 ## Dynamic resolution qualification
 
-Run the dedicated H.264 and VP9 reconfiguration gate on the target:
+Run the dedicated H.264 reconfiguration gate on the target:
 
 ```sh
 . ./test/lib/iris-env.sh
@@ -99,10 +99,9 @@ the same checks. FFmpeg is allowed to recreate VA contexts on a coded-size
 change; the single-process lane therefore qualifies context retirement and
 session cleanup rather than asserting a client behavior FFmpeg does not have.
 
-Do not run the native in-place VP9 lane on this target: a 10-switch probe
-reproducibly rebooted the kernel/firmware immediately after EOS. The backend
-rejects an in-place VP9 geometry change before STOP/STREAMOFF and the production
-gate qualifies VP9 only through safe VA context recreation. A missing device
+Do not run VP9 dynamic qualification on this target: both the native in-place
+lane and the VA context-recreation lane rebooted the kernel/firmware. VA Profile
+0 is withdrawn entirely, so VP9 falls back to software. A missing H.264 device
 format, required element or VA capability is a failure, not a skip.
 Development runs may shorten the matrix explicitly with
 `IRIS_DYNAMIC_SWITCHES` and `IRIS_DYNAMIC_FRAMES_PER_SEGMENT`; qualification
@@ -110,8 +109,7 @@ results must retain the defaults.
 
 ## Concurrent soak qualification
 
-The concurrent runner has separate dual-H.264 and mixed
-H.264+VP9+HEVC scenarios:
+The concurrent runner has separate dual-H.264 and mixed H.264+HEVC scenarios:
 
 ```sh
 ./test/iris-concurrency-soak.sh dual-h264

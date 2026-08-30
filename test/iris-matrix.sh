@@ -94,7 +94,7 @@ fi
 
 if has_format VP90; then
     run_native vp9 matroskademux vp9parse v4l2vp9dec test-vp9.webm
-    run_va vp9 "$root/test-vp9.webm"
+    echo "SKIP vp9 va=withdrawn-session-source-change-reboot"
 else
     echo "SKIP vp9 device-format-unavailable"
 fi
