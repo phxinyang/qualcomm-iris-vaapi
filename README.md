@@ -49,6 +49,14 @@ that explicitly manage rotating V4L2 CAPTURE buffer lifetime themselves.
 The complete CAPTURE pool is queued by default so firmware reorder and EOS
 drain cannot run out of free slots.
 
+For a power/throughput experiment, `V4L2_VA_ZERO_COPY=1` imports each stable
+surface DMA-BUF directly into the stateful Iris CAPTURE queue. A completed
+surface remains pinned until VA reuses it, so the CAPTURE-to-stable-buffer
+memcpy is removed while the exported fd and CPU mapping stay unchanged. The
+experiment is restricted to single-plane NV12 and automatically falls back to
+MMAP plus the stable copy if allocation, plane validation, or QBUF fails. It is
+disabled by default and is not required for Chrome or other clients.
+
 Surface size attributes are read from the selected V4L2 capture format with
 `VIDIOC_ENUM_FRAMESIZES`; the VA limits therefore follow each decoder's real
 minimum and maximum instead of assuming a 2048-pixel ceiling. Stateful clients
@@ -108,6 +116,7 @@ supported configurations:
 | `V4L2_VA_CAPTURE_SCHEDULED` | off | Let the queue service own CAPTURE slot rotation instead of binding a slot to the surface. |
 | `V4L2_VA_RESET_OUTPUT_STREAM` | off | Use a STREAMOFF/STREAMON pair on both queues when restarting a stateful sequence, instead of requeueing in place. |
 | `V4L2_VA_RESET_ON_IDR` | off | Reset the queues on every detected IDR. Measured to fire on ordinary mid-stream scene-change IDRs and cascade into timeouts; do not enable by default. |
+| `V4L2_VA_ZERO_COPY` | off | Experimental stateful single-plane NV12 DMA-BUF CAPTURE path. Keeps a surface's buffer pinned until reuse and falls back to MMAP on any setup failure. |
 
 ## Status
 The project currently supports these codecs: MPEG2, H264, VP8, Qualcomm Iris

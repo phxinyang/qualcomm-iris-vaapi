@@ -299,19 +299,73 @@ V4L2M2MDevice::Buffer::Buffer(V4L2M2MDevice& owner, v4l2_buf_type type, unsigned
     : owner_(owner)
     , type_(type)
     , index_(index)
+    , memory_(V4L2_MEMORY_MMAP)
     , query_flags_(0)
     , mapping_(map_buffer(owner.video_fd, type, index, &query_flags_))
 {
+}
+
+V4L2M2MDevice::Buffer::Buffer(V4L2M2MDevice& owner, v4l2_buf_type type, unsigned index, int dmabuf_fd,
+    size_t dmabuf_size)
+    : owner_(owner)
+    , type_(type)
+    , index_(index)
+    , memory_(V4L2_MEMORY_DMABUF)
+    , query_flags_(0)
+{
+    if (dmabuf_fd < 0)
+        throw std::invalid_argument("Invalid DMA-BUF fd");
+
+    v4l2_plane planes[VIDEO_MAX_PLANES] = {};
+    v4l2_buffer buffer = {
+        .index = index,
+        .type = type,
+        .memory = V4L2_MEMORY_DMABUF,
+        .m = { .planes = planes },
+        .length = VIDEO_MAX_PLANES,
+    };
+    errno_wrapper(ioctl, owner.video_fd, VIDIOC_QUERYBUF, &buffer);
+    query_flags_ = buffer.flags & ~V4L2_BUF_FLAG_MAPPED;
+
+    unsigned plane_count = buffer.length;
+    size_t required_size = 0;
+    if (V4L2_TYPE_IS_MULTIPLANAR(type)) {
+        if (plane_count != 1)
+            throw std::invalid_argument("Only single-plane DMA-BUF capture is supported");
+        required_size = buffer.m.planes[0].length;
+    } else {
+        plane_count = 1;
+        required_size = buffer.length;
+    }
+    if (dmabuf_size < required_size)
+        throw std::invalid_argument("DMA-BUF is smaller than the V4L2 plane");
+
+    const int owned_fd = dup(dmabuf_fd);
+    if (owned_fd < 0)
+        throw std::system_error(errno, std::generic_category(), "dup DMA-BUF");
+    dmabuf_fds_.push_back(owned_fd);
+    plane_lengths_.push_back(dmabuf_size);
+    if (plane_count != dmabuf_fds_.size()) {
+        close(owned_fd);
+        dmabuf_fds_.clear();
+        plane_lengths_.clear();
+        throw std::invalid_argument("DMA-BUF plane count mismatch");
+    }
 }
 
 V4L2M2MDevice::Buffer::Buffer(V4L2M2MDevice::Buffer&& other)
     : owner_(other.owner_)
     , type_(other.type_)
     , index_(other.index_)
+    , memory_(other.memory_)
     , query_flags_(other.query_flags_)
     , mapping_(other.mapping_)
+    , dmabuf_fds_(other.dmabuf_fds_)
+    , plane_lengths_(other.plane_lengths_)
 {
     other.mapping_.clear();
+    other.dmabuf_fds_.clear();
+    other.plane_lengths_.clear();
 }
 
 V4L2M2MDevice::Buffer& V4L2M2MDevice::Buffer::operator=(V4L2M2MDevice::Buffer&& other)
@@ -326,6 +380,8 @@ V4L2M2MDevice::Buffer::~Buffer()
     for (auto&& map : mapping_) {
         munmap(map.data(), map.size());
     }
+    for (const int fd : dmabuf_fds_)
+        close(fd);
 }
 
 void V4L2M2MDevice::Buffer::queue(int request_fd, timeval* timestamp, unsigned size) const
@@ -334,9 +390,9 @@ void V4L2M2MDevice::Buffer::queue(int request_fd, timeval* timestamp, unsigned s
     struct v4l2_buffer buffer = {
         .index = index_,
         .type = type_,
-        .memory = V4L2_MEMORY_MMAP,
+        .memory = memory_,
         .m = { .planes = planes },
-        .length = static_cast<uint32_t>(mapping_.size()),
+        .length = static_cast<uint32_t>(uses_dmabuf() ? dmabuf_fds_.size() : mapping_.size()),
     };
     // Native Iris clients submit both queues with FIELD_NONE. FIELD_ANY is
     // accepted for the initial CAPTURE QBUF but can make a later buffer fail
@@ -344,13 +400,23 @@ void V4L2M2MDevice::Buffer::queue(int request_fd, timeval* timestamp, unsigned s
     buffer.field = V4L2_FIELD_NONE;
 
     if (V4L2_TYPE_IS_MULTIPLANAR(type_)) {
-        for (unsigned i = 0; i < mapping_.size(); i++) {
-            // MMAP QBUF carries the mapped plane length; bytesused carries the
-            // compressed payload size for OUTPUT and is zero for CAPTURE.
-            buffer.m.planes[i].length = mapping_[i].size();
+        const unsigned plane_count = uses_dmabuf() ? dmabuf_fds_.size() : mapping_.size();
+        for (unsigned i = 0; i < plane_count; i++) {
+            // MMAP QBUF carries the mapped plane length. DMA-BUF QBUF carries
+            // the imported fd and its allocation length instead.
+            if (uses_dmabuf()) {
+                buffer.m.planes[i].m.fd = dmabuf_fds_[i];
+                buffer.m.planes[i].length = plane_lengths_[i];
+            } else {
+                buffer.m.planes[i].length = mapping_[i].size();
+            }
             buffer.m.planes[i].bytesused = size;
         }
     } else {
+        if (uses_dmabuf()) {
+            buffer.m.fd = dmabuf_fds_[0];
+            buffer.length = plane_lengths_[0];
+        }
         buffer.bytesused = size;
     }
 
@@ -362,7 +428,9 @@ void V4L2M2MDevice::Buffer::queue(int request_fd, timeval* timestamp, unsigned s
     // Preserve the MMAP/timestamp flags returned by QUERYBUF on both queues.
     // The tablet's native v4l2-ctl client sends these flags for initial
     // CAPTURE QBUF as well as compressed OUTPUT.
-    buffer.flags |= query_flags_ | V4L2_BUF_FLAG_MAPPED;
+    buffer.flags |= query_flags_;
+    if (!uses_dmabuf())
+        buffer.flags |= V4L2_BUF_FLAG_MAPPED;
 
     if (timestamp != NULL)
         buffer.timestamp = *timestamp;
@@ -379,9 +447,9 @@ unsigned V4L2M2MDevice::Buffer::dequeue() const
     struct v4l2_plane planes[VIDEO_MAX_PLANES] = {};
     struct v4l2_buffer buffer = {
         .type = type_,
-        .memory = V4L2_MEMORY_MMAP,
+        .memory = memory_,
         .m = { .planes = planes },
-        .length = VIDEO_MAX_PLANES,
+        .length = static_cast<uint32_t>(uses_dmabuf() ? dmabuf_fds_.size() : VIDEO_MAX_PLANES),
     };
 
     errno_wrapper(ioctl, owner_.video_fd, VIDIOC_DQBUF, &buffer);
@@ -394,6 +462,15 @@ unsigned V4L2M2MDevice::Buffer::dequeue() const
 std::vector<int> V4L2M2MDevice::Buffer::export_(unsigned flags) const
 {
     std::vector<int> result;
+    if (uses_dmabuf()) {
+        for (const int fd : dmabuf_fds_) {
+            const int exported = dup(fd);
+            if (exported < 0)
+                throw std::system_error(errno, std::generic_category(), "dup DMA-BUF");
+            result.push_back(exported);
+        }
+        return result;
+    }
     for (unsigned i = 0; i < mapping_.size(); i++) {
         v4l2_exportbuffer exportbuffer = {
             .type = type_,
@@ -528,6 +605,40 @@ unsigned V4L2M2MDevice::request_buffers(v4l2_buf_type type, unsigned count)
     return buffers.size(); // Actual amount may differ
 }
 
+unsigned V4L2M2MDevice::request_buffers_dmabuf(v4l2_buf_type type, unsigned count, std::span<const int> fds,
+    std::span<const size_t> lengths)
+{
+    if (fds.size() < count || lengths.size() < count)
+        throw std::invalid_argument("Not enough DMA-BUFs for V4L2 queue");
+
+    struct v4l2_requestbuffers req_buffers = {
+        .count = count,
+        .type = type,
+        .memory = V4L2_MEMORY_DMABUF,
+    };
+    errno_wrapper(ioctl, video_fd, VIDIOC_REQBUFS, &req_buffers);
+
+    if (req_buffers.count > fds.size() || req_buffers.count > lengths.size()) {
+        v4l2_requestbuffers release = { .type = type, .memory = V4L2_MEMORY_DMABUF };
+        ioctl(video_fd, VIDIOC_REQBUFS, &release);
+        throw std::invalid_argument("V4L2 returned more DMA-BUF slots than provided");
+    }
+
+    auto& buffers = V4L2_TYPE_IS_CAPTURE(type) ? capture_buffers : output_buffers;
+    buffers.clear();
+    try {
+        for (unsigned i = 0; i < req_buffers.count; i++)
+            buffers.emplace_back(*this, type, i, fds[i], lengths[i]);
+    } catch (...) {
+        buffers.clear();
+        v4l2_requestbuffers release = { .type = type, .memory = V4L2_MEMORY_DMABUF };
+        ioctl(video_fd, VIDIOC_REQBUFS, &release);
+        throw;
+    }
+
+    return buffers.size();
+}
+
 bool V4L2M2MDevice::format_supported(v4l2_buf_type type, unsigned pixelformat) const
 {
     for (v4l2_fmtdesc fmtdesc = { .type = type }; ioctl(video_fd, VIDIOC_ENUM_FMT, &fmtdesc) >= 0; fmtdesc.index += 1) {
@@ -585,6 +696,11 @@ unsigned V4L2M2MDevice::buffer_count(v4l2_buf_type type) const
 }
 
 const V4L2M2MDevice::Buffer& V4L2M2MDevice::buffer(v4l2_buf_type type, unsigned index)
+{
+    return (V4L2_TYPE_IS_CAPTURE(type) ? capture_buffers : output_buffers)[index];
+}
+
+const V4L2M2MDevice::Buffer& V4L2M2MDevice::buffer(v4l2_buf_type type, unsigned index) const
 {
     return (V4L2_TYPE_IS_CAPTURE(type) ? capture_buffers : output_buffers)[index];
 }
@@ -742,9 +858,11 @@ std::optional<unsigned> V4L2M2MDevice::dequeue_ready(v4l2_buf_type type, int tim
         }
 
         v4l2_plane planes[VIDEO_MAX_PLANES] = {};
+        const auto& queue_buffers = V4L2_TYPE_IS_CAPTURE(type) ? capture_buffers : output_buffers;
+        const v4l2_memory memory = queue_buffers.empty() ? V4L2_MEMORY_MMAP : queue_buffers.front().memory();
         v4l2_buffer buffer = {
             .type = type,
-            .memory = V4L2_MEMORY_MMAP,
+            .memory = memory,
             .m = { .planes = planes },
             .length = VIDEO_MAX_PLANES,
         };

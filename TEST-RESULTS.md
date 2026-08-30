@@ -379,3 +379,32 @@ the software decoder at the same byte offset, so that isolated difference is
 recorded as deterministic firmware behavior rather than a VA-driver mismatch.
 The backend now also drains and rebuilds stateful V4L2 queues when a VA client
 reuses one context for a surface with a new geometry.
+
+## Codex zero-copy experiment (2026-08-30, `codex/claude-followup`, `.133`)
+
+The current Claude route was extended with an opt-in `V4L2_VA_ZERO_COPY=1`
+path. Stateful single-plane NV12 CAPTURE buffers can now import the per-surface
+DMA-BUF directly; the V4L2 `Buffer` owns a duplicated fd and no longer maps a
+kernel MMAP slot. Surface reuse requeues the imported buffer, while setup or
+plane validation failures fall back to the existing MMAP plus stable-copy path.
+The default remains unchanged and Chrome is not modified.
+
+The Iris firmware assigns a decoded frame to any queued CAPTURE slot rather
+than honoring a VA-surface index. The experiment therefore keeps one imported
+slot in flight for H.264/VP9 and uses an extra scratch slot for STOP/LAST drain;
+otherwise a frame can land in the wrong exported fd. HEVC/AV1 are rejected from
+this experimental contract and automatically use the stable-copy path because
+their reorder depth needs multiple simultaneously queued CAPTURE slots.
+
+| Run | Result |
+| --- | --- |
+| `.133`, zero-copy H.264 matrix, 48 frames | `48/48`, exact software framemd5, `49 CAPTURE`, one `LAST`, zero timeout/timestamp misses. Trace confirms no `copy_surface_frame` for decoded CAPTURE. |
+| `.133`, zero-copy VP9 matrix, 48 frames | `48/48`, exact software framemd5, strict EOS and zero timeout/timestamp misses. |
+| `.133`, zero-copy HEVC matrix, 48 frames | Stable-copy fallback (`codec_reorder_contract`); `48/48` exact software framemd5 and strict EOS. |
+| `.133`, zero-copy H.264 structure, 24 frames | all-I and IP/GOP12 pass; B=2/B=4 fail because the one-slot contract cannot satisfy Iris reorder depth. This is retained as a known opt-in limit, not a default-path regression. |
+| `.133`, default MMAP structure, 24 frames | all-I, IP/GOP12, B=2 and B=4 all pass with exact software framemd5. |
+
+The remote clean rebuild and `ldd -r` gate passed for every iteration. The
+experiment removes the CAPTURE-to-stable-buffer memcpy only for the validated
+no-B H.264/VP9 path; it is not yet a universal replacement for native
+multi-slot zero-copy behavior.

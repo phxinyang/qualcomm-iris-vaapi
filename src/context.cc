@@ -181,6 +181,81 @@ bool stateful_capture_scheduled()
     return value && std::strcmp(value, "1") == 0;
 }
 
+bool Context::capture_uses_dmabuf() const
+{
+    return device.buffer_count(device.capture_buf_type) > 0
+        && device.buffer(device.capture_buf_type, 0).uses_dmabuf();
+}
+
+bool Context::capture_slots_scheduled() const
+{
+    return stateful_capture_scheduled() || capture_uses_dmabuf();
+}
+
+bool Context::zero_copy_codec_supported() const
+{
+    // The current one-slot CAPTURE ownership model is validated on Iris H.264
+    // and VP9. HEVC/AV1 can hold several reordered pictures in firmware and
+    // require a multi-slot ownership protocol that is deliberately left on
+    // the stable-copy path until it can be proven without fd aliasing.
+    return pixelformat == V4L2_PIX_FMT_H264 || pixelformat == V4L2_PIX_FMT_VP9;
+}
+
+void Context::queue_zero_copy_capture()
+{
+    if (!capture_uses_dmabuf() || !capture_initialized)
+        return;
+
+    // Iris assigns a decoded frame to any currently queued CAPTURE slot. Keep
+    // exactly one imported DMA-BUF in flight so the timestamp -> VA surface
+    // association remains valid; a second queued slot could belong to another
+    // surface and would overwrite the fd the client is displaying.
+    for (const auto& [surface_id, buffer_index] : surface_buffer_indices) {
+        if (driver_data->surfaces.contains(surface_id)
+            && driver_data->surfaces.at(surface_id).destination_buffer_queued)
+            return;
+    }
+    for (const auto batch_index : stateful_batch_order) {
+        const auto batch = stateful_batches.find(batch_index);
+        if (batch == stateful_batches.end())
+            continue;
+        const auto& batch_surfaces = batch->second;
+        for (const auto surface_id : batch_surfaces) {
+            if (!driver_data->surfaces.contains(surface_id))
+                continue;
+            auto& surface = driver_data->surfaces.at(surface_id);
+            if (surface.status != VASurfaceRendering || surface.destination_buffer_queued
+                || !surface.destination_buffer)
+                continue;
+            surface.destination_buffer->get().queue();
+            surface.destination_buffer_queued = true;
+            if (trace_enabled())
+                std::fprintf(stderr, "stateful zero-copy queue surface=%u index=%u\n", surface_id,
+                    surface.destination_buffer_index);
+            return;
+        }
+    }
+}
+
+void Context::queue_zero_copy_drain_capture()
+{
+    if (!capture_uses_dmabuf() || !capture_initialized)
+        return;
+    for (const auto& [surface_id, buffer_index] : surface_buffer_indices) {
+        if (driver_data->surfaces.contains(surface_id)
+            && driver_data->surfaces.at(surface_id).destination_buffer_queued)
+            return;
+    }
+    for (unsigned index = 0; index < device.buffer_count(device.capture_buf_type); index++) {
+        if (surface_for_buffer(device.capture_buf_type, index))
+            continue;
+        device.buffer(device.capture_buf_type, index).queue();
+        if (trace_enabled())
+            std::fprintf(stderr, "stateful zero-copy drain scratch index=%u\n", index);
+        return;
+    }
+}
+
 Context::~Context()
 {
     // Join before taking any decoder lock. destroyContext() already holds the
@@ -302,7 +377,7 @@ bool Context::start_capture()
     // be queued and streamed.
     for (auto& [surface_id, buffer_index] : surface_buffer_indices)
         bind_surface(surface_id);
-    if (stateful_capture_scheduled()) {
+    if (capture_slots_scheduled()) {
         // Stateful V4L2 has no VA render-target argument. Queue only the
         // capture buffers belonging to surfaces already submitted in OUTPUT,
         // so Iris writes each decoded frame into the DMA-BUF the VA client
@@ -326,6 +401,8 @@ bool Context::start_capture()
             if (!surface.destination_buffer_queued) {
                 buffer.queue();
                 surface.destination_buffer_queued = true;
+                if (capture_uses_dmabuf())
+                    break;
             }
         }
         if (trace_enabled())
@@ -480,6 +557,7 @@ VAStatus Context::flush_stateful_batch()
                 return VA_STATUS_ERROR_OPERATION_FAILED;
             stateful_queue_restart_pending = false;
         }
+        queue_zero_copy_capture();
         // Do not probe for backpressure from the producer path. A stateful
         // decoder normally keeps a small reorder window queued even while
         // playback is healthy; waiting here and issuing STOP would stall the
@@ -515,15 +593,17 @@ void Context::service_stateful_queues()
         bool capture_requeued = false;
         if (completed && driver_data->surfaces.contains(*completed)) {
             auto& surface = driver_data->surfaces.at(*completed);
-            copy_surface_frame(surface, device.buffer(device.capture_buf_type, *capture_index));
+            if (!capture_uses_dmabuf())
+                copy_surface_frame(surface, device.buffer(device.capture_buf_type, *capture_index));
             // With the stable DMA-BUF path the VA client consumes a private
             // copy, so the V4L2 CAPTURE slot must be returned immediately.
             // Holding it on the VA surface eventually exhausts the capture queue when
             // several decoders or looping videos are active.
-            if (copy_surfaces_enabled() && surface.export_buffer_fd >= 0 && surface.export_buffer_mapping) {
+            if (!capture_uses_dmabuf() && copy_surfaces_enabled() && surface.export_buffer_fd >= 0
+                && surface.export_buffer_mapping) {
                 device.buffer(device.capture_buf_type, *capture_index).queue();
                 capture_requeued = true;
-            } else if (stateful_capture_scheduled()) {
+            } else if (capture_slots_scheduled()) {
                 const auto expected = surface_buffer_indices.at(*completed);
                 if (trace_enabled() && expected != *capture_index)
                     std::fprintf(stderr, "stateful capture mismatch surface=%u expected=%u got=%u\n", *completed,
@@ -557,6 +637,8 @@ void Context::service_stateful_queues()
 
     while (auto output_index = device.dequeue_ready(device.output_buf_type, 0))
         mark_source_buffer_dequeued(*output_index);
+
+    queue_zero_copy_capture();
 }
 
 void Context::discard_stateful_error_frame()
@@ -701,6 +783,7 @@ bool Context::reset_stateful_decoder()
     // so the drain covers the whole stream rather than stranding the last
     // frame until the context is destroyed.
     stateful_flush_deferred();
+    queue_zero_copy_drain_capture();
     try {
         device.decoder_stop();
         stateful_draining = true;
@@ -717,8 +800,9 @@ bool Context::reset_stateful_decoder()
             if (auto completed = surface_for_timestamp(device.last_dequeued_timestamp(), device.last_dequeued_flags());
                 completed && driver_data->surfaces.contains(*completed)) {
                 auto& surface = driver_data->surfaces.at(*completed);
-                copy_surface_frame(surface, device.buffer(device.capture_buf_type, *capture_index));
-                if (!stateful_capture_scheduled()) {
+                if (!capture_uses_dmabuf())
+                    copy_surface_frame(surface, device.buffer(device.capture_buf_type, *capture_index));
+                if (!capture_slots_scheduled()) {
                     surface.destination_buffer = std::cref(device.buffer(device.capture_buf_type, *capture_index));
                     surface.destination_buffer_index = *capture_index;
                     surface.destination_buffer_queued = false;
@@ -862,6 +946,7 @@ bool Context::drain_stateful_decoder()
 
     try {
         if (!stateful_draining) {
+            queue_zero_copy_drain_capture();
             device.decoder_stop();
             // The STOP command drains the stateful decoder asynchronously. Mark
             // the context before waiting for the terminal CAPTURE marker so the
@@ -888,7 +973,8 @@ bool Context::drain_stateful_decoder()
             const bool capture_was_last = device.last_dequeued_last();
             if (completed && driver_data->surfaces.contains(*completed)) {
                 auto& surface = driver_data->surfaces.at(*completed);
-                copy_surface_frame(surface, device.buffer(device.capture_buf_type, *capture_index));
+                if (!capture_uses_dmabuf())
+                    copy_surface_frame(surface, device.buffer(device.capture_buf_type, *capture_index));
                 surface.status = VASurfaceDisplaying;
                 surface.source_size_used = 0;
             }
@@ -970,7 +1056,7 @@ void Context::resume_after_drain()
         if (!driver_data->surfaces.contains(surface_id))
             continue;
         auto& surface = driver_data->surfaces.at(surface_id);
-        if (surface.destination_buffer && !surface.destination_buffer_queued
+        if (!capture_uses_dmabuf() && surface.destination_buffer && !surface.destination_buffer_queued
             && surface.status != VASurfaceRendering) {
             surface.destination_buffer->get().queue();
             surface.destination_buffer_queued = true;
@@ -978,6 +1064,7 @@ void Context::resume_after_drain()
     }
     device.decoder_start();
     stateful_draining = false;
+    queue_zero_copy_capture();
     // A producer may have accumulated the next VA pictures while the
     // previous drain was completing. Submit them only after START succeeds.
     if (!stateful_pending.empty())
@@ -1172,7 +1259,12 @@ bool Context::bind_surface(VASurfaceID surface_id){
             // Before STREAMON start_capture() queues the whole pool. After
             // STREAMON this index was already queued with the pool, so never
             // QBUF it a second time.
-            surface.destination_buffer_queued = device.capture_streaming;
+            // In scheduled mode (including the DMA-BUF experiment), only
+            // surfaces that have actually been submitted are queued. A newly
+            // created VA target must be QBUF'd by beginPicture() before its
+            // first AU; treating STREAMON as proof that this index is queued
+            // leaves the firmware with fewer capture slots than the VA pool.
+            surface.destination_buffer_queued = device.capture_streaming && !capture_slots_scheduled();
             surface.logical_destination_layout.clear();
             if (v4l2_format.derive_layout) {
                 surface.logical_destination_layout = v4l2_format.derive_layout(driver_format.width, driver_format.height);
@@ -1182,6 +1274,13 @@ bool Context::bind_surface(VASurfaceID surface_id){
                     surface.logical_destination_layout.push_back({ plane, driver_format.plane_fmt[plane].sizeimage,
                         driver_format.plane_fmt[plane].bytesperline, 0 });
                 }
+            }
+            if (capture_uses_dmabuf() && !import_surface_dma_buf(surface, device.buffer(device.capture_buf_type, index),
+                    driver_format.plane_fmt[0].sizeimage)) {
+                if (trace_enabled())
+                    std::fprintf(stderr, "stateful zero-copy surface import failed surface=%u index=%u\n", surface_id,
+                        index);
+                return false;
             }
         }
         if (trace_enabled())

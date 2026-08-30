@@ -65,10 +65,13 @@ public:
         unsigned dequeue() const;
         std::vector<int> export_(unsigned flags) const;
         std::vector<std::span<uint8_t>> mapping() const { return mapping_; }
+        bool uses_dmabuf() const { return memory_ == V4L2_MEMORY_DMABUF; }
+        v4l2_memory memory() const { return memory_; }
         unsigned index() const { return index_; }
         V4L2M2MDevice& owner() const { return owner_; }
 
         Buffer(V4L2M2MDevice& owner, v4l2_buf_type type, unsigned index);
+        Buffer(V4L2M2MDevice& owner, v4l2_buf_type type, unsigned index, int dmabuf_fd, size_t dmabuf_size);
         Buffer(Buffer&& other);
         Buffer& operator=(Buffer&& other);
         ~Buffer();
@@ -77,10 +80,13 @@ public:
         V4L2M2MDevice& owner_;
         v4l2_buf_type type_;
         unsigned index_;
+        v4l2_memory memory_;
         // QUERYBUF flags are part of the MMAP queue contract. Qualcomm's
         // stateful decoder requires these flags on compressed OUTPUT QBUF.
         uint32_t query_flags_;
         std::vector<std::span<uint8_t>> mapping_;
+        std::vector<int> dmabuf_fds_;
+        std::vector<size_t> plane_lengths_;
 
         friend class V4L2M2MDevice;
     };
@@ -98,6 +104,8 @@ public:
     V4L2M2MDevice clone_for_context() const;
     void set_format(enum v4l2_buf_type type, unsigned int pixelformat, unsigned int width, unsigned int height);
     unsigned request_buffers(enum v4l2_buf_type type, unsigned count);
+    unsigned request_buffers_dmabuf(v4l2_buf_type type, unsigned count, std::span<const int> fds,
+        std::span<const size_t> lengths);
     bool format_supported(v4l2_buf_type type, unsigned pixelformat) const;
     // Read the driver's advertised frame-size range instead of assuming a
     // codec-independent VA surface limit. V4L2 enumerates sizes by format;
@@ -105,6 +113,7 @@ public:
     std::optional<V4L2FrameSizeLimits> frame_size_limits(unsigned pixelformat) const;
     unsigned buffer_count(v4l2_buf_type type) const;
     const Buffer& buffer(v4l2_buf_type type, unsigned index);
+    const Buffer& buffer(v4l2_buf_type type, unsigned index) const;
     int32_t get_control(uint32_t id) const;
     void set_ext_control(int request_fd, unsigned id, void* data, unsigned size);
     void set_ext_controls(int request_fd, std::span<v4l2_ext_control> controls);

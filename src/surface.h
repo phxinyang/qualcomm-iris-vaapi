@@ -138,6 +138,7 @@ VAStatus querySurfaceAttributes(
 VAStatus querySurfaceStatus(VADriverContextP context, VASurfaceID surface_id, VASurfaceStatus* status);
 
 void copy_surface_frame(Surface& surface, const V4L2M2MDevice::Buffer& capture);
+bool import_surface_dma_buf(Surface& surface, const V4L2M2MDevice::Buffer& capture, size_t size);
 bool copy_surfaces_enabled();
 VAStatus putSurface(VADriverContextP context, VASurfaceID surface_id, void* draw, short src_x, short src_y,
     unsigned short src_width, unsigned short src_height, short dst_x, short dst_y, unsigned short dst_width,

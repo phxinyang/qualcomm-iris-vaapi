@@ -66,6 +66,14 @@ public:
 
     void initialize(std::span<VASurfaceID> surface_ids);
     bool start_capture();
+    // True when the capture queue is backed directly by the stable DMA-BUFs
+    // exported for the VA surfaces. This is an opt-in experiment; MMAP queues
+    // continue through the existing copy path.
+    bool capture_uses_dmabuf() const;
+    bool capture_slots_scheduled() const;
+    bool zero_copy_codec_supported() const;
+    void queue_zero_copy_capture();
+    void queue_zero_copy_drain_capture();
     VAStatus append_stateful_picture(VASurfaceID surface_id);
     VAStatus flush_stateful_batch();
     // Chrome submits VA pictures asynchronously. Reap any completed V4L2

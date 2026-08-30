@@ -126,6 +126,7 @@ VAStatus beginPicture(VADriverContextP va_context, VAContextID context_id, VASur
     }
 
     if ((!context.uses_stateful_streaming() || context.capture_started()) && !context.capture_draining()
+        && !context.capture_uses_dmabuf()
         && !surface.destination_buffer_queued) {
         try {
             surface.destination_buffer->get().queue();
