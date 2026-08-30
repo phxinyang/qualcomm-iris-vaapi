@@ -44,6 +44,16 @@ boot. Historical sections retain earlier `.129`, `.134` and `.139` runs.
 - `chrome://gpu` reports `Video Decode: Hardware accelerated` with the rebuilt
   driver. The two-session context isolation probe passes with distinct V4L2
   session file descriptors.
+- After the August 30, 2026 system installation, Google Chrome 151.0.7922.173
+  was launched through `/usr/local/bin/iris-vaapi-browser` with no
+  `LIBVA_DRIVERS_PATH` override. A 1920x1080 H.264 run reached
+  `kVideoDecoderName=VaapiVideoDecoder` and
+  `kIsPlatformVideoDecoder=true` in `chrome://media-internals`; the 30-second
+  file completed with `readyState=4`, `ended=true`, 0 dropped frames, and 30
+  seconds of media duration. The same environment intentionally selected
+  `FFmpegVideoDecoder`/`kIsPlatformVideoDecoder=false` for a 320x180 sample,
+  confirming Chromium's size/performance threshold rather than an installation
+  failure.
 - The stateful VP9 path decodes 20 frames from the Iris VP9 sample through
   FFmpeg VA-API with no hardware decode errors.
 - The repeatable 320x180/24fps Iris matrix now validates decoded content, not
