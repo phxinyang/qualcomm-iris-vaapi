@@ -494,6 +494,12 @@ one-AU batch contract for DMA-BUF capture and logs
 `stateful zero-copy fallback reason=batch_contract`, leaving the stable
 MMAP/copy path active for larger throughput batches.
 
+Repeating the same `BATCH_SIZE=8` command after the guard logged the expected
+fallback, but the stable-copy batch run still failed before its first frame on
+this Iris firmware/input combination. Larger batching therefore remains an
+unsupported throughput experiment here; the guard's purpose is to prevent it
+from being mistaken for a working zero-copy mode.
+
 After deploying the guard, the explicit one-AU run (`V4L2_VA_ZERO_COPY=1`,
 `V4L2_VA_BATCH_SIZE=1`) passed the complete 48-frame matrix on `.142`:
 H.264, VP9, and HEVC each produced exact software framemd5 with strict
