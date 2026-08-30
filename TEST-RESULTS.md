@@ -107,11 +107,14 @@ boot. Historical sections retain earlier `.129`, `.134` and `.139` runs.
 
 ## Deployment note
 
-The verified build-tree artifact and the system-installed runtime are separate
-claims. The latest remote inspection found a driver at `/usr/lib64/dri`, but no
-`iris-vaapi-browser` launcher in `PATH`; its source provenance and desktop
-entry installation still need to be verified before calling the system install
-complete.
+The latest `sheng` deployment rebuilt commit `cdf9b70eaaa100ca9e9d39b423457e325056291e`
+and installed its driver, launcher and four desktop entries on August 30, 2026.
+The system driver is `/usr/lib64/dri/v4l2_drv_video.so` with SHA-256
+`f879e5ea417c770ac7042d520625e9cadcec1ffd00b43ca6658cfb811d5763ef`; the
+install manifest is `/usr/local/share/iris-vaapi/install-manifest.txt` and
+records the previous-driver backup. A system-path `vainfo` smoke test resolved
+`/dev/video17` and enumerated H.264 and HEVC VA profiles. Browser playback and
+Electron decoder claims still require their separate runtime gates.
 
 ## Tablet 192.168.3.139
 
