@@ -221,6 +221,19 @@ void restart_requires_last_and_all_predrain_output()
     CHECK(!session.on_capture_last());
 }
 
+void restarted_session_without_new_output_does_not_drain_again()
+{
+    Session session;
+    CHECK(session.on_output_queued(21));
+    CHECK(session.output_since_restart());
+    CHECK(session.request_drain());
+    CHECK(session.on_output_dequeued(21));
+    CHECK(session.on_capture_last());
+    CHECK(session.restart());
+    CHECK(!session.output_since_restart());
+    CHECK(!session.request_drain());
+}
+
 } // namespace
 
 int main()
@@ -239,6 +252,7 @@ int main()
     startup_recovery_can_be_gated_without_spending_failure_budget();
     new_sequence_recovers_a_failed_session();
     restart_requires_last_and_all_predrain_output();
+    restarted_session_without_new_output_does_not_drain_again();
     std::puts("stateful session tests passed");
     return EXIT_SUCCESS;
 }

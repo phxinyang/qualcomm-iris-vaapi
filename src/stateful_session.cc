@@ -32,6 +32,7 @@ bool StatefulSession::on_output_queued(OutputId output)
         return false;
 
     queued_outputs_.insert(output);
+    output_since_restart_ = true;
     return true;
 }
 
@@ -80,6 +81,8 @@ bool StatefulSession::request_drain()
 {
     if (state_ == State::Draining || state_ == State::Reconfiguring)
         return true;
+    if (state_ == State::Running && !output_since_restart_)
+        return false;
     return begin_drain(State::Draining);
 }
 
@@ -112,6 +115,7 @@ bool StatefulSession::restart()
     drain_active_ = false;
     last_seen_ = false;
     drain_outputs_.clear();
+    output_since_restart_ = false;
     return true;
 }
 
@@ -156,6 +160,7 @@ void StatefulSession::on_new_sequence()
     last_seen_ = false;
     consecutive_timeouts_ = 0;
     timeout_recovery_used_ = false;
+    output_since_restart_ = false;
 }
 
 bool StatefulSession::begin_drain(State drain_state)

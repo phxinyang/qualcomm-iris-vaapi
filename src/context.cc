@@ -966,6 +966,14 @@ bool Context::drain_stateful_decoder()
     if (!capture_initialized)
         return false;
 
+    if (stateful_session_.state() == iris::StatefulSession::State::Running
+        && !stateful_session_.output_since_restart()
+        && stateful_pending.empty() && stateful_batches.empty()) {
+        if (trace_enabled())
+            std::fprintf(stderr, "stateful drain skip empty restarted session\n");
+        return true;
+    }
+
     // A completed STOP remains at RestartPending until its caller explicitly
     // issues START. Do not generate a second LAST marker for the same stream.
     if (stateful_session_.state() == iris::StatefulSession::State::RestartPending

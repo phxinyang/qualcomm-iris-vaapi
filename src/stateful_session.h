@@ -90,6 +90,7 @@ public:
     unsigned consecutive_timeout_count() const { return consecutive_timeouts_; }
     bool timeout_recovery_used() const { return timeout_recovery_used_; }
     bool last_seen() const { return last_seen_; }
+    bool output_since_restart() const { return output_since_restart_; }
 
 private:
     bool begin_drain(State drain_state);
@@ -102,6 +103,7 @@ private:
     bool drain_active_ = false;
     bool last_seen_ = false;
     bool timeout_recovery_used_ = false;
+    bool output_since_restart_ = false;
     unsigned consecutive_timeouts_ = 0;
     std::size_t completed_captures_ = 0;
     std::size_t error_captures_ = 0;
