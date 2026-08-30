@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-08-30T00:00:00Z",
+  "started_at_utc": "2026-08-30T00:00:00Z",
+  "result": "pass",
+  "runtime": {
+    "application": "Obsidian",
+    "application_version": "1.13.7",
+    "electron_version": "43.3.0",
+    "chrome_version": "150.0.7871.212",
+    "user_agent": "paste the renderer user agent here"
+  },
+  "display": { "server": "wayland", "ozone_platform": "wayland" },
+  "launch": {
+    "sandbox_flags": ["--disable-gpu-sandbox"],
+    "va_environment": "LIBVA_DRIVER_NAME=v4l2;LIBVA_V4L2_VIDEO_PATH=/dev/videoX"
+  },
+  "target": {
+    "resolved_iris_node": "/dev/videoX",
+    "boot_id": "paste boot id before and after playback",
+    "source_commit": "paste full source commit",
+    "driver_sha256": "paste 64-character artifact sha256"
+  },
+  "media": {
+    "source": "test/electron-video-acceptance.html",
+    "width": 1920,
+    "height": 1080,
+    "duration_seconds": 30,
+    "decoder_name": "VaapiVideoDecoder",
+    "is_platform_video_decoder": true,
+    "decoded_frames": 720,
+    "dropped_frames": 0,
+    "presented_callback_frames": 720,
+    "quality_api": true
+  },
+  "limitations": [
+    "Decoder name and platform flag were transcribed from media-internals.",
+    "Counters are playback-quality evidence; the trace path must be recorded separately for a deep qualification."
+  ]
+}

@@ -60,6 +60,7 @@ run provenance-python-syntax python3 -c \
     'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' \
     "$test_dir/remote/provenance.py"
 run provenance-self-test sh "$test_dir/provenance-self-test.sh" "$root"
+run electron-video-report-check sh "$test_dir/electron-video-report-check.sh" "$root"
 
 if [ "$failures" -ne 0 ]; then
     printf 'FAIL static checks: %d failing\n' "$failures" >&2

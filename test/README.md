@@ -169,6 +169,40 @@ For a visual hardware/software comparison, serve the project root and open
 separate browser profiles. The page labels the active decoder and uses the
 same 30-second H.264 sample in both windows.
 
+### Electron real-video acceptance
+
+Use `test/electron-video-acceptance.html` inside an isolated Electron profile
+or a small Electron test shell. It runs one bounded foreground `<video>` pass
+(10 seconds by default; set `?duration_ms=5000` for a shorter development run),
+counts decoded/dropped frames with `getVideoPlaybackQuality()` and
+`requestVideoFrameCallback()`, and exports a JSON report. The page can be
+prefilled with query parameters such as `app=Obsidian&display=wayland`; fields
+that are not visible to page JavaScript must be entered from the launch command
+and `chrome://media-internals`.
+
+The decoder field is intentionally manual: an Electron renderer cannot inspect
+`chrome://media-internals` cross-origin. A hardware pass requires the exact
+`VaapiVideoDecoder` name, `kIsPlatformVideoDecoder=true`, and a positive decoded
+frame count. GPU-process startup, `libva.so` loading, or a video that merely
+plays is unqualified. Keep the test window foregrounded and close competing
+video clients so frame counters are not distorted by background throttling.
+
+Validate the exported report before attaching it to a result or compatibility
+matrix:
+
+```sh
+test/electron-video-report-check.sh . path/to/iris-electron-video-report.json
+IRIS_ELECTRON_EXPECT_HARDWARE=1 \
+  test/electron-video-report-check.sh . path/to/iris-electron-video-report.json
+```
+
+The report must also record the Electron/Chrome versions, user agent,
+Wayland/X11 and ozone path, sandbox flags, VA environment, dynamically resolved
+Iris node, boot ID, source commit, and installed driver SHA-256. The example
+shape is `test/electron-video-report.example.json`. A report is acceptance
+evidence for the selected app/runtime only; it does not generalize to another
+Electron version or prove zero-copy, power, or long-duration stability.
+
 For a stateful EOS/drain regression check, run FFmpeg with `V4L2_VA_TRACE=1`
 and validate the resulting trace. The check expects one CAPTURE completion for
 each submitted access unit plus the terminal `V4L2_BUF_FLAG_LAST` marker. It
