@@ -322,6 +322,13 @@ timestamp-miss diagnostics. Native H.264/VP9/HEVC/AV1 GStreamer baselines all
 reached EOS; AV1 VA remains intentionally disabled by its tile-payload versus
 OBU contract.
 
+After commit `6074609` reset the barren cold-start budget on every STOP/START,
+the driver was deployed again (`68cc99da41d81f162944fec487d9371f15b1beefa7c05020a70a96af936cdb83`)
+and the same H.264/VP9/HEVC 48-frame matrix passed unchanged. With
+`LIBVA_V4L2_VIDEO_PATH` unset, `vainfo` also auto-discovered `/dev/video0` by
+the `iris_driver` name and enumerated the expected H.264, HEVC and VP9
+profiles.
+
 The driver-path Fluster probes used `FFmpeg-*-VAAPI`, unlike the firmware-only
 `GStreamer-*-V4L2` table above. Results were deliberately kept as diagnostics:
 
