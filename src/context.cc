@@ -817,6 +817,11 @@ bool Context::reset_stateful_decoder()
         std::fprintf(stderr, "stateful drain complete last=1 batches=%zu\n", stateful_batches.size());
     stateful_submitted_count = 0;
     stateful_completed_count = 0;
+    // A STOP/START begins a fresh decoder sequence. Do not carry a previous
+    // sequence's barren-sync budget into the new cold start after a seek or
+    // timeout recovery.
+    stateful_cold_start_exhausted_ = false;
+    stateful_barren_syncs_ = 0;
     return true;
 }
 

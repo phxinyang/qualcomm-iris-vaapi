@@ -73,6 +73,11 @@ if ! printf '%s\n' "$input_block" | grep -q 'stateful_submitted_count < 8' \
     echo "FAIL idle drain has no cold-start history guard" >&2
     exit 1
 fi
+if ! printf '%s\n' "$reset_block" | grep -q 'stateful_cold_start_exhausted_ = false' \
+    || ! printf '%s\n' "$reset_block" | grep -q 'stateful_barren_syncs_ = 0'; then
+    echo "FAIL stateful reset carries barren cold-start state across sequences" >&2
+    exit 1
+fi
 if ! grep -q 'V4L2_VA_STATEFUL_EOS_DRAIN' "$context" \
     || ! grep -q 'V4L2_VA_EOS_DRAIN' "$context"; then
     echo "FAIL generic EOS drain environment compatibility is missing" >&2
