@@ -68,6 +68,12 @@ if grep -q 'start_job mixed-hevc' "$concurrency_soak" \
     echo "FAIL mixed HEVC soak reuses one VA context across artificial stream loops" >&2
     exit 1
 fi
+repeated_block=$(sed -n '/va_decode_repeated()/,/^}/p' "$concurrency_soak")
+if printf '%s\n' "$repeated_block" | grep -Fq -- '-progress "$repeated_segment_progress" -re' \
+    || ! printf '%s\n' "$repeated_block" | grep -q 'repeated_next_start'; then
+    echo "FAIL repeated HEVC soak input pacing can starve reordered access units" >&2
+    exit 1
+fi
 scenario_block=$(sed -n '/run_scenario()/,/^}/p' "$concurrency_soak")
 if printf '%s\n' "$scenario_block" | grep -q '^    name=\$1$' \
     || ! printf '%s\n' "$scenario_block" | grep -q '^    scenario_name=\$1$'; then

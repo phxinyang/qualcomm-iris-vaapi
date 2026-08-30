@@ -194,6 +194,8 @@ va_decode_repeated() {
     repeated_trace=$4
     repeated_started=$(date +%s)
     repeated_deadline=$((repeated_started + duration))
+    repeated_period=$(((frames + fps - 1) / fps))
+    repeated_next_start=$repeated_started
     repeated_total_frames=0
     repeated_iterations=0
     repeated_segment_progress="$root/$repeated_name-segment.progress"
@@ -209,7 +211,7 @@ va_decode_repeated() {
             LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH="$driver_path" \
             LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_TRACE=1 \
             ffmpeg -nostdin -y -hide_banner -loglevel warning -nostats \
-            -progress "$repeated_segment_progress" -re \
+            -progress "$repeated_segment_progress" \
             -vaapi_device /dev/dri/renderD128 \
             -hwaccel vaapi -hwaccel_output_format vaapi -i "$repeated_input" \
             -vf 'hwdownload,format=nv12' -f null - 2>"$repeated_segment_trace"; then
@@ -231,6 +233,17 @@ va_decode_repeated() {
         cat "$repeated_segment_trace" >>"$repeated_trace"
         repeated_total_frames=$((repeated_total_frames + repeated_segment_frames))
         repeated_iterations=$((repeated_iterations + 1))
+        # Feed the complete reordered clip as a burst, then pace clip starts to
+        # wall clock. Per-packet -re pacing can block HEVC waiting for future
+        # access units, while an unpaced outer loop would measure churn rather
+        # than sustained real-time load.
+        repeated_next_start=$((repeated_next_start + repeated_period))
+        repeated_now=$(date +%s)
+        if [ "$repeated_next_start" -gt "$repeated_now" ]; then
+            sleep "$((repeated_next_start - repeated_now))"
+        else
+            repeated_next_start=$repeated_now
+        fi
     done
 
     if [ "$repeated_iterations" -eq 0 ]; then

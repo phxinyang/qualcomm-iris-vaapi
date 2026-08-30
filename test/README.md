@@ -124,7 +124,10 @@ H.264 workers keep one VA context for the full duration. The mixed HEVC worker
 decodes complete 48-frame clips in fresh contexts and checks strict EOS after
 every clip: FFmpeg `-stream_loop` does not expose an EOS boundary between
 independent HEVC sequences, so using it would test an artificial POC/reorder
-carry-over rather than concurrent decode and context teardown.
+carry-over rather than concurrent decode and context teardown. Each HEVC clip
+is submitted without per-packet `-re` throttling so reordered pictures can see
+their future access units; the supervisor paces clip starts to wall clock and
+still enforces the real-time aggregate frame floor.
 `IRIS_SOAK_SECONDS` is available for development, but shortened output is
 labelled explicitly and is not release evidence.
 
