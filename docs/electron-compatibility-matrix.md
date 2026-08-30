@@ -16,6 +16,11 @@ Iris decoder.
   Obsidian GPU process remained inspectable with the installed VA driver; VS
   Code had a later GPU-process exit and therefore does not have a stability
   pass.
+- The VS Code log shows the network process, shared utility process and
+  extension host being killed at the same timestamp as the GPU exit (exit 15),
+  with no matching kernel OOM/panic record. That narrows the incident to an
+  Electron/runtime or session-level termination, but does not identify Iris as
+  the cause; keep it an open diagnosis rather than adding a driver workaround.
 - The Obsidian run now exercises a real HTML/media playback surface and has
   clean frame/EOS counters, but it still does not demonstrate hardware decode
   because the selected decoder name was not available. A valid hardware result
