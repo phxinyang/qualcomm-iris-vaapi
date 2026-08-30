@@ -525,6 +525,13 @@ the midpoint of the pre/post baselines. It is not decoder-package power; the
 screen and the rest of the tablet remain included. Values are mean +/- a
 two-sided 95% t interval over independent runs.
 
+Important interpretation: this is a paced `-re`/fakesink baseline, not a
+browser playback result. It measures the work needed to sustain 30 fps while
+allowing the decoder and compositor to sleep between frames, so it can hide
+the cost of a busy software pipeline. Do not use the small real-time delta or
+the runtime table below as a claim that software video playback costs only a
+few tens of milliwatts.
+
 | Workload | Native DMABUF | VA stable copy | VA zero-copy | Software |
 | --- | ---: | ---: | ---: | ---: |
 | 1280x720, n=5 | +42 +/- 16 mW | +50 +/- 21 mW | +64 +/- 41 mW | +92 +/- 55 mW |
@@ -552,6 +559,31 @@ lower than VA copy, but the filtered sample is still too small for a firm
 claim. Software is consistently the highest path, while all hardware paths
 remain in the same roughly 2.55-2.60 W whole-device band.
 
+### CPU and unrestricted-load cross-check
+
+FFmpeg's verbose stream mapping for the software command was
+`h264 (native) -> wrapped_avframe (native)`, with no hardware input options.
+During an additional real-time 720p run, the decoder process consumed about
+1.7% of one CPU core for native V4L2, 4.4% for VA stable copy, 3.3% for VA
+zero-copy, and 21.1% for the software decoder. This confirms that the small
+real-time battery delta is not a software-decoder bypass.
+
+To expose the cost hidden by real-time pacing, each path was also run in a
+20-second unrestricted loop at 720p. Absolute battery power during that load
+was 2.98 W (native V4L2), 3.04 W (VA zero-copy), and 7.23 W (software). The
+loop was deliberately stopped by the harness (the FFmpeg paths returned their
+expected signal-stop code), so these figures are a stress direction check,
+not a playback estimate. They show that CPU software decoding can add several
+watts when the content, frame rate, or browser pipeline keeps the decoder busy.
+
+An independent software-only recheck on the same tablet used the same input
+and sampling method. It measured 6.764 W during the 20-second unrestricted
+decode, with 3.251 W and 3.639 W pre/post baselines; against their 3.445 W
+midpoint, the software decode increment was about +3.32 W. The different
+absolute baseline shows why one short run cannot provide a fixed watt number,
+but the multi-watt software increment reproduces the direction and order of
+magnitude of the original stress result.
+
 ### Runtime translation
 
 At the end of the run the tablet reported `charge_full=8884000` uAh,
@@ -568,11 +600,10 @@ measured whole-device decode power gives the following fakesink baseline:
 | Software, 720p | 9.5 h | 12.4 h |
 
 These are not browser numbers: they include the measured screen/background
-load but not Chrome composition, page activity, or network traffic. For a
-browser estimate, add those costs to the table's power before dividing. For
-example, adding an illustrative 0.5 W browser/network cost changes the current
-78%-to-5% estimate to about 8.2 h for hardware and 8.0 h for software; adding
-1.0 W changes it to about 7.0 h and 6.9 h. The actual value will be dominated
-by panel brightness and Wi-Fi, so the defensible conclusion is that hardware
-decoding saves only minutes per charge at this tablet workload, while screen
-and browser overhead determine the total hours.
+load but not Chrome composition, page activity, or network traffic. They are a
+controlled low-load baseline, not a promise that software playback only costs
+50-100 mW. The unrestricted-load cross-check demonstrates that a busy software
+decoder can consume several additional watts. For a real browser estimate,
+the decisive variables are codec, resolution, frame complexity, refresh rate,
+panel brightness, and Wi-Fi; an actual Chrome playback run is required before
+turning this table into a battery-life guarantee.
