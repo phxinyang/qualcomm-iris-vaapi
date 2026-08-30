@@ -9,6 +9,7 @@ root=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
 context="$root/src/context.cc"
 surface="$root/src/surface.cc"
 env_helper="$root/test/lib/iris-env.sh"
+matrix="$root/test/iris-matrix.sh"
 
 grep -q 'return !value || std::strcmp(value, "0") != 0;' "$surface"
 grep -q 'size_t limit = 1;' "$context"
@@ -22,6 +23,15 @@ fi
 
 if grep -q 'memset(surface.export_buffer_mapping' "$surface"; then
     echo "FAIL stable export is cleared on sync timeout" >&2
+    exit 1
+fi
+
+# The positive hardware matrix is an exact pixel oracle. A decoder that exits
+# successfully but emits different frames must fail the run rather than leave
+# a warning in otherwise-green output.
+if grep -q 'WARN .*content=frame-md5-mismatch' "$matrix" \
+    || ! grep -q 'FAIL \$codec content=frame-md5-mismatch' "$matrix"; then
+    echo "FAIL Iris matrix does not fail closed on pixel mismatches" >&2
     exit 1
 fi
 

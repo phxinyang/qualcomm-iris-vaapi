@@ -63,7 +63,8 @@ run_va() {
     if diff -q "$sw" "$md5" >/dev/null 2>&1; then
         echo "PASS $codec content=frame-md5"
     else
-        echo "WARN $codec content=frame-md5-mismatch (see $md5)"
+        echo "FAIL $codec content=frame-md5-mismatch (see $md5)" >&2
+        exit 1
     fi
 }
 
