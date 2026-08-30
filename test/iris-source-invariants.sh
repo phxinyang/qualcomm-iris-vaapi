@@ -63,6 +63,17 @@ if grep -Eq 'mixed-vp9|preflight vp9|VP90' "$concurrency_soak"; then
     echo "FAIL concurrency qualification still exercises withdrawn VP9 VA" >&2
     exit 1
 fi
+if grep -q 'start_job mixed-hevc' "$concurrency_soak" \
+    || ! grep -q 'start_repeated_job mixed-hevc' "$concurrency_soak"; then
+    echo "FAIL mixed HEVC soak reuses one VA context across artificial stream loops" >&2
+    exit 1
+fi
+scenario_block=$(sed -n '/run_scenario()/,/^}/p' "$concurrency_soak")
+if printf '%s\n' "$scenario_block" | grep -q '^    name=\$1$' \
+    || ! printf '%s\n' "$scenario_block" | grep -q '^    scenario_name=\$1$'; then
+    echo "FAIL concurrency scenario label can be clobbered by POSIX shell function variables" >&2
+    exit 1
+fi
 if grep -Eq '/dev/video[0-9]+' "$root/test/compare.html"; then
     echo "FAIL browser comparison UI hardcodes a V4L2 node" >&2
     exit 1

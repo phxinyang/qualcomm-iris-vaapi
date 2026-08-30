@@ -181,6 +181,67 @@ va_decode() {
         -vf 'hwdownload,format=nv12' -f null "$output" 2>"$trace"
 }
 
+# Repeating an independent HEVC file inside one FFmpeg process does not provide
+# an EOS boundary between loops. The delayed reorder tail then survives into a
+# new POC-zero sequence in the same VA context and eventually exhausts the
+# bounded timeout recovery. Decode complete clips in fresh contexts instead;
+# this keeps HEVC active beside the long-lived H.264 worker while qualifying
+# context teardown/recreation and strict EOS on every segment.
+va_decode_repeated() {
+    repeated_name=$1
+    repeated_input=$2
+    repeated_progress=$3
+    repeated_trace=$4
+    repeated_started=$(date +%s)
+    repeated_deadline=$((repeated_started + duration))
+    repeated_total_frames=0
+    repeated_iterations=0
+    repeated_segment_progress="$root/$repeated_name-segment.progress"
+    repeated_segment_trace="$root/$repeated_name-segment.trace"
+    : >"$repeated_progress"
+    : >"$repeated_trace"
+    : >"$root/$repeated_name-segments.log"
+
+    while [ "$(date +%s)" -lt "$repeated_deadline" ]; do
+        : >"$repeated_segment_progress"
+        : >"$repeated_segment_trace"
+        if ! timeout "$grace" env \
+            LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH="$driver_path" \
+            LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_TRACE=1 \
+            ffmpeg -nostdin -y -hide_banner -loglevel warning -nostats \
+            -progress "$repeated_segment_progress" -re \
+            -vaapi_device /dev/dri/renderD128 \
+            -hwaccel vaapi -hwaccel_output_format vaapi -i "$repeated_input" \
+            -vf 'hwdownload,format=nv12' -f null - 2>"$repeated_segment_trace"; then
+            echo "FAIL $repeated_name segment=$repeated_iterations decode failed" >&2
+            return 1
+        fi
+        repeated_segment_frames=$(awk -F= '$1 == "frame" { value=$2 } END { print value + 0 }' \
+            "$repeated_segment_progress")
+        if ! grep -q '^progress=end$' "$repeated_segment_progress" \
+            || [ "$repeated_segment_frames" -ne "$frames" ]; then
+            echo "FAIL $repeated_name segment=$repeated_iterations frames=$repeated_segment_frames/$frames" >&2
+            return 1
+        fi
+        if ! test/iris-eos-check.sh "$repeated_segment_trace" "$frames" \
+            >>"$root/$repeated_name-segments.log"; then
+            echo "FAIL $repeated_name segment=$repeated_iterations EOS" >&2
+            return 1
+        fi
+        cat "$repeated_segment_trace" >>"$repeated_trace"
+        repeated_total_frames=$((repeated_total_frames + repeated_segment_frames))
+        repeated_iterations=$((repeated_iterations + 1))
+    done
+
+    if [ "$repeated_iterations" -eq 0 ]; then
+        echo "FAIL $repeated_name completed no segments" >&2
+        return 1
+    fi
+    printf 'frame=%s\nprogress=end\n' "$repeated_total_frames" >"$repeated_progress"
+    printf 'PASS %s segments=%s frames=%s\n' \
+        "$repeated_name" "$repeated_iterations" "$repeated_total_frames"
+}
+
 preflight() {
     codec=$1
     input=$2
@@ -238,92 +299,108 @@ monitor_environment() {
 }
 
 validate_job() {
-    name=$1
-    progress="$root/$name.progress"
-    trace="$root/$name.trace"
-    if ! grep -q '^progress=end$' "$progress"; then
-        echo "FAIL $name did not report progress=end" >&2
+    validate_name=$1
+    validate_progress="$root/$validate_name.progress"
+    validate_trace="$root/$validate_name.trace"
+    if ! grep -q '^progress=end$' "$validate_progress"; then
+        echo "FAIL $validate_name did not report progress=end" >&2
         return 1
     fi
-    actual_frames=$(awk -F= '$1 == "frame" { value=$2 } END { print value + 0 }' "$progress")
-    minimum_frames=$((duration * fps * 8 / 10))
-    [ "$minimum_frames" -gt 0 ] || minimum_frames=1
-    if [ "$actual_frames" -lt "$minimum_frames" ]; then
-        echo "FAIL $name frames=$actual_frames minimum=$minimum_frames" >&2
+    validate_frames=$(awk -F= '$1 == "frame" { value=$2 } END { print value + 0 }' "$validate_progress")
+    validate_minimum=$((duration * fps * 8 / 10))
+    [ "$validate_minimum" -gt 0 ] || validate_minimum=1
+    if [ "$validate_frames" -lt "$validate_minimum" ]; then
+        echo "FAIL $validate_name frames=$validate_frames minimum=$validate_minimum" >&2
         return 1
     fi
-    if ! grep -q 'stateful' "$trace"; then
-        echo "FAIL $name trace does not prove the stateful driver ran" >&2
+    if ! grep -q 'stateful' "$validate_trace"; then
+        echo "FAIL $validate_name trace does not prove the stateful driver ran" >&2
         return 1
     fi
-    if grep -Eqi 'stateful timestamp miss|bounded sync timeout|capture[^:]*error=[1-9]|v4l2 dq ERROR type=9|undefined symbol' "$trace"; then
-        echo "FAIL $name trace contains a stateful decode error" >&2
+    if grep -Eqi 'stateful timestamp miss|bounded sync timeout|capture[^:]*error=[1-9]|v4l2 dq ERROR type=9|undefined symbol' "$validate_trace"; then
+        echo "FAIL $validate_name trace contains a stateful decode error" >&2
         return 1
     fi
-    test/iris-ending-check.sh "$trace"
-    printf 'PASS %s frames=%s duration=%ss\n' "$name" "$actual_frames" "$duration"
+    test/iris-ending-check.sh "$validate_trace"
+    printf 'PASS %s frames=%s duration=%ss\n' "$validate_name" "$validate_frames" "$duration"
 }
 
 start_job() {
-    name=$1
-    input=$2
-    status="$root/$name.status"
-    rm -f "$status"
+    job_name=$1
+    job_input=$2
+    job_status="$root/$job_name.status"
+    rm -f "$job_status"
     (
         set +e
-        va_decode "$input" - "$root/$name.progress" "$root/$name.trace"
-        rc=$?
-        printf '%s\n' "$rc" >"$status"
-        exit "$rc"
+        va_decode "$job_input" - "$root/$job_name.progress" "$root/$job_name.trace"
+        job_rc=$?
+        printf '%s\n' "$job_rc" >"$job_status"
+        exit "$job_rc"
+    ) &
+    printf '%s\n' "$!" >>"$pid_file"
+}
+
+start_repeated_job() {
+    repeated_job_name=$1
+    repeated_job_input=$2
+    repeated_job_status="$root/$repeated_job_name.status"
+    rm -f "$repeated_job_status"
+    (
+        set +e
+        va_decode_repeated "$repeated_job_name" "$repeated_job_input" \
+            "$root/$repeated_job_name.progress" "$root/$repeated_job_name.trace"
+        repeated_job_rc=$?
+        printf '%s\n' "$repeated_job_rc" >"$repeated_job_status"
+        exit "$repeated_job_rc"
     ) &
     printf '%s\n' "$!" >>"$pid_file"
 }
 
 run_scenario() {
-    name=$1
-    rm -f "$pid_file" "$root/$name-environment-failure"
+    scenario_name=$1
+    rm -f "$pid_file" "$root/$scenario_name-environment-failure"
     : >"$pid_file"
-    case "$name" in
+    case "$scenario_name" in
         dual-h264)
-            jobs='dual-h264-a dual-h264-b'
-            job_count=2
+            scenario_jobs='dual-h264-a dual-h264-b'
+            scenario_job_count=2
             start_job dual-h264-a "$media_dir/h264.mp4"
             start_job dual-h264-b "$media_dir/h264.mp4"
             ;;
         mixed)
-            jobs='mixed-h264 mixed-hevc'
-            job_count=2
+            scenario_jobs='mixed-h264 mixed-hevc'
+            scenario_job_count=2
             start_job mixed-h264 "$media_dir/h264.mp4"
-            start_job mixed-hevc "$media_dir/hevc.mkv"
+            start_repeated_job mixed-hevc "$media_dir/hevc.mkv"
             ;;
     esac
 
-    monitor_environment "$root/$name-environment.csv" "$root/$name-environment-failure" &
+    monitor_environment "$root/$scenario_name-environment.csv" "$root/$scenario_name-environment-failure" &
     monitor_pid=$!
-    failed=0
+    scenario_failed=0
     while :; do
-        complete_count=0
-        for job in $jobs; do
-            status="$root/$job.status"
-            if [ -f "$status" ]; then
-                complete_count=$((complete_count + 1))
-                rc=$(sed -n '1p' "$status")
-                if [ "$rc" -ne 0 ]; then
-                    echo "FAIL $job exited rc=$rc" >&2
-                    failed=1
+        scenario_complete_count=0
+        for scenario_job in $scenario_jobs; do
+            scenario_status="$root/$scenario_job.status"
+            if [ -f "$scenario_status" ]; then
+                scenario_complete_count=$((scenario_complete_count + 1))
+                scenario_rc=$(sed -n '1p' "$scenario_status")
+                if [ "$scenario_rc" -ne 0 ]; then
+                    echo "FAIL $scenario_job exited rc=$scenario_rc" >&2
+                    scenario_failed=1
                 fi
             fi
         done
-        if [ "$failed" -ne 0 ] || [ -f "$root/$name-environment-failure" ]; then
+        if [ "$scenario_failed" -ne 0 ] || [ -f "$root/$scenario_name-environment-failure" ]; then
             terminate_workers
             break
         fi
-        [ "$complete_count" -eq "$job_count" ] && break
+        [ "$scenario_complete_count" -eq "$scenario_job_count" ] && break
         sleep 2
     done
 
     while IFS= read -r pid; do
-        wait "$pid" || failed=1
+        wait "$pid" || scenario_failed=1
     done <"$pid_file"
     kill "$monitor_pid" 2>/dev/null || true
     wait "$monitor_pid" 2>/dev/null || true
@@ -331,15 +408,15 @@ run_scenario() {
     # All recorded children have been reaped. Do not retain their numeric PIDs
     # until the EXIT trap, where a reused PID could name an unrelated process.
     : >"$pid_file"
-    if [ -f "$root/$name-environment-failure" ]; then
-        echo "FAIL $name environment guard: $(cat "$root/$name-environment-failure")" >&2
+    if [ -f "$root/$scenario_name-environment-failure" ]; then
+        echo "FAIL $scenario_name environment guard: $(cat "$root/$scenario_name-environment-failure")" >&2
         return 1
     fi
-    [ "$failed" -eq 0 ] || return 1
-    for job in $jobs; do
-        validate_job "$job" || return 1
+    [ "$scenario_failed" -eq 0 ] || return 1
+    for scenario_job in $scenario_jobs; do
+        validate_job "$scenario_job" || return 1
     done
-    printf 'PASS scenario=%s duration=%ss boot_id=%s\n' "$name" "$duration" "$initial_boot_id"
+    printf 'PASS scenario=%s duration=%ss boot_id=%s\n' "$scenario_name" "$duration" "$initial_boot_id"
 }
 
 profile=production
