@@ -15,6 +15,9 @@ Environment:
   IRIS_VA_DRIVER_DIR   Explicit libva driver directory override when
                        libva.pc is unavailable (for packaging/staging)
   DESTDIR              Optional package staging root
+  IRIS_SOURCE_COMMIT   Full source object id when .git is unavailable
+  IRIS_TRACKED_SOURCE_SHA256
+                       SHA-256 over tracked source paths when .git is unavailable
 
 The driver directory is read from libva.pc. This script never configures a
 global LIBVA_DRIVERS_PATH and never writes a fixed /dev/video number.
@@ -48,9 +51,29 @@ if [ -z "$destdir" ] && [ "$(id -u)" -ne 0 ]; then
     fail 'run as root for a live system install, or set DESTDIR for staging'
 fi
 
-for command in pkg-config install ldd; do
+for command in pkg-config install ldd sha256sum date; do
     command -v "$command" >/dev/null 2>&1 || fail "$command is required"
 done
+
+source_commit=''
+source_dirty=1
+source_digest=''
+if command -v git >/dev/null 2>&1 && git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
+    source_commit=$(git -C "$root" rev-parse HEAD)
+    [ -z "$(git -C "$root" status --porcelain --untracked-files=all)" ] && source_dirty=0
+    source_digest=$(cd "$root" && git ls-files -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+else
+    source_commit=${IRIS_SOURCE_COMMIT:-}
+    source_digest=${IRIS_TRACKED_SOURCE_SHA256:-}
+fi
+case "$source_commit" in
+    ????????????????????????????????????????|????????????????????????????????????????????????????????????????) ;;
+    *) fail 'source commit must be a full 40- or 64-character object id (set IRIS_SOURCE_COMMIT when .git is unavailable)' ;;
+esac
+case "$source_digest" in
+    ????????????????????????????????????????????????????????????????) ;;
+    *) fail 'tracked source SHA-256 is unavailable (set IRIS_TRACKED_SOURCE_SHA256 when .git is unavailable)' ;;
+esac
 
 driver_dir=${IRIS_VA_DRIVER_DIR:-}
 if [ -z "$driver_dir" ]; then
@@ -68,6 +91,18 @@ artifact=$build_dir/src/v4l2_drv_video.so
 undefined=$(ldd -r "$artifact" 2>&1 | grep -i 'undefined symbol' || true)
 [ -z "$undefined" ] || fail "driver has unresolved symbols:\n$undefined"
 
+artifact_sha256=$(sha256sum "$artifact" | awk '{print $1}')
+artifact_size=$(wc -c <"$artifact" | tr -d '[:space:]')
+manifest_dir=$destdir$prefix/share/iris-vaapi
+manifest=$manifest_dir/install-manifest.txt
+backup=''
+previous_sha256=''
+if [ -z "$destdir" ] && [ -f "$destdir$driver_dir/v4l2_drv_video.so" ]; then
+    previous_sha256=$(sha256sum "$destdir$driver_dir/v4l2_drv_video.so" | awk '{print $1}')
+    backup=$manifest_dir/backup/v4l2_drv_video.so
+    install -D -m 0755 "$destdir$driver_dir/v4l2_drv_video.so" "$backup"
+fi
+
 install -D -m 0755 "$artifact" "$destdir$driver_dir/v4l2_drv_video.so"
 install -D -m 0755 "$root/scripts/iris-vaapi-browser" \
     "$destdir$prefix/bin/iris-vaapi-browser"
@@ -76,6 +111,18 @@ for desktop in "$root"/data/*.desktop; do
         "$destdir$prefix/share/applications/${desktop##*/}"
 done
 
+mkdir -p "$manifest_dir"
+manifest_new=$manifest.new.$$
+{
+    printf 'schema=qualcomm-iris-vaapi/system-install-v1\n'
+    printf 'installed_at_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'source_commit=%s\nsource_dirty=%s\ntracked_source_sha256=%s\n' "$source_commit" "$source_dirty" "$source_digest"
+    printf 'artifact_sha256=%s\nartifact_size=%s\n' "$artifact_sha256" "$artifact_size"
+    printf 'driver_path=%s\nlauncher_path=%s\ndesktop_dir=%s\n' "$destdir$driver_dir/v4l2_drv_video.so" "$destdir$prefix/bin/iris-vaapi-browser" "$destdir$prefix/share/applications"
+    printf 'previous_driver_backup=%s\nprevious_driver_sha256=%s\n' "$backup" "$previous_sha256"
+} >"$manifest_new"
+mv -f "$manifest_new" "$manifest"
+
 if [ -z "$destdir" ] && command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$prefix/share/applications"
 fi
@@ -83,3 +130,4 @@ fi
 printf 'PASS installed VA driver: %s\n' "$destdir$driver_dir/v4l2_drv_video.so"
 printf 'PASS installed browser launcher: %s\n' "$destdir$prefix/bin/iris-vaapi-browser"
 printf 'PASS installed desktop entries: %s\n' "$destdir$prefix/share/applications"
+printf 'PASS install manifest: %s\n' "$manifest"

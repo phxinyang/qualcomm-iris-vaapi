@@ -1,8 +1,10 @@
 # Qualcomm Iris VA-API Test Results
 
-Primary latest target: Fedora 44 ARM64 tablet `192.168.3.133`, Snapdragon
-SM8550, Iris decoder `/dev/video0`, kernel `7.2.0-sm8550`. Historical sections
-retain earlier `.129`, `.134` and `.139` tablet runs and their device numbering.
+Primary latest documented target: Fedora 44 ARM64 tablet `192.168.3.133`,
+Snapdragon SM8550, kernel `7.2.0-sm8550`. Device numbers are historical and
+must be resolved through `iris_resolve_device`; the current Tailscale target
+(`sheng`, replacement endpoint `.142`) reports `/dev/video17` during its latest
+boot. Historical sections retain earlier `.129`, `.134` and `.139` runs.
 
 ## Passed
 
@@ -88,9 +90,10 @@ retain earlier `.129`, `.134` and `.139` tablet runs and their device numbering.
   by an intentional `FFmpegVideoDecoder` fallback. Keep one hardware session
   per decoder node during diagnostics and treat this resource-contention case
   separately from decoded-pixel correctness.
-- The stable DMA-BUF path adds one NV12 memcpy per decoded frame. A future
-  zero-copy implementation would need a V4L2 DMABUF capture queue shared with
-  the per-surface allocations.
+- The stable DMA-BUF path adds one NV12 memcpy per decoded frame. The opt-in
+  zero-copy experiment now removes that copy only for the validated one-AU,
+  no-B H.264/VP9 contract; multi-slot ownership, B-frame reorder and broad
+  dynamic-resolution coverage remain open.
 - HEVC is advertised automatically when the node exposes stateful HEVC. The VA
   long format does not carry the original VPS/SPS/PPS, so the driver generates
   parameter sets from VA metadata; this path passes the strict 48-frame
@@ -104,8 +107,11 @@ retain earlier `.129`, `.134` and `.139` tablet runs and their device numbering.
 
 ## Deployment note
 
-The verified driver is in the project build tree and a tablet scratch checkout;
-it has not been installed into `/usr/lib64/dri` or made the system default.
+The verified build-tree artifact and the system-installed runtime are separate
+claims. The latest remote inspection found a driver at `/usr/lib64/dri`, but no
+`iris-vaapi-browser` launcher in `PATH`; its source provenance and desktop
+entry installation still need to be verified before calling the system install
+complete.
 
 ## Tablet 192.168.3.139
 

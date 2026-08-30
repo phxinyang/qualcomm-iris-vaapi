@@ -7,13 +7,15 @@ Iris decoder.
 
 | Application | Version / runtime | Display path | Sandbox used in test | GPU/VA evidence | Video decoder evidence | Result |
 | --- | --- | --- | --- | --- | --- | --- |
-| Visual Studio Code | 1.125.1 (Electron runtime reported by the package) | Wayland (`--ozone-platform=wayland`) | `--disable-gpu-sandbox` in isolated test profile | GPU process loaded project `v4l2_drv_video.so` and `libva.so` | N/A: no video playback surface was opened | Electron shell/GPU pass; video decode unqualified |
+| Visual Studio Code | 1.125.1 (Electron runtime reported by the package) | Wayland (`--ozone-platform=wayland`) | `--disable-gpu-sandbox` in isolated test profile | GPU process initially loaded project `v4l2_drv_video.so` and `libva.so`; later log recorded `GPU process exited unexpectedly` (exit 15) | N/A: no video playback surface was opened | Launch/initial VA load observed; GPU stability not passed; video decode unqualified |
 | Obsidian | 1.13.7, Electron 43.3.0, Chrome 150.0.7871.212 | Wayland (`--ozone-platform=wayland`) | `--no-sandbox --disable-gpu-sandbox` in isolated test profile | GPU process loaded `/usr/lib64/dri/v4l2_drv_video.so` and `libva.so`; opened `/dev/dri/renderD128` | N/A: starter vault contained no video playback surface | Electron shell/GPU pass; video decode unqualified |
 
 ## What these results mean
 
-- Both applications can launch on the target, render through Wayland, and
-  initialize the GPU process with the installed VA-API driver.
+- Both applications launched on the target and rendered through Wayland. The
+  Obsidian GPU process remained inspectable with the installed VA driver; VS
+  Code had a later GPU-process exit and therefore does not have a stability
+  pass.
 - Neither result demonstrates hardware video decode. A valid decode result must
   exercise a real HTML/media playback surface and report the decoder selected by
   the application. For Chromium-family validation, the release gate is
@@ -34,6 +36,11 @@ Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36
 (KHTML, like Gecko) obsidian/1.13.7 Chrome/150.0.7871.212
 Electron/43.3.0 Safari/537.36
 ```
+
+The recorded launches set `LIBVA_DRIVER_NAME=v4l2` and a dynamically resolved
+`LIBVA_V4L2_VIDEO_PATH`; the earlier VS Code probe also used an isolated build
+profile. These runs are not a proof that a fresh Electron install discovers the
+system driver without an explicit environment override.
 
 The Iris decoder node was resolved dynamically as `/dev/video17` during this
 boot. Do not encode that number in an application launcher; use the project's

@@ -35,6 +35,11 @@ For direct deployment, prefer the helper below. It reads libva's canonical
 sudo ./scripts/install-system.sh build
 ```
 
+The install helper records the artifact hash and source identity under
+`/usr/local/share/iris-vaapi/install-manifest.txt`; remove that exact install
+with `sudo ./scripts/uninstall-system.sh`, which restores a previously backed
+up VA driver and refuses to remove a modified artifact.
+
 The helper also installs `iris-vaapi-browser` and four desktop entries for
 Chromium and Google Chrome. The normal entries are VA-only: they use Wayland,
 leave the packaged browser's video-decoder feature selection at its tested

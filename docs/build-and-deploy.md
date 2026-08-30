@@ -97,6 +97,15 @@ default. `IRIS_INSTALL_PREFIX` changes only the launcher/data prefix; it does
 not redirect the VA driver away from libva's canonical driver directory.
 `DESTDIR` provides a non-root packaging/staging mode.
 
+The helper records an install manifest at
+`/usr/local/share/iris-vaapi/install-manifest.txt` (or the selected prefix).
+It includes the source commit, tracked-source digest, artifact hash, resolved
+driver path, and any pre-existing driver backup. To remove only that recorded
+installation and restore the previous driver, run
+`sudo ./scripts/uninstall-system.sh`; removal refuses to proceed if the
+installed artifact was modified after installation. A `DESTDIR` staging run
+is packaging evidence only and must not be described as a live system install.
+
 The launcher resolves `/dev/video*` on every start. It requires an exact
 `iris_driver` match and prefers the node whose card or sysfs name identifies it
 as the decoder, so the sibling Iris encoder cannot be selected merely because
