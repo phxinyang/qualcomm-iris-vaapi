@@ -72,6 +72,7 @@ public:
     bool capture_uses_dmabuf() const;
     bool capture_slots_scheduled() const;
     bool zero_copy_codec_supported() const;
+    bool zero_copy_capture_allowed() const { return !zero_copy_disabled_; }
     void queue_zero_copy_capture();
     void queue_zero_copy_drain_capture();
     VAStatus append_stateful_picture(VASurfaceID surface_id);
@@ -186,6 +187,7 @@ private:
     bool stateful_last_marker_seen = false;
     bool stateful_timeout_recovery_used = false;
     bool stateful_queue_restart_pending = false;
+    bool zero_copy_disabled_ = false;
     timeval stateful_last_timestamp = {};
     mutable std::recursive_mutex synchronization_mutex_;
 

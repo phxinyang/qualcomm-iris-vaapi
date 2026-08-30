@@ -1333,14 +1333,26 @@ bool Context::reconfigure_stateful_dimensions(VASurfaceID surface_id)
     if (width == static_cast<unsigned>(picture_width) && height == static_cast<unsigned>(picture_height))
         return true;
 
-    // Reap already-ready CAPTURE buffers before deciding whether a batch is
-    // still in flight. If one remains, drain it so STREAMOFF cannot discard a
-    // decoded frame or leave an OUTPUT timestamp mapped to the old geometry.
-    service_stateful_queues();
-    if (!stateful_pending.empty() && flush_stateful_batch() != VA_STATUS_SUCCESS)
-        return false;
-    if (!stateful_batches.empty() && !drain_stateful_decoder())
-        return false;
+    // A DMA-BUF CAPTURE slot is tied to the old geometry. Iris also needs
+    // several slots while it reports a dynamic-resolution change, which is
+    // incompatible with the one-slot experimental ownership contract. Drop
+    // the in-flight experimental queue immediately and rebuild this context
+    // on the stable MMAP/copy path instead of attempting a long drain.
+    const bool zero_copy_fallback = capture_uses_dmabuf();
+    if (zero_copy_fallback) {
+        zero_copy_disabled_ = true;
+        if (trace_enabled())
+            std::fprintf(stderr, "stateful zero-copy fallback reason=dynamic_resolution\n");
+    } else {
+        // Reap already-ready CAPTURE buffers before deciding whether a batch is
+        // still in flight. If one remains, drain it so STREAMOFF cannot discard
+        // a decoded frame or leave an OUTPUT timestamp mapped to old geometry.
+        service_stateful_queues();
+        if (!stateful_pending.empty() && flush_stateful_batch() != VA_STATUS_SUCCESS)
+            return false;
+        if (!stateful_batches.empty() && !drain_stateful_decoder())
+            return false;
+    }
 
     const auto owns_device = [&](const Surface& surface) {
         return (surface.source_buffer && &surface.source_buffer->get().owner() == &device)
@@ -1361,6 +1373,16 @@ bool Context::reconfigure_stateful_dimensions(VASurfaceID surface_id)
         if (surface.status == VASurfaceRendering)
             surface.status = VASurfaceDisplaying;
         surface.source_size_used = 0;
+        if (zero_copy_fallback) {
+            if (surface.export_buffer_mapping)
+                munmap(surface.export_buffer_mapping, surface.export_buffer_size);
+            if (surface.export_buffer_fd >= 0)
+                close(surface.export_buffer_fd);
+            surface.export_buffer_fd = -1;
+            surface.export_buffer_mapping = nullptr;
+            surface.export_buffer_size = 0;
+            surface.export_plane_offsets.clear();
+        }
     }
 
     try {
