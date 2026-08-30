@@ -163,11 +163,30 @@ fi
 # Fluster is a large external corpus. Its non-zero exit status is preserved in
 # the log and reported as a warning because unsupported profiles and dimensions
 # are useful capability results rather than repository regressions.
+#
+# Which decoder Fluster drives decides what the numbers mean, and the two are
+# easy to confuse. A GStreamer-*-V4L2 decoder talks to the kernel node
+# directly and never loads this driver, so its results characterise the
+# firmware. An FFmpeg-*-VAAPI decoder goes through libva and therefore through
+# this driver, which is the only configuration that says anything about the
+# code in src/. Record which one produced a given run.
 fluster_dir=${FLUSTER_DIR:-}
 fluster_suites=${IRIS_FLUSTER_SUITES:-}
 fluster_decoders=${IRIS_FLUSTER_DECODERS:-}
 if [ -n "$fluster_dir" ] && [ -n "$fluster_suites" ] && [ -n "$fluster_decoders" ] \
     && [ -f "$fluster_dir/fluster.py" ]; then
+    case "$fluster_decoders" in
+    *VAAPI*)
+        printf 'INFO fluster runs through this driver (%s)\n' "$fluster_decoders"
+        export LIBVA_DRIVER_NAME=v4l2
+        export LIBVA_DRIVERS_PATH="$driver_path"
+        export LIBVA_V4L2_VIDEO_PATH="$device"
+        ;;
+    *)
+        printf 'INFO fluster bypasses this driver (%s); results describe the firmware\n' \
+            "$fluster_decoders"
+        ;;
+    esac
     set +e
     (cd "$fluster_dir" && python3 fluster.py -r "$fluster_dir/resources" \
         -o "$root/fluster-out" run -j "${IRIS_FLUSTER_JOBS:-1}" \
@@ -175,7 +194,8 @@ if [ -n "$fluster_dir" ] && [ -n "$fluster_suites" ] && [ -n "$fluster_decoders"
         -f json -so "$root/fluster.json" -q) >"$root/fluster.log" 2>&1
     rc=$?
     set -e
-    [ "$rc" -eq 0 ] && pass "fluster" || warn "fluster-capability-result rc=$rc log=$root/fluster.log"
+    [ "$rc" -eq 0 ] && pass "fluster $fluster_decoders" \
+        || warn "fluster-capability-result decoders=$fluster_decoders rc=$rc log=$root/fluster.log"
 else
     warn "fluster-skipped"
 fi
