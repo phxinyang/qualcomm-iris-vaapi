@@ -71,9 +71,12 @@ mapping.
 Surface size attributes are read from the selected V4L2 capture format with
 `VIDIOC_ENUM_FRAMESIZES`; the VA limits therefore follow each decoder's real
 minimum and maximum instead of assuming a 2048-pixel ceiling. Stateful clients
-may also reuse one VA context across a resolution change: the backend drains
-the old queue and rebuilds its V4L2 capture/output pools for the new surface
-geometry before submitting the next access unit.
+may also reuse one VA context across an H.264 resolution change: the backend
+drains the old queue and rebuilds its V4L2 capture/output pools for the new
+surface geometry before submitting the next access unit. VP9 is deliberately
+fail-closed for an in-place coded-size change on the qualified Iris target
+because the native kernel/firmware path reboots the device; clients must retire
+the VA context and create one for the new geometry.
 
 Stateful Iris may hold a reordered B/P frame until a later AU is submitted.
 `vaSyncSurface()` therefore uses a bounded 2000 ms wait by default, allowing

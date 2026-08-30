@@ -74,6 +74,17 @@ if grep -q 'va-same-context\|same-context path' "$dynamic_resolution" \
     echo "FAIL dynamic-resolution gate claims FFmpeg reuses one VA context" >&2
     exit 1
 fi
+if ! grep -q 'stateful resize rejected codec=vp9' "$context" \
+    || ! grep -q 'SKIP vp9 native-baseline unsafe-in-place-dynamic-resolution' "$dynamic_resolution"; then
+    echo "FAIL VP9 in-place dynamic resolution does not fail closed" >&2
+    exit 1
+fi
+vp9_reject_line=$(grep -n 'stateful resize rejected codec=vp9' "$context" | cut -d: -f1)
+resize_reset_line=$(grep -n 'const bool zero_copy_fallback = capture_uses_dmabuf' "$context" | cut -d: -f1)
+if [ "$vp9_reject_line" -ge "$resize_reset_line" ]; then
+    echo "FAIL VP9 resize rejection happens after queue teardown begins" >&2
+    exit 1
+fi
 
 if ! grep -q 'device.buffer(device.capture_buf_type, i).queue()' "$context"; then
     echo "FAIL stateful start_capture does not queue the CAPTURE pool" >&2

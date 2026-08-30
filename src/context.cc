@@ -1380,6 +1380,18 @@ bool Context::reconfigure_stateful_dimensions(VASurfaceID surface_id)
     if (width == static_cast<unsigned>(picture_width) && height == static_cast<unsigned>(picture_height))
         return true;
 
+    // The target Iris kernel/firmware reboots after an in-place VP9 source
+    // change, including a 10-switch native V4L2 probe at low temperature.
+    // Fail before STOP/STREAMOFF/REQBUFS so a VA client can retire this
+    // context and create another one without entering the unsafe kernel path.
+    if (pixelformat == V4L2_PIX_FMT_VP9) {
+        if (trace_enabled())
+            std::fprintf(stderr,
+                "stateful resize rejected codec=vp9 surface=%u size=%ux%u reason=unsafe_in_place_change\n",
+                surface_id, width, height);
+        return false;
+    }
+
     // A DMA-BUF CAPTURE slot is tied to the old geometry. Iris also needs
     // several slots while it reports a dynamic-resolution change, which is
     // incompatible with the one-slot experimental ownership contract. Drop

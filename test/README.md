@@ -97,12 +97,14 @@ ordering keeps the VA cold-start and EOS checks deterministic.
 
 The production dynamic-resolution gate is `iris-dynamic-resolution.sh`. It
 generates H.264 and VP9 streams that alternate 640x360 and 1280x720 exactly 100
-times, then requires byte-identical native V4L2/software output, exact frame
+times. H.264 requires byte-identical native V4L2/software output, exact frame
 MD5 from one FFmpeg VA process across all changes, and exact output from 101
-fresh VA decoder processes. FFmpeg may recreate its VA context when coded
-geometry changes, so the single-process trace records context churn instead of
-claiming that one VA context was reused. Unsupported formats or missing native
-decoder elements fail the run; they are not recorded as passes or skips. Use
+fresh VA decoder processes. Native in-place VP9 source changes reboot the
+qualified Iris kernel/firmware even in a 10-switch probe, so the script does
+not repeat that unsafe lane: the driver rejects in-place VP9 geometry changes
+before queue teardown and the gate verifies FFmpeg's VA context-recreation
+path instead. Unsupported formats or missing required elements fail the run;
+they are not recorded as passes or skips. Use
 `IRIS_DYNAMIC_SWITCHES` only to shorten a development run.
 
 For multi-context and long-run qualification, use:

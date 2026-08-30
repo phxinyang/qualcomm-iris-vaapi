@@ -16,7 +16,7 @@ clients as a silent software-decoder fallback.
 For a tablet or other V4L2 target, set `IRIS_REMOTE_HOST` and run:
 
 ```sh
-IRIS_REMOTE_HOST=xinyang@192.168.3.142 ./test/remote/deploy.sh
+IRIS_REMOTE_HOST=sheng ./test/remote/deploy.sh
 ```
 
 The deploy script synchronizes by content, excludes generated build and test
@@ -91,15 +91,20 @@ LIBVA_V4L2_VIDEO_PATH="$device" \
 ```
 
 The production default assembles deterministic 640x360 and 1280x720 keyframe
-segments into streams with exactly 100 geometry changes. A codec passes only
-if the native GStreamer V4L2 decoder produces byte-identical I420 output, one
+segments into streams with exactly 100 geometry changes. H.264 passes only if
+the native GStreamer V4L2 decoder produces byte-identical I420 output, one
 FFmpeg VA process survives every change with exact software frame MD5 and EOS
 accounting, and 101 fresh VA processes decode the alternating geometries with
 the same checks. FFmpeg is allowed to recreate VA contexts on a coded-size
 change; the single-process lane therefore qualifies context retirement and
 session cleanup rather than asserting a client behavior FFmpeg does not have.
-A missing device format, native element or VA capability is a failure, not a
-skip. Development runs may shorten the matrix explicitly with
+
+Do not run the native in-place VP9 lane on this target: a 10-switch probe
+reproducibly rebooted the kernel/firmware immediately after EOS. The backend
+rejects an in-place VP9 geometry change before STOP/STREAMOFF and the production
+gate qualifies VP9 only through safe VA context recreation. A missing device
+format, required element or VA capability is a failure, not a skip.
+Development runs may shorten the matrix explicitly with
 `IRIS_DYNAMIC_SWITCHES` and `IRIS_DYNAMIC_FRAMES_PER_SEGMENT`; qualification
 results must retain the defaults.
 

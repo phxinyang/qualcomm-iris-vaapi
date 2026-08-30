@@ -12,14 +12,14 @@
 # to reach silently.
 #
 # Environment:
-#   IRIS_REMOTE_HOST   ssh destination                (default xinyang@192.168.3.142)
+#   IRIS_REMOTE_HOST   ssh destination                (default sheng)
 #   IRIS_REMOTE_ROOT   remote checkout directory      (default ~/Lab/iris-vaapi-lab/src)
 #   IRIS_DEPLOY_INCREMENTAL=1  skip the clean step (still refreshes mtimes)
 #   IRIS_SOURCE_COMMIT full source object id (required only without local .git)
 
 set -eu
 
-host=${IRIS_REMOTE_HOST:-xinyang@192.168.3.142}
+host=${IRIS_REMOTE_HOST:-sheng}
 if [ "${IRIS_REMOTE_ROOT+x}" = x ]; then
     remote_root=$IRIS_REMOTE_ROOT
 else
