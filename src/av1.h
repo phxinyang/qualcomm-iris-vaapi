@@ -11,14 +11,9 @@ extern "C" {
 #include <va/va.h>
 }
 
-// Older sanitized kernel headers predate the stateful AV1 fourcc even though
-// the target kernel and firmware expose it. Keep the userspace build portable.
-#ifndef V4L2_PIX_FMT_AV1
-#define V4L2_PIX_FMT_AV1 v4l2_fourcc('A', 'V', '0', '1')
-#endif
-
 #include "av1_obu.h"
 #include "context.h"
+#include "v4l2.h"
 
 struct Buffer;
 struct DriverData;

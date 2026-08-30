@@ -34,6 +34,12 @@
 
 extern "C" {
 #include <linux/videodev2.h>
+
+// Older sanitized kernel headers predate the stateful AV1 fourcc even though
+// the target kernel and firmware expose it. Keep the userspace build portable.
+#ifndef V4L2_PIX_FMT_AV1
+#define V4L2_PIX_FMT_AV1 v4l2_fourcc('A', 'V', '0', '1')
+#endif
 }
 
 #define SOURCE_SIZE_MAX (1024 * 1024)

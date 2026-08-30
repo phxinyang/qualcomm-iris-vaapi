@@ -34,6 +34,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <ranges>
 #include <stdexcept>
 #include <system_error>
 
@@ -167,20 +168,127 @@ std::vector<std::string> enumerate_media_devices(udev* ctx)
 
 } // namespace
 
+namespace {
+
+// Compressed formats this driver can drive on the OUTPUT queue. Used to tell a
+// decoder apart from an encoder or a camera scaler when there is no media
+// topology to consult.
+bool advertises_decoder_output(int fd, uint32_t capabilities)
+{
+    static constexpr uint32_t decoder_formats[] = {
+        V4L2_PIX_FMT_MPEG2_SLICE,
+        V4L2_PIX_FMT_H264,
+        V4L2_PIX_FMT_H264_SLICE,
+        V4L2_PIX_FMT_VP8_FRAME,
+        V4L2_PIX_FMT_VP9,
+        V4L2_PIX_FMT_VP9_FRAME,
+        V4L2_PIX_FMT_HEVC,
+        V4L2_PIX_FMT_AV1,
+    };
+    const auto type = (capabilities & V4L2_CAP_VIDEO_M2M) ? V4L2_BUF_TYPE_VIDEO_OUTPUT
+                                                          : V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+    for (v4l2_fmtdesc fmtdesc = { .type = static_cast<uint32_t>(type) };
+         ioctl(fd, VIDIOC_ENUM_FMT, &fmtdesc) >= 0; fmtdesc.index += 1) {
+        for (const auto format : decoder_formats) {
+            if (fmtdesc.pixelformat == format)
+                return true;
+        }
+    }
+    return false;
+}
+
+// Every video node that looks like a decoder, regardless of whether a media
+// controller knows about it.
+//
+// The media-topology walk above can only find stateless decoders: they need
+// the Request API, so they always publish a media device with a
+// MEDIA_ENT_F_PROC_VIDEO_DECODER entity. A stateful decoder needs neither, and
+// on the Qualcomm Iris target it publishes no media node at all while the only
+// media device present belongs to the camera subsystem. Probing therefore
+// found nothing and the driver advertised zero profiles unless
+// LIBVA_V4L2_VIDEO_PATH was set by hand.
+std::vector<std::string> enumerate_standalone_video_devices(udev* ctx)
+{
+    std::unique_ptr<udev_enumerate, decltype(&udev_enumerate_unref)> enumerate(
+        udev_enumerate_new(ctx), &udev_enumerate_unref);
+
+    udev_enumerate_add_match_subsystem(enumerate.get(), "video4linux");
+    udev_enumerate_scan_devices(enumerate.get());
+
+    std::vector<std::string> result;
+    for (auto entry = udev_enumerate_get_list_entry(enumerate.get()); entry != nullptr;
+         entry = udev_list_entry_get_next(entry)) {
+        std::unique_ptr<udev_device, decltype(&udev_device_unref)> device(
+            udev_device_new_from_syspath(ctx, udev_list_entry_get_name(entry)), &udev_device_unref);
+        if (!device)
+            continue;
+        const char* devname = udev_device_get_property_value(device.get(), "DEVNAME");
+        if (!devname)
+            continue;
+
+        // Plain open: a node may be busy or owned by another user, and one
+        // unusable camera node must not prevent the decoder from being found.
+        const int fd = open(devname, O_RDONLY);
+        if (fd < 0)
+            continue;
+        bool supported = false;
+        try {
+            const uint32_t capabilities = query_capabilities(fd);
+            supported = (capabilities & V4L2M2MDevice::required_capabilities) != 0
+                && advertises_decoder_output(fd, capabilities);
+        } catch (const std::exception&) {
+            supported = false;
+        }
+        close(fd);
+        if (supported)
+            result.push_back(devname);
+    }
+
+    return result;
+}
+
+} // namespace
+
 std::vector<std::pair<std::string, std::optional<std::string>>> V4L2M2MDevice::enumerate_devices()
 {
     std::vector<std::pair<std::string, std::optional<std::string>>> result;
 
     std::unique_ptr<udev, decltype(&udev_unref)> ctx(udev_new(), &udev_unref);
     for (auto&& media_device : enumerate_media_devices(ctx.get())) {
-        for (auto&& video_device : enumerate_video_devices(ctx.get(), media_device)) {
-            int fd = errno_wrapper(open, video_device.c_str(), O_RDONLY);
+        std::vector<std::string> video_devices;
+        try {
+            video_devices = enumerate_video_devices(ctx.get(), media_device);
+        } catch (const std::exception& error) {
+            // A media node that cannot be opened or does not answer
+            // G_TOPOLOGY says nothing about the other devices on the system.
+            if (trace_enabled())
+                std::fprintf(stderr, "v4l2 skipping media device %s: %s\n", media_device.c_str(),
+                    error.what());
+            continue;
+        }
+        for (auto&& video_device : video_devices) {
+            const int fd = open(video_device.c_str(), O_RDONLY);
+            if (fd < 0)
+                continue;
             const bool supported = (query_capabilities(fd) & required_capabilities) != 0;
             close(fd);
             if (supported) {
                 result.emplace_back(video_device, media_device);
             }
         }
+    }
+
+    for (auto&& video_device : enumerate_standalone_video_devices(ctx.get())) {
+        const bool known = std::ranges::any_of(
+            result, [&](const auto& entry) { return entry.first == video_device; });
+        if (!known)
+            result.emplace_back(video_device, std::nullopt);
+    }
+
+    if (trace_enabled()) {
+        for (const auto& [video_device, media_device] : result)
+            std::fprintf(stderr, "v4l2 probe found %s media=%s\n", video_device.c_str(),
+                media_device ? media_device->c_str() : "none");
     }
 
     return result;
