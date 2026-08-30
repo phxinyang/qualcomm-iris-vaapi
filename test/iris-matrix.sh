@@ -1,14 +1,17 @@
 #!/bin/sh
 
 # Repeatable Qualcomm Iris codec matrix. Run on the target tablet (or another
-# host with /dev/video17 and a working VA-API stack). Temporary media and logs
-# are kept under the Bridge trash directory by default.
+# host with the Iris V4L2 node and a working VA-API stack). The decoder node is
+# resolved by driver name and artifacts land in a durable lab directory; see
+# test/lib/iris-env.sh.
 
 set -eu
 
-device=${LIBVA_V4L2_VIDEO_PATH:-/dev/video17}
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/lib/iris-env.sh"
+
+device=$(iris_resolve_device)
 driver_path=${LIBVA_DRIVERS_PATH:-$(pwd)/build/src}
-root=${IRIS_MATRIX_DIR:-$HOME/Lab/Bridge/tmp/trash/iris-va-matrix}
+root=${IRIS_MATRIX_DIR:-$(iris_artifact_dir va-matrix)}
 frames=${IRIS_MATRIX_FRAMES:-48}
 mkdir -p "$root"
 

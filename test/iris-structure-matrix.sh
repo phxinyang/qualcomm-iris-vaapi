@@ -6,9 +6,11 @@
 
 set -eu
 
-device=${LIBVA_V4L2_VIDEO_PATH:-/dev/video17}
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/lib/iris-env.sh"
+
+device=$(iris_resolve_device)
 driver_path=${LIBVA_DRIVERS_PATH:-$(pwd)/build/src}
-root=${IRIS_STRUCTURE_DIR:-$HOME/Lab/Bridge/tmp/trash/iris-va-structure-matrix}
+root=${IRIS_STRUCTURE_DIR:-$(iris_artifact_dir va-structure-matrix)}
 frames=${IRIS_STRUCTURE_FRAMES:-48}
 timeout_seconds=${IRIS_STRUCTURE_TIMEOUT_SECONDS:-180}
 size=${IRIS_STRUCTURE_SIZE:-640x360}

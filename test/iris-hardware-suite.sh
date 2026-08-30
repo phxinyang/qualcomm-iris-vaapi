@@ -7,9 +7,11 @@
 
 set -u
 
-device=${V4L2_DEVICE:-${LIBVA_V4L2_VIDEO_PATH:-/dev/video0}}
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/lib/iris-env.sh"
+
+device=$(iris_resolve_device)
 driver_path=${LIBVA_DRIVERS_PATH:-$(pwd)/build/src}
-root=${IRIS_HARDWARE_SUITE_DIR:-$HOME/Lab/Bridge/tmp/trash/iris-hardware-suite}
+root=${IRIS_HARDWARE_SUITE_DIR:-$(iris_artifact_dir hardware-suite)}
 run_matrices=${IRIS_RUN_REPO_MATRICES:-1}
 allow_compliance_limit=${IRIS_ALLOW_KNOWN_COMPLIANCE_LIMIT:-1}
 mkdir -p "$root"

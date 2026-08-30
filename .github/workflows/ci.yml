@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # project() derives the version from `git rev-parse --short HEAD`, so the
+      # checkout must keep its .git directory.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build pkg-config g++ \
+            libva-dev libdrm-dev libudev-dev \
+            libgstreamer-plugins-bad1.0-dev
+
+      - name: Configure
+        run: meson setup build
+
+      - name: Build
+        run: ninja -C build
+
+      # The same gate developers run locally. Keeping CI on this single entry
+      # point means a check added to the script is automatically enforced here.
+      - name: Static checks
+        run: sh test/run-static-checks.sh
+
+      - name: Meson test
+        run: meson test -C build --print-errorlogs
+
+      # A driver that links but cannot resolve its own symbols loads as a
+      # silent software fallback instead of failing loudly. This is the same
+      # assertion test/remote/deploy.sh makes on the target device.
+      - name: Reject undefined symbols
+        run: |
+          so=build/src/v4l2_drv_video.so
+          test -f "$so"
+          undefined=$(ldd -r "$so" 2>&1 | grep -i 'undefined symbol' || true)
+          if [ -n "$undefined" ]; then
+            echo "$undefined" >&2
+            exit 1
+          fi
+          echo "no undefined symbols"

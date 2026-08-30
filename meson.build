@@ -22,7 +22,11 @@
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 project('libva-v4l2', 'cpp',
-	version: run_command(['git', 'rev-parse', '--short', 'HEAD'], check: true).stdout().strip(),
+	# Derived from git when one is available. The fallback matters: the driver
+	# is routinely built from a source tree synced to a target device without
+	# its .git directory, and a hard failure here blocks the build entirely.
+	version: run_command(['sh', '-c', 'git rev-parse --short HEAD 2>/dev/null || echo unknown'],
+		check: true).stdout().strip(),
 	meson_version: '>= 0.56.0')
 
 cc = meson.get_compiler('cpp')
@@ -36,6 +40,7 @@ libgstcodecs_dep = cc.find_library('gstcodecs-1.0',  # Present but not advertise
 	required: false,
 )
 libudev_dep = dependency('libudev', version : '>= 247')
+libva_drm_dep = dependency('libva-drm', version : '>= 1.1.0', required: false)
 kernel_dep = declare_dependency(include_directories : get_option('kernel_headers'))
 
 va_api_version_array = libva_dep.version().split('.')
@@ -45,3 +50,4 @@ va_api_minor_version = va_api_version_array[1]
 va_driver_init_func = '__vaDriverInit_@0@_@1@'.format(va_api_major_version, va_api_minor_version)
 
 subdir('src')
+subdir('test')
