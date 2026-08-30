@@ -12,13 +12,13 @@
 # to reach silently.
 #
 # Environment:
-#   IRIS_REMOTE_HOST   ssh destination                (default xinyang@192.168.3.133)
+#   IRIS_REMOTE_HOST   ssh destination                (default xinyang@192.168.3.139)
 #   IRIS_REMOTE_ROOT   remote checkout directory      (default ~/Lab/iris-vaapi-lab/src)
 #   IRIS_DEPLOY_INCREMENTAL=1  skip the clean step (still refreshes mtimes)
 
 set -eu
 
-host=${IRIS_REMOTE_HOST:-xinyang@192.168.3.133}
+host=${IRIS_REMOTE_HOST:-xinyang@192.168.3.139}
 remote_root=${IRIS_REMOTE_ROOT:-Lab/iris-vaapi-lab/src}
 local_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 

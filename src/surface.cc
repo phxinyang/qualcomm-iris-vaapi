@@ -123,6 +123,19 @@ size_t prepare_export_plane_offsets(Surface& surface, size_t physical_plane_coun
     return total;
 }
 
+// Whether the caller pinned the sync timeout. An explicit bound must never be
+// silently raised, otherwise the documented knob does nothing in exactly the
+// situation someone reaches for it.
+bool stateful_sync_timeout_overridden()
+{
+    const char* value = std::getenv("V4L2_VA_SYNC_TIMEOUT_MS");
+    if (!value)
+        return false;
+    char* end = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    return end != value && *end == '\0' && parsed > 0;
+}
+
 int stateful_sync_timeout_ms()
 {
     // A bounded sync timeout allows the decoder to recover trailing B-frame DPB
@@ -466,12 +479,20 @@ VAStatus syncSurface(VADriverContextP context, VASurfaceID surface_id)
         // V4L2_VA_SYNC_TIMEOUT_MS override) so Chrome can continue submitting
         // AUs instead of deadlocking behind a delayed frame.
         int sync_timeout = decode_context->uses_stateful_streaming() ? stateful_sync_timeout_ms() : 10000;
-        // Iris may spend several seconds parsing the first parameter set
-        // and allocating its reference surfaces. Do not classify that cold
-        // start as a missing frame; the bounded timeout/recovery policy only
-        // applies after a useful decode history exists.
-        if (decode_context->stateful_timeout_drain()
-            && (decode_context->stateful_completed_frames() < 8 || decode_context->stateful_submitted_frames() <= 48))
+        // Iris may spend several seconds parsing the first parameter set and
+        // allocating its reference surfaces. That cold start is worth waiting
+        // out once, but only once, and only when the caller has not asked for
+        // a specific bound.
+        //
+        // The allowance used to apply to the first forty-eight pictures of
+        // every stream and to override an explicit V4L2_VA_SYNC_TIMEOUT_MS.
+        // On content the firmware cannot decode at all, that turned into a
+        // thirty-second block per picture with no diagnostic and no way to
+        // shorten it, which a client cannot tell apart from a hang.
+        const bool cold_start = decode_context->stateful_timeout_drain()
+            && decode_context->stateful_completed_frames() == 0
+            && !decode_context->stateful_cold_start_exhausted();
+        if (cold_start && !stateful_sync_timeout_overridden())
             sync_timeout = std::max(sync_timeout, 30000);
         auto deadline = std::chrono::steady_clock::now()
             + std::chrono::milliseconds(sync_timeout);
@@ -577,6 +598,26 @@ VAStatus syncSurface(VADriverContextP context, VASurfaceID surface_id)
                 }
                 if (surface.status != VASurfaceRendering)
                     return VA_STATUS_SUCCESS;
+            }
+            // A cold-start wait that produced nothing has told us what it can.
+            // Record it so the next picture uses the ordinary bounded timeout
+            // and an undecodable stream fails in seconds instead of minutes.
+            if (decode_context->stateful_completed_frames() == 0) {
+                decode_context->mark_stateful_cold_start_exhausted();
+                decode_context->note_stateful_barren_sync();
+                // Sixteen pictures in and the decoder has never emitted one.
+                // Continuing costs the caller one timeout per remaining
+                // picture and still yields nothing, so report a decode error
+                // and let it fall back rather than grinding through the
+                // stream in silence.
+                if (decode_context->stateful_barren_syncs() > 16) {
+                    error_log(context,
+                        "Decoder produced no frame for %u pictures; giving up on this stream\n",
+                        decode_context->stateful_barren_syncs());
+                    surface.status = VASurfaceDisplaying;
+                    surface.source_size_used = 0;
+                    return VA_STATUS_ERROR_DECODING_ERROR;
+                }
             }
             if (decode_context->stateful_timeout_drain()
                 && decode_context->stateful_submitted_frames() < 8) {

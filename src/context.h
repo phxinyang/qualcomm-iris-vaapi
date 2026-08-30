@@ -84,6 +84,18 @@ public:
     bool has_stateful_history() const { return stateful_submitted_count != 0; }
     unsigned stateful_submitted_frames() const { return stateful_submitted_count; }
     unsigned stateful_completed_frames() const { return stateful_completed_count; }
+
+    // Whether a full cold-start wait has already been spent without the
+    // decoder producing anything. Once that has happened the generous startup
+    // allowance is not worth paying again, because the stream is not going to
+    // decode at all.
+    bool stateful_cold_start_exhausted() const { return stateful_cold_start_exhausted_; }
+    void mark_stateful_cold_start_exhausted() { stateful_cold_start_exhausted_ = true; }
+    // Pictures that timed out while the decoder has still never produced a
+    // single frame. A stream the firmware cannot handle at all is only
+    // distinguishable from a slow one by how long this goes on.
+    unsigned stateful_barren_syncs() const { return stateful_barren_syncs_; }
+    void note_stateful_barren_sync() { stateful_barren_syncs_++; }
     // A stateful STOP is complete only after CAPTURE returns V4L2_BUF_FLAG_LAST.
     // Keep the result explicit so callers never restart a decoder on timeout.
     bool reset_stateful_decoder();
@@ -138,6 +150,8 @@ public:
 
 private:
     fourcc pixelformat;
+    bool stateful_cold_start_exhausted_ = false;
+    unsigned stateful_barren_syncs_ = 0;
     bool queues_initialized;
     bool capture_initialized;
     std::map<VASurfaceID, unsigned> surface_buffer_indices;

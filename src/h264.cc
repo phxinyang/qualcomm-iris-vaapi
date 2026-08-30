@@ -74,6 +74,53 @@ enum h264_profile {
 
 namespace {
 
+// Table A-1: the frame-size and decoded-picture-buffer limit of each level.
+// VA-API does not carry level_idc, so the generated SPS has to derive one.
+struct H264Level {
+    unsigned level_idc;
+    unsigned max_frame_size_mbs;
+    unsigned max_dpb_mbs;
+};
+
+constexpr H264Level h264_levels[] = {
+    { 10, 99, 396 },
+    { 11, 396, 900 },
+    { 12, 396, 2376 },
+    { 20, 396, 2376 },
+    { 21, 792, 4752 },
+    { 22, 1620, 8100 },
+    { 30, 1620, 8100 },
+    { 31, 3600, 18000 },
+    { 32, 5120, 20480 },
+    { 40, 8192, 32768 },
+    { 42, 8704, 34816 },
+    { 50, 22080, 110400 },
+    { 51, 36864, 184320 },
+    { 60, 139264, 696320 },
+};
+
+// The lowest level that can hold this picture and its reference buffer.
+//
+// The value used to be hardcoded at 3.0, with a note that raising it to 4.1
+// made Iris consume OUTPUT buffers without ever producing a CAPTURE frame.
+// That sensitivity cuts both ways: 3.0 is itself far too high for the QCIF
+// conformance streams, which declare level 1.2, and those stall in exactly the
+// same way. Deriving the level keeps the declaration close to what the stream
+// actually needs, which is what an encoder would have written.
+unsigned h264_level_for(const VAPictureParameterBufferH264& picture)
+{
+    const unsigned width_mbs = picture.picture_width_in_mbs_minus1 + 1u;
+    const unsigned height_mbs = picture.picture_height_in_mbs_minus1 + 1u;
+    const unsigned frame_size_mbs = width_mbs * height_mbs;
+    // One slot for the picture being decoded on top of its references.
+    const unsigned dpb_mbs = (picture.num_ref_frames + 1u) * frame_size_mbs;
+    for (const auto& level : h264_levels) {
+        if (frame_size_mbs <= level.max_frame_size_mbs && dpb_mbs <= level.max_dpb_mbs)
+            return level.level_idc;
+    }
+    return 62;
+}
+
 std::vector<uint8_t> make_h264_sps(const H264Context& context, const Surface& surface,
     const VAPictureParameterBufferH264& picture)
 {
@@ -86,11 +133,12 @@ std::vector<uint8_t> make_h264_sps(const H264Context& context, const Surface& su
         : 2 * (picture.seq_fields.bits.chroma_format_idc == 0 ? 1 : 2);
 
     writer.bits(context.profile, 8);
-    writer.bits(0, 8); // constraint flags and reserved bits
-    // Match the level used by the tablet's native H.264 stream. Iris
-    // accepts level 3.0 for 640x360/60 content; advertising 4.1 here makes
-    // the stateful decoder consume OUTPUT without producing CAPTURE frames.
-    writer.bits(30, 8);
+    // Baseline streams set constraint_set0; conformance decoders and some
+    // firmware use it to distinguish real Baseline from a Main stream that
+    // happens to avoid Main tools.
+    writer.bit(context.profile == H264_PROFILE_BASELINE);
+    writer.bits(0, 7); // remaining constraint flags and reserved bits
+    writer.bits(h264_level_for(picture), 8);
     writer.ue(0); // seq_parameter_set_id
 
     if (context.profile >= H264_PROFILE_HIGH) {
