@@ -453,3 +453,32 @@ passed:
 
 The device remained on the same boot throughout this regression. The opt-in
 DMA-BUF zero-copy path was not run after the reset diagnosis.
+
+## Zero-copy follow-up (2026-08-30, `.142`)
+
+After the clean rebuild, the opt-in DMA-BUF path was exercised on the same
+device with the default EOS and watchdog switches unset. Static no-B H.264 and
+VP9 both passed 12-frame and 48-frame runs with exact software framemd5. The
+48-frame traces each contain 48 OUTPUT, 49 CAPTURE (including one terminal
+`LAST`), zero timeout/timestamp diagnostics, and zero `copy_surface_frame`
+records; the trace shows the expected DMA-BUF import and single-slot CAPTURE
+queue. HEVC with the switch enabled passed 12/12 as well, but correctly logged
+`codec_reorder_contract` and used the stable copy path (`copy_surface_frame`
+records present).
+
+Dynamic-resolution probes were kept separate from the positive static oracle:
+
+- `320x180 <-> 160x90` was rejected at the second geometry because `160x90`
+  is below the node's declared minimum height of 96; only 10/30 frames were
+  valid, so this is a capability-boundary result.
+- The `432x240 <-> 848x480` VP9 sample produced the same CAPTURE errors and
+  sequence failures with both zero-copy and MMAP VA paths. It is not evidence
+  of a zero-copy-only regression and remains outside the positive oracle.
+- A smaller `352x288 <-> 282x173` resize sample likewise failed in the MMAP
+  VA path after its context handoff, with native V4L2 still reaching EOS.
+
+These FFmpeg resize flows create a new VA context for each geometry, so the
+context-local `dynamic_resolution` zero-copy fallback is not reached before
+the firmware/input failure. Keep zero-copy disabled for dynamic-resolution
+clients until a caller that reuses one VA context across the change is tested.
+No Chrome or driver source change was made in this follow-up.
