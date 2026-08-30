@@ -78,7 +78,7 @@ run_sample() {
     actual=$(grep -c '^[0-9]' "$hardware" 2>/dev/null || true)
     misses=$(grep -c 'stateful timestamp miss' "$trace" 2>/dev/null || true)
     sync_timeouts=$(grep -c 'Timed out waiting for surface' "$trace" 2>/dev/null || true)
-    capture_errors=$(grep -ci 'capture.*error\|V4L2_BUF_FLAG_ERROR' "$trace" 2>/dev/null || true)
+    capture_errors=$(grep -Eci 'capture.*error=[1-9]|V4L2_BUF_FLAG_ERROR' "$trace" 2>/dev/null || true)
     if [ "$rc" -eq 124 ]; then
         echo "FAIL $name timeout expected=$expected actual=$actual profile=$profile" >&2
         return 1
