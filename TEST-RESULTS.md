@@ -551,3 +551,28 @@ noise and whole-device background power. At 1080p the zero-copy result trends
 lower than VA copy, but the filtered sample is still too small for a firm
 claim. Software is consistently the highest path, while all hardware paths
 remain in the same roughly 2.55-2.60 W whole-device band.
+
+### Runtime translation
+
+At the end of the run the tablet reported `charge_full=8884000` uAh,
+`state_of_health=94`, and 78% capacity. Using a conservative 3.85 V average
+battery voltage gives about 25.0 Wh from the observed 78% down to a 5% reserve,
+or 32.5 Wh from 100% down to that reserve. Dividing those energies by the
+measured whole-device decode power gives the following fakesink baseline:
+
+| Mode | 78% -> 5% | 100% -> 5% |
+| --- | ---: | ---: |
+| Native DMABUF, 720p | 9.8 h | 12.7 h |
+| VA copy, 720p | 9.8 h | 12.7 h |
+| VA zero-copy, 720p | 9.8 h | 12.7 h |
+| Software, 720p | 9.5 h | 12.4 h |
+
+These are not browser numbers: they include the measured screen/background
+load but not Chrome composition, page activity, or network traffic. For a
+browser estimate, add those costs to the table's power before dividing. For
+example, adding an illustrative 0.5 W browser/network cost changes the current
+78%-to-5% estimate to about 8.2 h for hardware and 8.0 h for software; adding
+1.0 W changes it to about 7.0 h and 6.9 h. The actual value will be dominated
+by panel brightness and Wi-Fi, so the defensible conclusion is that hardware
+decoding saves only minutes per charge at this tablet workload, while screen
+and browser overhead determine the total hours.
