@@ -2,6 +2,8 @@
 
 #include "hevc.h"
 
+#include "bitwriter.h"
+
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -19,52 +21,6 @@ extern "C" {
 #include "v4l2.h"
 
 namespace {
-
-class BitWriter {
-public:
-    void bit(unsigned value)
-    {
-        if (bit_offset_ == 0)
-            data_.push_back(0);
-        data_.back() |= (value & 1u) << (7u - bit_offset_);
-        bit_offset_ = (bit_offset_ + 1u) & 7u;
-    }
-
-    void bits(uint64_t value, unsigned count)
-    {
-        for (unsigned i = count; i > 0; --i)
-            bit(static_cast<unsigned>(value >> (i - 1)));
-    }
-
-    void ue(uint32_t value)
-    {
-        const uint32_t code_num = value + 1;
-        unsigned width = 0;
-        for (uint32_t n = code_num; n; n >>= 1)
-            ++width;
-        for (unsigned i = 1; i < width; ++i)
-            bit(0);
-        bits(code_num, width);
-    }
-
-    void se(int32_t value)
-    {
-        ue(value > 0 ? static_cast<uint32_t>(value * 2 - 1) : static_cast<uint32_t>(-value * 2));
-    }
-
-    void trailing_bits()
-    {
-        bit(1);
-        while (bit_offset_ != 0)
-            bit(0);
-    }
-
-    const std::vector<uint8_t>& data() const { return data_; }
-
-private:
-    std::vector<uint8_t> data_;
-    unsigned bit_offset_ = 0;
-};
 
 void profile_tier_level(BitWriter& writer, const VAPictureParameterBufferHEVC& picture, unsigned max_sub_layers_minus1)
 {
@@ -84,20 +40,6 @@ void profile_tier_level(BitWriter& writer, const VAPictureParameterBufferHEVC& p
     for (unsigned i = max_sub_layers_minus1; i < 8; ++i)
         writer.bits(0, 2); // reserved_zero_2bits
     (void)picture;
-}
-
-void append_escaped_nal(std::vector<uint8_t>& stream, unsigned nal_type, const BitWriter& writer)
-{
-    stream.insert(stream.end(), { 0, 0, 0, 1, static_cast<uint8_t>(nal_type << 1), 1 });
-    unsigned zero_count = 0;
-    for (const auto byte : writer.data()) {
-        if (zero_count >= 2 && byte <= 3) {
-            stream.push_back(3);
-            zero_count = 0;
-        }
-        stream.push_back(byte);
-        zero_count = byte == 0 ? zero_count + 1 : 0;
-    }
 }
 
 std::vector<uint8_t> make_hevc_vps(const VAPictureParameterBufferHEVC& picture)
@@ -123,7 +65,7 @@ std::vector<uint8_t> make_hevc_vps(const VAPictureParameterBufferHEVC& picture)
     writer.bit(0); // vps_extension_flag
     writer.trailing_bits();
     std::vector<uint8_t> result;
-    append_escaped_nal(result, 32, writer);
+    append_escaped_nal(result, { 32 << 1, 1 }, writer);
     return result;
 }
 
@@ -229,7 +171,7 @@ std::vector<uint8_t> make_hevc_sps(const VAPictureParameterBufferHEVC& picture)
     writer.bit(0); // sps_extension_present_flag
     writer.trailing_bits();
     std::vector<uint8_t> result;
-    append_escaped_nal(result, 33, writer);
+    append_escaped_nal(result, { 33 << 1, 1 }, writer);
     return result;
 }
 
@@ -285,7 +227,7 @@ std::vector<uint8_t> make_hevc_pps(const VAPictureParameterBufferHEVC& picture)
     writer.bit(0); // pps_extension_present_flag
     writer.trailing_bits();
     std::vector<uint8_t> result;
-    append_escaped_nal(result, 34, writer);
+    append_escaped_nal(result, { 34 << 1, 1 }, writer);
     return result;
 }
 
