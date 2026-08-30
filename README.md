@@ -187,3 +187,20 @@ Clients without Linux HEVC codec support cannot select this profile.
 `V4L2_VA_RESET_ON_IDR=1` enables an experimental queue
 reset on detected new IDRs for debugging seek/replay behavior; it is not
 recommended as the default on kernels with different flush semantics.
+
+### Machine-readable capability contract
+
+The release boundary is recorded in
+[`data/iris-codec-capabilities.json`](data/iris-codec-capabilities.json). It
+separates production VA support from software/native fallback and rejected
+inputs: H.264 and HEVC are the qualified Iris VA paths, while VA VP9 remains
+withdrawn and VA AV1 remains rejected because the caller's tile payload does
+not preserve Iris' complete OBU contract. Consumers and packaging checks
+should read this file instead of inferring support from a device node alone.
+
+Dynamic-resolution, VP9 and zero-copy investigations should be run through
+`scripts/iris-experiment-guard.sh -- command args...`. The guard records the
+boot ID and thermal samples, applies a timeout, stops on reboot or an 85 C
+thermal limit, and leaves an `interrupted` marker that must be reviewed before
+another run. It stores one-off artifacts under
+`~/Lab/Bridge/tmp/trash/iris-experiment` by default.

@@ -190,6 +190,18 @@ decoder result recorded rather than inheriting the browser result.
 
 ## Dynamic resolution qualification
 
+The production/fallback/rejected codec boundary is machine-readable in
+`data/iris-codec-capabilities.json`; keep it in sync with source capability
+advertisement and test expectations. It is intentionally conservative: a
+codec with an empty `va_profiles` list is not a VA production capability even
+when the native V4L2 node can decode it.
+
+For experiments that may reset firmware, wrap the bounded command with
+`scripts/iris-experiment-guard.sh -- ...`. It records the initial boot ID,
+thermal samples and command output, enforces a timeout, and refuses to reuse a
+running guard file until the previous run has been inspected. A reset or
+thermal breach is a failed experiment, not evidence of codec support.
+
 Run the dedicated H.264 reconfiguration gate on the target:
 
 ```sh

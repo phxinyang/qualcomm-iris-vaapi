@@ -33,6 +33,10 @@ test('iris-env-doc-check', find_program('iris-env-doc-check.sh'),
      args: [meson.project_source_root()])
 test('iris-surface-limits-check', find_program('iris-surface-limits-check.sh'),
      args: [meson.project_source_root()])
+test('iris-codec-matrix-check', find_program('iris-codec-matrix-check.sh'),
+     args: [meson.project_source_root()])
+test('iris-experiment-guard-self-test', find_program('iris-experiment-guard-self-test.sh'),
+     args: [meson.project_source_root()])
 test('iris-profile-capability-check', find_program('iris-profile-capability-check.sh'),
      args: [meson.project_source_root()])
 test('iris-eos-check-self-test', find_program('iris-eos-check-self-test.sh'),
