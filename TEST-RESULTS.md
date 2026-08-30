@@ -416,3 +416,40 @@ experimental queue without a long drain, and rebuilds the context on MMAP plus
 stable copy. This guard passed local static checks and remote compilation on
 `.133/.135`; hardware confirmation on the replacement `.148` endpoint is still
 pending because that address was not reachable during this run.
+
+## Post-reset diagnosis and stable-path regression (2026-08-30, `.142`)
+
+The replacement endpoint `192.168.3.142` was inspected read-only before any
+decode run. The previous boot ended abruptly at `17:24:56` and the next boot
+started at `17:25:41`; there is no `reboot.target`, `shutdown`, `OOM`, panic,
+Oops, or watchdog record in the previous boot. The new boot also reported that
+the old system and user journals were corrupted or uncleanly shut down. The
+Qualcomm command line carried `bootinfo.pureason=0x80001` and
+`bootinfo.pdreason=0x2`: the public Xiaomi bootinfo layout maps this to the
+`HWRST` power-up bit plus the `OTHER` reset-reason bit, not a normal software
+reboot, kernel panic, or watchdog code. `/sys/fs/pstore` was empty and no
+`/proc/last_kmsg` was available, so the lower-level trigger remains unknown.
+
+Immediately before the reset, `uperf-linux` recorded heavy load and a maximum
+temperature of `92.7 C`, then returned to `51 C`; this makes a thermal/power
+transient plausible but does not prove it. After reboot the battery reported
+88% and `Discharging`, so an empty battery is not supported by the snapshot.
+
+The remote `.so` left by the interrupted run was zero-filled (`invalid ELF
+header`), which explains why the first post-reset VA probe stopped before
+decoding. A single-thread clean rebuild produced a valid AArch64 shared object
+and passed `ldd -r` with no undefined symbols. With `V4L2_VA_ZERO_COPY` and all
+optional drain/trace switches explicitly unset, the stable MMAP/copy path then
+passed:
+
+| Check | Result |
+| --- | --- |
+| H.264 VA, 12 frames | 12/12 exact framemd5; 12 OUTPUT, 13 CAPTURE, one LAST; zero timeout/miss |
+| VP9 VA, 12 frames | 12/12 exact framemd5; 12 OUTPUT, 13 CAPTURE, one LAST; zero timeout/miss |
+| HEVC VA, 12 frames | 12/12 exact framemd5; 12 OUTPUT, 13 CAPTURE, one LAST; zero timeout/miss |
+| Native AV1 V4L2 | GStreamer EOS |
+| VA context isolation | two contexts created successfully |
+| `v4l2-compliance` | 47/48; only the known stateful `V4L2_CID_MIN_BUFFERS_FOR_CAPTURE` control classification failed |
+
+The device remained on the same boot throughout this regression. The opt-in
+DMA-BUF zero-copy path was not run after the reset diagnosis.
