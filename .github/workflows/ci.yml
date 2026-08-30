@@ -27,13 +27,36 @@ jobs:
       - name: Build
         run: ninja -C build
 
+      # Refuse an empty/partial green run. In particular, the executable
+      # state-machine model is the behavioural test for queue ownership and
+      # drain transitions; source-grep guards alone are not sufficient.
+      - name: Verify test inventory
+        run: |
+          meson test -C build --list | tee build/meson-tests.txt
+          test -s build/meson-tests.txt
+          for required in \
+            stateful-session \
+            static-checks \
+            iris-source-invariants \
+            iris-stateful-order-check \
+            iris-env-doc-check \
+            iris-surface-limits-check \
+            iris-profile-capability-check \
+            iris-deploy-path-check \
+            provenance-self-test; do
+            grep -Eq ":${required}$" build/meson-tests.txt || {
+              echo "missing Meson test: $required" >&2
+              exit 1
+            }
+          done
+
       # The same gate developers run locally. Keeping CI on this single entry
       # point means a check added to the script is automatically enforced here.
       - name: Static checks
         run: sh test/run-static-checks.sh
 
       - name: Meson test
-        run: meson test -C build --print-errorlogs
+        run: meson test -C build --no-rebuild --print-errorlogs
 
       # A driver that links but cannot resolve its own symbols loads as a
       # silent software fallback instead of failing loudly. This is the same
@@ -48,3 +71,24 @@ jobs:
             exit 1
           fi
           echo "no undefined symbols"
+
+      # Exercise the same source-to-binary identity record emitted by remote
+      # deployment. CI is a clean checkout, so dirty must remain false.
+      - name: Generate and verify provenance
+        run: |
+          commit=$(git rev-parse HEAD)
+          digest=$(git ls-files -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+          manifest=build/iris-vaapi-provenance.json
+          python3 test/remote/provenance.py generate \
+            --source-commit "$commit" \
+            --tracked-source-sha256 "$digest" \
+            --source-dirty 0 \
+            --build-dir build \
+            --artifact build/src/v4l2_drv_video.so \
+            --output "$manifest"
+          python3 test/remote/provenance.py verify \
+            --manifest "$manifest" \
+            --artifact build/src/v4l2_drv_video.so \
+            --expected-source-commit "$commit" \
+            --expected-tracked-source-sha256 "$digest" \
+            --expected-source-dirty 0

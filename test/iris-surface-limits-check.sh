@@ -9,8 +9,11 @@ root=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
 v4l2="$root/src/v4l2.cc"
 v4l2_header="$root/src/v4l2.h"
 surface="$root/src/surface.cc"
+picture="$root/src/picture.cc"
+context="$root/src/context.cc"
 
-if [ ! -r "$v4l2" ] || [ ! -r "$v4l2_header" ] || [ ! -r "$surface" ]; then
+if [ ! -r "$v4l2" ] || [ ! -r "$v4l2_header" ] || [ ! -r "$surface" ] \
+    || [ ! -r "$picture" ] || [ ! -r "$context" ]; then
     echo "FAIL surface limit sources are not readable" >&2
     exit 2
 fi
@@ -35,9 +38,19 @@ if ! grep -q 'Context::supported_profiles(device)' "$surface"; then
     echo "FAIL surface limits are not scoped to the config profile" >&2
     exit 1
 fi
-if ! grep -q 'reconfigure_stateful_dimensions' "$root/src/context.cc" \
-    || ! grep -q 'surface.width !=' "$root/src/context.cc"; then
-    echo "FAIL stateful dynamic-resolution reconfiguration is missing" >&2
+begin_block=$(sed -n '/VAStatus beginPicture(/,/^}/p' "$picture")
+bind_block=$(sed -n '/bool Context::bind_surface(/,/^}/p' "$context")
+export_block=$(sed -n '/VAStatus exportSurfaceHandle(/,/^}/p' "$surface")
+if ! printf '%s\n' "$begin_block" | grep -q 'reconfigure_stateful_dimensions'; then
+    echo "FAIL beginPicture does not own stateful dynamic-resolution reconfiguration" >&2
+    exit 1
+fi
+if printf '%s\n' "$bind_block" | grep -q 'reconfigure_stateful_dimensions'; then
+    echo "FAIL bind_surface still hides a decoder reconfiguration" >&2
+    exit 1
+fi
+if printf '%s\n' "$export_block" | grep -Eq 'bind_surface|reconfigure_stateful_dimensions'; then
+    echo "FAIL exportSurfaceHandle mutates decoder binding or geometry" >&2
     exit 1
 fi
 

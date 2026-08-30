@@ -690,6 +690,28 @@ std::optional<V4L2FrameSizeLimits> V4L2M2MDevice::frame_size_limits(unsigned pix
     return result;
 }
 
+std::optional<std::set<int32_t>> V4L2M2MDevice::menu_control_values(uint32_t id) const
+{
+    v4l2_queryctrl control = { .id = id };
+    if (ioctl(video_fd, VIDIOC_QUERYCTRL, &control) < 0)
+        return std::nullopt;
+    if ((control.flags & V4L2_CTRL_FLAG_DISABLED) != 0
+        || (control.type != V4L2_CTRL_TYPE_MENU && control.type != V4L2_CTRL_TYPE_INTEGER_MENU)
+        || control.minimum < 0 || control.maximum < control.minimum)
+        return std::nullopt;
+
+    std::set<int32_t> result;
+    for (int64_t index = control.minimum; index <= control.maximum; ++index) {
+        v4l2_querymenu menu = {
+            .id = id,
+            .index = static_cast<uint32_t>(index),
+        };
+        if (ioctl(video_fd, VIDIOC_QUERYMENU, &menu) == 0)
+            result.insert(static_cast<int32_t>(index));
+    }
+    return result;
+}
+
 unsigned V4L2M2MDevice::buffer_count(v4l2_buf_type type) const
 {
     return (V4L2_TYPE_IS_CAPTURE(type) ? capture_buffers : output_buffers).size();

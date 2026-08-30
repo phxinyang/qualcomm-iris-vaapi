@@ -24,6 +24,7 @@ resume_block=$(sed -n '/void Context::resume_after_drain()/,/^namespace {/p' "$c
 watchdog_block=$(sed -n '/void Context::stateful_watchdog_loop()/,/^bool Context::bind_surface/p' "$context")
 input_block=$(sed -n '/bool Context::stateful_input_consumed()/,/^void Context::note_stateful_submission/p' "$context")
 reset_block=$(sed -n '/bool Context::reset_stateful_decoder()/,/^bool Context::drain_stateful_decoder()/p' "$context")
+sequence_block=$(sed -n '/void Context::note_stateful_new_sequence()/,/^void Context::discard_stateful_surface/p' "$context")
 
 if ! printf '%s\n' "$flush_block" | grep -q 'stateful_batch_limit_from_env'; then
     echo "FAIL stateful flush has no bounded batch limit" >&2
@@ -52,16 +53,16 @@ if ! printf '%s\n' "$drain_block" | grep -q 'mark_source_buffer_dequeued'; then
     echo "FAIL stateful drain does not retire trailing OUTPUT buffers" >&2
     exit 1
 fi
-if ! printf '%s\n' "$drain_block" | grep -q 'if (!saw_last)'; then
-    echo "FAIL stateful drain can resume without terminal LAST" >&2
+if ! printf '%s\n' "$drain_block" | grep -q 'StatefulSession::State::RestartPending'; then
+    echo "FAIL stateful drain has no LAST plus OUTPUT restart barrier" >&2
     exit 1
 fi
-if ! printf '%s\n' "$reset_block" | grep -q 'if (!saw_last)'; then
-    echo "FAIL timeout reset can restart without terminal LAST" >&2
+if ! printf '%s\n' "$reset_block" | grep -q 'StatefulSession::State::RestartPending'; then
+    echo "FAIL timeout reset has no LAST plus OUTPUT restart barrier" >&2
     exit 1
 fi
-if ! printf '%s\n' "$resume_block" | grep -q '!stateful_last_marker_seen'; then
-    echo "FAIL resume path has no terminal LAST guard" >&2
+if ! printf '%s\n' "$resume_block" | grep -q 'StatefulSession::State::RestartPending'; then
+    echo "FAIL resume path has no model restart barrier" >&2
     exit 1
 fi
 if ! printf '%s\n' "$watchdog_block" | grep -q 'if (drained)'; then
@@ -73,8 +74,8 @@ if ! printf '%s\n' "$input_block" | grep -q 'stateful_submitted_count < 8' \
     echo "FAIL idle drain has no cold-start history guard" >&2
     exit 1
 fi
-if ! printf '%s\n' "$reset_block" | grep -q 'stateful_cold_start_exhausted_ = false' \
-    || ! printf '%s\n' "$reset_block" | grep -q 'stateful_barren_syncs_ = 0'; then
+if ! printf '%s\n' "$sequence_block" | grep -q 'stateful_cold_start_exhausted_ = false' \
+    || ! printf '%s\n' "$sequence_block" | grep -q 'stateful_barren_syncs_ = 0'; then
     echo "FAIL stateful reset carries barren cold-start state across sequences" >&2
     exit 1
 fi
@@ -83,15 +84,6 @@ if ! grep -q 'V4L2_VA_STATEFUL_EOS_DRAIN' "$context" \
     echo "FAIL generic EOS drain environment compatibility is missing" >&2
     exit 1
 fi
-if ! printf '%s\n' "$drain_block" | grep -q 'if (!saw_last)'; then
-    echo "FAIL stateful drain can resume without terminal LAST" >&2
-    exit 1
-fi
-if ! printf '%s\n' "$reset_block" | grep -q 'if (!saw_last)'; then
-    echo "FAIL timeout reset can restart without terminal LAST" >&2
-    exit 1
-fi
-
 if printf '%s\n' "$timeout_block" | grep -q 'discard_stateful_surface(surface_id)'; then
     echo "FAIL timeout path deletes the late CAPTURE timestamp mapping" >&2
     exit 1

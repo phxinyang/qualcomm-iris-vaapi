@@ -46,7 +46,35 @@ extern "C" {
 
 struct DriverData;
 
-struct Surface {
+// Own the stable DMA-BUF exported for a VA surface. Keep the legacy member
+// names here so Context can inspect/reset a binding without sharing the
+// close/munmap implementation. Moving transfers ownership; copying would
+// duplicate raw handles and is therefore forbidden.
+struct SurfaceStableExport {
+    SurfaceStableExport() = default;
+    SurfaceStableExport(const SurfaceStableExport&) = delete;
+    SurfaceStableExport& operator=(const SurfaceStableExport&) = delete;
+    SurfaceStableExport(SurfaceStableExport&& other) noexcept;
+    SurfaceStableExport& operator=(SurfaceStableExport&& other) noexcept;
+    ~SurfaceStableExport();
+
+    void adopt_export_buffer(int fd, void* mapping, size_t size) noexcept;
+    void reset_export_buffer() noexcept;
+
+    int export_buffer_fd = -1;
+    void* export_buffer_mapping = nullptr;
+    size_t export_buffer_size = 0;
+    // Offsets of logical VA planes in the optional contiguous export buffer.
+    // For a single physical NV12 plane these retain the V4L2 offsets; for
+    // NV12M they are packed consecutively into the stable buffer.
+    std::vector<unsigned> export_plane_offsets;
+    // Once a stable fd has been exported its pitch/offset contract cannot
+    // follow later V4L2 queue reconfiguration. Keep that immutable layout
+    // beside the allocation it describes.
+    BufferLayout stable_export_layout;
+};
+
+struct Surface : SurfaceStableExport {
     VASurfaceStatus status;
     unsigned width;
     unsigned height;
@@ -75,14 +103,10 @@ struct Surface {
     // Optional stable DMA-BUF backing for an exported VA surface. The
     // stateful V4L2 decoder may return any CAPTURE index for a timestamp, so
     // copy_surface_frame() updates this fixed buffer before it is displayed.
-    int export_buffer_fd = -1;
-    void* export_buffer_mapping = nullptr;
-    size_t export_buffer_size = 0;
-    // Offsets of logical VA planes in the optional contiguous export buffer.
-    // For a single physical NV12 plane these retain the V4L2 offsets; for
-    // NV12M they are packed consecutively into the stable buffer.
-    std::vector<unsigned> export_plane_offsets;
     BufferLayout logical_destination_layout;
+    // Preserve the V4L2 CAPTURE layout after logical_destination_layout is
+    // switched to the compact stable layout consumed by vaGetImage.
+    BufferLayout capture_source_layout;
     uint32_t format;
 
     timeval timestamp;

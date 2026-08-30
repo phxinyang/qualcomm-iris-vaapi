@@ -76,10 +76,12 @@ the old queue and rebuilds its V4L2 capture/output pools for the new surface
 geometry before submitting the next access unit.
 
 Stateful Iris may hold a reordered B/P frame until a later AU is submitted.
-`vaSyncSurface()` therefore uses a bounded 1000 ms wait by default, allowing
+`vaSyncSurface()` therefore uses a bounded 2000 ms wait by default, allowing
 an asynchronous producer to continue after a stalled reorder point instead of
 deadlocking a looping or seeked stream. Override it with
-`V4L2_VA_SYNC_TIMEOUT_MS=100..60000` when diagnosing another application.
+`V4L2_VA_SYNC_TIMEOUT_MS=50..60000` when diagnosing another application. When
+no override is set, the first frame of a cold stateful sequence gets a 30000 ms
+startup allowance for firmware bring-up; later frames use the normal bound.
 CAPTURE frames are matched to the exact monotonic timestamp copied into their
 OUTPUT AU. A frame that arrives after its surface was dropped is discarded and
 the CAPTURE slot is requeued; binding it to the nearest live timestamp causes
@@ -109,7 +111,7 @@ Only the first group is intended for production use.
 | `LIBVA_V4L2_MEDIA_PATH` | probe | Media node paired with the above; required when the video path is overridden on a stateless driver. |
 | `V4L2_VA_BATCH_SIZE` | `1` | Access units per OUTPUT buffer. Values above `1` are throughput experiments only; see the note above on display-order association. |
 | `V4L2_VA_COPY_SURFACES` | `1` | Publish each frame through a stable per-surface DMA-BUF. Set `0` only for clients that manage rotating CAPTURE lifetime themselves. |
-| `V4L2_VA_SYNC_TIMEOUT_MS` | `1000` | Bounded `vaSyncSurface()` wait, `100..60000`. |
+| `V4L2_VA_SYNC_TIMEOUT_MS` | `2000` | Bounded `vaSyncSurface()` wait, `50..60000`; without an override, the first cold-start frame may wait up to `30000` ms. |
 | `V4L2_VA_STATEFUL_EOS_DRAIN` | off | Opt-in idle drain for clients that never signal end of stream. |
 | `V4L2_VA_EOS_DRAIN` | off | Legacy spelling of the above, still honoured. |
 | `V4L2_VA_EOS_IDLE_MS` | `400` | Idle threshold for that watchdog, `10..5000`. |

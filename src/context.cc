@@ -70,6 +70,14 @@ extern "C" {
 namespace {
 thread_local std::unordered_map<const Context*, VASurfaceID> current_surfaces;
 
+iris::StatefulSession::Timestamp stateful_timestamp_value(timeval timestamp)
+{
+    if (timestamp.tv_sec < 0 || timestamp.tv_usec < 0)
+        return 0;
+    return static_cast<iris::StatefulSession::Timestamp>(timestamp.tv_sec) * 1000000
+        + static_cast<iris::StatefulSession::Timestamp>(timestamp.tv_usec);
+}
+
 size_t stateful_batch_limit_from_env()
 {
     size_t limit = 1;
@@ -433,6 +441,15 @@ VAStatus Context::append_stateful_picture(VASurfaceID surface_id)
     if (!uses_stateful_streaming() || !driver_data->surfaces.contains(surface_id))
         return VA_STATUS_ERROR_OPERATION_FAILED;
     auto& surface = driver_data->surfaces.at(surface_id);
+    const bool sequence_start = stateful_sequence_start(surface_id);
+    // Only discard old model ownership at a proven boundary. An IDR/SPS is a
+    // safe new sequence when no old OUTPUT or staged AU remains; other IDRs
+    // are announced after the explicit STOP/START path below completes.
+    if (sequence_start && stateful_pending.empty() && stateful_batches.empty()
+        && stateful_session_.queued_output_count() == 0)
+        note_stateful_new_sequence();
+    if (stateful_session_.failed())
+        return VA_STATUS_ERROR_DECODING_ERROR;
     if (surface.source_size_used == 0)
         return VA_STATUS_ERROR_INVALID_PARAMETER;
     if (stateful_pending_size > std::numeric_limits<size_t>::max() - surface.source_size_used)
@@ -452,7 +469,7 @@ VAStatus Context::append_stateful_picture(VASurfaceID surface_id)
         }
     }
     stateful_last_timestamp = surface.timestamp;
-    if (std::getenv("V4L2_VA_RESET_ON_IDR") && stateful_sequence_start(surface_id))
+    if (std::getenv("V4L2_VA_RESET_ON_IDR") && sequence_start)
         stateful_sequence_starts.insert(surface_id);
     stateful_pending.push_back(surface_id);
     stateful_pending_size += surface.source_size_used;
@@ -468,7 +485,7 @@ VAStatus Context::flush_stateful_batch()
     // STOP is a drain operation. Until its CAPTURE LAST marker arrives the
     // firmware cannot accept a new OUTPUT stream, so report backpressure to a
     // generic VA client instead of silently dropping the staged picture.
-    if (stateful_draining)
+    if (capture_draining())
         return VA_STATUS_ERROR_HW_BUSY;
 
     try {
@@ -510,9 +527,9 @@ VAStatus Context::flush_stateful_batch()
             if (stateful_sequence_starts.erase(surface_id) != 0) {
                 if (trace_enabled())
                     std::fprintf(stderr, "stateful reset before IDR surface=%u\n", surface_id);
-                reset_stateful_timeout_recovery();
                 if (!reset_stateful_decoder())
                     return VA_STATUS_ERROR_HW_BUSY;
+                note_stateful_new_sequence();
             }
             // Keep the complete AU, including its SPS/PPS, in the aggregate
             // stream. Iris accepts repeated parameter sets and needs the PPS
@@ -538,12 +555,20 @@ VAStatus Context::flush_stateful_batch()
                 std::fclose(file);
             }
         }
-        device.buffer(device.output_buf_type, batch_index).queue(-1, &batch_timestamp, aggregate_size);
+        if (!stateful_session_.on_output_queued(batch_index))
+            return VA_STATUS_ERROR_HW_BUSY;
+        try {
+            device.buffer(device.output_buf_type, batch_index).queue(-1, &batch_timestamp, aggregate_size);
+        } catch (...) {
+            // Roll back the model when QBUF itself fails; no hardware OUTPUT
+            // ownership was established in that case.
+            stateful_session_.on_output_dequeued(batch_index);
+            throw;
+        }
         for (const auto surface_id : batch_surfaces)
             driver_data->surfaces.at(surface_id).source_buffer_queued = true;
         stateful_batches.emplace(batch_index, std::move(batch_surfaces));
         stateful_batch_order.push_back(batch_index);
-        stateful_last_marker_seen = false;
         stateful_batch_timestamps.emplace(
             std::make_pair(static_cast<long long>(batch_timestamp.tv_sec), static_cast<long>(batch_timestamp.tv_usec)), batch_index);
         for (size_t i = 0; i < batch_count; i++) {
@@ -560,7 +585,6 @@ VAStatus Context::flush_stateful_batch()
             // marks the first batch LAST, after which further QBUF calls fail.
             if (!start_capture())
                 return VA_STATUS_ERROR_OPERATION_FAILED;
-            stateful_queue_restart_pending = false;
         }
         queue_zero_copy_capture();
         // Do not probe for backpressure from the producer path. A stateful
@@ -585,65 +609,94 @@ void Context::service_stateful_queues()
     // Iris returns CAPTURE before the corresponding compressed OUTPUT buffer.
     // Resolve the timestamp while the mapping still owns the batch, then make
     // the returned CAPTURE buffer available for the next VA surface.
-    while (auto capture_index = device.dequeue_ready(device.capture_buf_type, 0)) {
-        bool requeued = false;
-        auto completed = surface_for_timestamp(device.last_dequeued_timestamp(), device.last_dequeued_flags());
-        if (device.last_dequeued_error() && !completed)
-            // Iris reports firmware-side decode failures as a CAPTURE buffer
-            // with ERROR and timestamp 0. There is no timestamp to resolve,
-            // so retire the oldest submitted batch before releasing the slot.
-            discard_stateful_error_frame();
-        if (!completed && !uses_stateful_streaming())
-            completed = surface_for_capture_flags(device.last_dequeued_flags());
-        bool capture_requeued = false;
-        if (completed && driver_data->surfaces.contains(*completed)) {
-            auto& surface = driver_data->surfaces.at(*completed);
-            if (!capture_uses_dmabuf())
-                copy_surface_frame(surface, device.buffer(device.capture_buf_type, *capture_index));
-            // With the stable DMA-BUF path the VA client consumes a private
-            // copy, so the V4L2 CAPTURE slot must be returned immediately.
-            // Holding it on the VA surface eventually exhausts the capture queue when
-            // several decoders or looping videos are active.
-            if (!capture_uses_dmabuf() && copy_surfaces_enabled() && surface.export_buffer_fd >= 0
-                && surface.export_buffer_mapping) {
-                device.buffer(device.capture_buf_type, *capture_index).queue();
-                capture_requeued = true;
-            } else if (capture_slots_scheduled()) {
-                const auto expected = surface_buffer_indices.at(*completed);
-                if (trace_enabled() && expected != *capture_index)
-                    std::fprintf(stderr, "stateful capture mismatch surface=%u expected=%u got=%u\n", *completed,
-                        expected, *capture_index);
-                // If scheduling selected another slot, return that slot and
-                // keep the exported surface binding untouched.
-                if (expected != *capture_index)
-                    device.buffer(device.capture_buf_type, *capture_index).queue();
-                else
-                    surface.destination_buffer_queued = false;
-            } else {
-                surface.destination_buffer = std::cref(device.buffer(device.capture_buf_type, *capture_index));
-                surface.destination_buffer_index = *capture_index;
-                surface.destination_buffer_queued = capture_requeued;
-            }
-            // A surface is serialized by beginPicture(): a Rendering target
-            // is synchronized before it can be reused. Therefore every
-            // timestamp completion retires the input scratch and releases the
-            // target for the next VA picture.
-            surface.status = VASurfaceDisplaying;
-            surface.source_size_used = 0;
-        } else {
-            // A dropped/incomplete frame has no VA target, but its CAPTURE
-            // slot must still be returned to the driver immediately.
-            device.buffer(device.capture_buf_type, *capture_index).queue();
-            requeued = true;
-        }
-        if (device.last_dequeued_error() && !requeued && !capture_requeued)
-            device.buffer(device.capture_buf_type, *capture_index).queue();
-    }
+    while (auto capture_index = device.dequeue_ready(device.capture_buf_type, 0))
+        handle_capture_completion(*capture_index);
 
-    while (auto output_index = device.dequeue_ready(device.output_buf_type, 0))
-        mark_source_buffer_dequeued(*output_index);
+    service_output_queue();
+    resume_after_drain();
 
     queue_zero_copy_capture();
+}
+
+bool Context::handle_capture_completion(unsigned capture_index, bool force_requeue)
+{
+    const bool capture_was_last = device.last_dequeued_last();
+    const bool capture_error = device.last_dequeued_error();
+    const auto capture_timestamp = device.last_dequeued_timestamp();
+    auto completed = surface_for_timestamp(capture_timestamp, device.last_dequeued_flags());
+    if (capture_error && !completed && uses_stateful_streaming())
+        // ERROR CAPTURE buffers carry timestamp zero, so retire the oldest
+        // submitted batch before returning the slot to the decoder.
+        discard_stateful_error_frame();
+    if (!completed && !uses_stateful_streaming())
+        completed = surface_for_capture_flags(device.last_dequeued_flags());
+    if (!completed && !uses_stateful_streaming())
+        completed = surface_for_buffer(device.capture_buf_type, capture_index);
+
+    bool capture_requeued = false;
+    if (completed && driver_data->surfaces.contains(*completed)) {
+        auto& surface = driver_data->surfaces.at(*completed);
+        if (!capture_error && !capture_uses_dmabuf())
+            copy_surface_frame(surface, device.buffer(device.capture_buf_type, capture_index));
+
+        const auto expected = surface_for_buffer(device.capture_buf_type, capture_index);
+        const bool stable_snapshot = !capture_uses_dmabuf() && copy_surfaces_enabled()
+            && surface.export_buffer_fd >= 0 && surface.export_buffer_mapping;
+        const bool scheduled_mismatch = capture_slots_scheduled() && (!expected || *expected != *completed);
+        if (stable_snapshot || scheduled_mismatch || force_requeue || capture_error) {
+            device.buffer(device.capture_buf_type, capture_index).queue();
+            capture_requeued = true;
+        } else if (!capture_slots_scheduled()) {
+            surface.destination_buffer = std::cref(device.buffer(device.capture_buf_type, capture_index));
+            surface.destination_buffer_index = capture_index;
+        }
+
+        surface.destination_buffer_queued = capture_requeued;
+        surface.status = VASurfaceDisplaying;
+        surface.source_size_used = 0;
+        if (uses_stateful_streaming() && !capture_error) {
+            stateful_completed_count++;
+            stateful_session_.on_capture_completed(stateful_timestamp_value(capture_timestamp));
+        }
+        if (trace_enabled())
+            std::fprintf(stderr,
+                "stateful capture complete index=%u surface=%u queued=%d last=%d error=%d\n",
+                capture_index, *completed, capture_requeued ? 1 : 0,
+                capture_was_last ? 1 : 0, capture_error ? 1 : 0);
+    } else {
+        // LAST, dropped, stale and timestamp-less ERROR buffers do not own a
+        // live VA target, but their CAPTURE slot is always reusable.
+        device.buffer(device.capture_buf_type, capture_index).queue();
+        capture_requeued = true;
+        if (trace_enabled())
+            std::fprintf(stderr,
+                "stateful capture complete index=%u no-surface queued=1 last=%d error=%d\n",
+                capture_index, capture_was_last ? 1 : 0, capture_error ? 1 : 0);
+    }
+
+    if (uses_stateful_streaming()) {
+        if (capture_error)
+            stateful_session_.on_capture_error(stateful_timestamp_value(capture_timestamp));
+        else if (!capture_was_last && !completed)
+            // An unmatched decoded buffer is still device progress; it must
+            // clear the timeout streak without being assigned to a VA target.
+            stateful_session_.on_capture_completed(stateful_timestamp_value(capture_timestamp));
+        if (capture_was_last)
+            stateful_session_.on_capture_last();
+    }
+    return capture_was_last;
+}
+
+void Context::service_output_queue()
+{
+    while (auto output_index = device.dequeue_ready(device.output_buf_type, 0)) {
+        if (uses_stateful_streaming()) {
+            mark_source_buffer_dequeued(*output_index);
+        } else if (auto completed = surface_for_buffer(device.output_buf_type, *output_index);
+                   completed && driver_data->surfaces.contains(*completed)) {
+            driver_data->surfaces.at(*completed).source_buffer_queued = false;
+        }
+    }
 }
 
 void Context::discard_stateful_error_frame()
@@ -698,7 +751,7 @@ bool Context::has_queued_stateful_output() const
     return !stateful_batches.empty();
 }
 
-bool Context::try_begin_stateful_timeout_recovery()
+iris::StatefulSession::TimeoutAction Context::on_stateful_sync_timeout(bool startup)
 {
     // Do not reset a cold decoder: parameter-set negotiation and firmware DPB
     // allocation can legitimately take seconds before the first few frames.
@@ -709,11 +762,20 @@ bool Context::try_begin_stateful_timeout_recovery()
     // CAPTURE timestamps orphaned. Keep the eight-AU floor as the cold-start
     // guard, while allowing either a proven decode history or an all-pending
     // burst to trigger one STOP/drain recovery.
-    if (!stateful_timeout_drain() || stateful_timeout_recovery_used
-        || stateful_submitted_count < 8 || !has_queued_stateful_output())
-        return false;
-    stateful_timeout_recovery_used = true;
-    return true;
+    if (!uses_stateful_streaming())
+        return iris::StatefulSession::TimeoutAction::None;
+    const bool recovery_allowed = stateful_timeout_drain()
+        && stateful_submitted_count >= 8 && has_queued_stateful_output();
+    return stateful_session_.on_sync_timeout(startup, recovery_allowed);
+}
+
+void Context::note_stateful_new_sequence()
+{
+    stateful_session_.on_new_sequence();
+    stateful_submitted_count = 0;
+    stateful_completed_count = 0;
+    stateful_cold_start_exhausted_ = false;
+    stateful_barren_syncs_ = 0;
 }
 
 void Context::discard_stateful_surface(VASurfaceID surface_id)
@@ -782,8 +844,14 @@ bool Context::reset_stateful_decoder()
 {
     if (!uses_stateful_streaming() || !capture_initialized)
         return false;
-    if (stateful_draining)
+    const auto initial_state = stateful_session_.state();
+    if (initial_state == iris::StatefulSession::State::Running) {
+        if (!stateful_session_.request_drain())
+            return false;
+    } else if (initial_state != iris::StatefulSession::State::Draining
+        && initial_state != iris::StatefulSession::State::Reconfiguring) {
         return false;
+    }
     // A codec may still be holding an access unit back. Submit it before STOP
     // so the drain covers the whole stream rather than stranding the last
     // frame until the context is destroyed.
@@ -791,8 +859,6 @@ bool Context::reset_stateful_decoder()
     queue_zero_copy_drain_capture();
     try {
         device.decoder_stop();
-        stateful_draining = true;
-        stateful_last_marker_seen = false;
     } catch (const std::system_error& error) {
         if (trace_enabled())
             std::fprintf(stderr, "stateful reset stop failed: %s\n", error.what());
@@ -802,34 +868,7 @@ bool Context::reset_stateful_decoder()
     for (unsigned attempt = 0; attempt < 200; attempt++) {
         auto capture_index = device.dequeue_ready(device.capture_buf_type, 20);
         if (capture_index) {
-            if (auto completed = surface_for_timestamp(device.last_dequeued_timestamp(), device.last_dequeued_flags());
-                completed && driver_data->surfaces.contains(*completed)) {
-                auto& surface = driver_data->surfaces.at(*completed);
-                if (!capture_uses_dmabuf())
-                    copy_surface_frame(surface, device.buffer(device.capture_buf_type, *capture_index));
-                if (!capture_slots_scheduled()) {
-                    surface.destination_buffer = std::cref(device.buffer(device.capture_buf_type, *capture_index));
-                    surface.destination_buffer_index = *capture_index;
-                    surface.destination_buffer_queued = false;
-                }
-                surface.status = VASurfaceDisplaying;
-                surface.source_size_used = 0;
-            }
-            // STOP is a drain operation, not a queue teardown. Iris may still
-            // need a free CAPTURE slot to retire OUTPUT buffers that were queued
-            // before STOP (including the tail of a B-frame GOP). Requeue each
-            // returned CAPTURE buffer immediately instead of waiting until the
-            // OUTPUT drain has completed.
-            device.buffer(device.capture_buf_type, *capture_index).queue();
-            for (const auto& [surface_id, buffer_index] : surface_buffer_indices) {
-                if (!driver_data->surfaces.contains(surface_id))
-                    continue;
-                auto& surface = driver_data->surfaces.at(surface_id);
-                if (surface.destination_buffer_index == *capture_index)
-                    surface.destination_buffer_queued = true;
-            }
-            if (device.last_dequeued_last()) {
-                stateful_last_marker_seen = true;
+            if (handle_capture_completion(*capture_index, true)) {
                 saw_last = true;
                 break;
             }
@@ -837,15 +876,15 @@ bool Context::reset_stateful_decoder()
         while (auto output_index = device.dequeue_ready(device.output_buf_type, 0)) {
             mark_source_buffer_dequeued(*output_index);
         }
-        if (!capture_index && stateful_batches.empty())
-            break;
     }
     // OUTPUT completion can trail the final CAPTURE buffer by a few
     // scheduler ticks. Give the driver a short drain window before START;
     // issuing DECODER_CMD_START with one old OUTPUT still queued returns EBUSY
     // on Iris after repeated seeks/loops.
     const auto output_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-    for (unsigned attempt = 0; attempt < 200 && !stateful_batches.empty(); attempt++) {
+    for (unsigned attempt = 0; attempt < 200
+         && stateful_session_.state() != iris::StatefulSession::State::RestartPending;
+         attempt++) {
         auto output_index = device.dequeue_ready(device.output_buf_type, 20);
         if (!output_index) {
             if (std::chrono::steady_clock::now() < output_deadline)
@@ -855,14 +894,17 @@ bool Context::reset_stateful_decoder()
         }
         mark_source_buffer_dequeued(*output_index);
     }
-    if (trace_enabled() && !stateful_batches.empty())
-        std::fprintf(stderr, "stateful reset output drain incomplete remaining=%zu\n", stateful_batches.size());
-    if (!saw_last) {
+    if (trace_enabled() && stateful_session_.state() != iris::StatefulSession::State::RestartPending)
+        std::fprintf(stderr, "stateful reset output drain incomplete remaining=%zu\n",
+            stateful_session_.drain_output_count());
+    if (!saw_last || stateful_session_.state() != iris::StatefulSession::State::RestartPending) {
         // V4L2 forbids DECODER_CMD_START until the terminal CAPTURE marker is
-        // dequeued. Leave the decoder stopped so a caller cannot accidentally
-        // restart with stale OUTPUT buffers after a firmware timeout.
+        // dequeued, and Iris requires every pre-STOP OUTPUT to be recycled.
+        // Leave the decoder stopped rather than restarting either incomplete
+        // half of that barrier.
         if (trace_enabled())
-            std::fprintf(stderr, "stateful reset incomplete last=0; decoder remains stopped\n");
+            std::fprintf(stderr, "stateful reset incomplete last=%d output=%zu; decoder remains stopped\n",
+                saw_last ? 1 : 0, stateful_session_.drain_output_count());
         return false;
     }
     stateful_batches.clear();
@@ -908,21 +950,13 @@ bool Context::reset_stateful_decoder()
         // Keep CAPTURE stopped until the first new OUTPUT AU has restarted
         // OUTPUT. Iris requires OUTPUT STREAMON before CAPTURE STREAMON.
         capture_initialized = false;
-        stateful_queue_restart_pending = true;
     } else {
         device.decoder_start();
-        stateful_queue_restart_pending = false;
     }
-    stateful_draining = false;
-    if (stateful_last_marker_seen && trace_enabled())
+    if (!stateful_session_.restart())
+        return false;
+    if (trace_enabled())
         std::fprintf(stderr, "stateful drain complete last=1 batches=%zu\n", stateful_batches.size());
-    stateful_submitted_count = 0;
-    stateful_completed_count = 0;
-    // A STOP/START begins a fresh decoder sequence. Do not carry a previous
-    // sequence's barren-sync budget into the new cold start after a seek or
-    // timeout recovery.
-    stateful_cold_start_exhausted_ = false;
-    stateful_barren_syncs_ = 0;
     return true;
 }
 
@@ -932,11 +966,10 @@ bool Context::drain_stateful_decoder()
     if (!capture_initialized)
         return false;
 
-    // A timeout recovery may already have STOP-drained the decoder and seen
-    // its terminal CAPTURE LAST marker. If no new AU was submitted afterward,
-    // issuing another STOP during context destruction only creates a second
-    // LAST event and confuses strict EOS clients.
-    if (stateful_last_marker_seen && stateful_batches.empty() && stateful_pending.empty()) {
+    // A completed STOP remains at RestartPending until its caller explicitly
+    // issues START. Do not generate a second LAST marker for the same stream.
+    if (stateful_session_.state() == iris::StatefulSession::State::RestartPending
+        && stateful_pending.empty()) {
         if (trace_enabled())
             std::fprintf(stderr, "stateful drain already complete last=1 batches=0\n");
         return true;
@@ -949,18 +982,26 @@ bool Context::drain_stateful_decoder()
     if (!stateful_pending.empty() && flush_stateful_batch() != VA_STATUS_SUCCESS)
         return false;
 
+    bool issue_stop = false;
+    const auto state = stateful_session_.state();
+    if (state == iris::StatefulSession::State::Running) {
+        if (!stateful_session_.request_drain())
+            return false;
+        issue_stop = true;
+    } else if (state == iris::StatefulSession::State::Reconfiguring) {
+        // request_resolution_change() established the ownership snapshot;
+        // this call performs the matching hardware STOP.
+        issue_stop = true;
+    } else if (state != iris::StatefulSession::State::Draining) {
+        return false;
+    }
+
     try {
-        if (!stateful_draining) {
+        if (issue_stop) {
             queue_zero_copy_drain_capture();
             device.decoder_stop();
-            // The STOP command drains the stateful decoder asynchronously. Mark
-            // the context before waiting for the terminal CAPTURE marker so the
-            // LAST path can restart Iris through resume_after_drain().
-            stateful_draining = true;
-            stateful_last_marker_seen = false;
         }
     } catch (const std::system_error& error) {
-        stateful_draining = false;
         if (trace_enabled())
             std::fprintf(stderr, "stateful drain stop failed: %s\n", error.what());
         return false;
@@ -971,31 +1012,14 @@ bool Context::drain_stateful_decoder()
     while (std::chrono::steady_clock::now() < deadline) {
         try {
             auto capture_index = device.dequeue_ready(device.capture_buf_type, 50);
-            if (!capture_index)
-                continue;
-
-            auto completed = surface_for_timestamp(device.last_dequeued_timestamp(), device.last_dequeued_flags());
-            const bool capture_was_last = device.last_dequeued_last();
-            if (completed && driver_data->surfaces.contains(*completed)) {
-                auto& surface = driver_data->surfaces.at(*completed);
-                if (!capture_uses_dmabuf())
-                    copy_surface_frame(surface, device.buffer(device.capture_buf_type, *capture_index));
-                surface.status = VASurfaceDisplaying;
-                surface.source_size_used = 0;
-            }
-            // No consumer can hold a reference after Context destruction. Requeue
-            // the slot anyway so the firmware can publish the LAST marker and the
-            // following OUTPUT DQBUF completions.
-            device.buffer(device.capture_buf_type, *capture_index).queue();
+            if (capture_index && handle_capture_completion(*capture_index, true))
+                saw_last = true;
 
             while (auto output_index = device.dequeue_ready(device.output_buf_type, 0))
                 mark_source_buffer_dequeued(*output_index);
 
-            if (capture_was_last) {
-                saw_last = true;
-                stateful_last_marker_seen = true;
+            if (stateful_session_.state() == iris::StatefulSession::State::RestartPending)
                 break;
-            }
         } catch (...) {
             break;
         }
@@ -1005,9 +1029,10 @@ bool Context::drain_stateful_decoder()
     // compressed OUTPUT buffer. The stateful contract requires both queues to
     // be drained before START, otherwise a generic caller can hit EBUSY or
     // lose the final batch on a slow firmware scheduler tick.
-    if (saw_last && !stateful_batches.empty()) {
+    if (saw_last && stateful_session_.state() != iris::StatefulSession::State::RestartPending) {
         const auto output_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-        while (!stateful_batches.empty() && std::chrono::steady_clock::now() < output_deadline) {
+        while (stateful_session_.state() != iris::StatefulSession::State::RestartPending
+            && std::chrono::steady_clock::now() < output_deadline) {
             try {
                 auto output_index = device.dequeue_ready(device.output_buf_type, 20);
                 if (output_index)
@@ -1016,22 +1041,26 @@ bool Context::drain_stateful_decoder()
                 break;
             }
         }
-        if (trace_enabled() && !stateful_batches.empty())
-            std::fprintf(stderr, "stateful drain output incomplete remaining=%zu\n", stateful_batches.size());
+        if (trace_enabled() && stateful_session_.state() != iris::StatefulSession::State::RestartPending)
+            std::fprintf(stderr, "stateful drain output incomplete remaining=%zu\n",
+                stateful_session_.drain_output_count());
     }
 
     if (trace_enabled())
-        std::fprintf(stderr, "stateful drain complete last=%d batches=%zu\n", saw_last, stateful_batches.size());
-    if (!saw_last)
-        return false;
-    return true;
+        std::fprintf(stderr, "stateful drain complete last=%d output=%zu batches=%zu\n",
+            saw_last ? 1 : 0, stateful_session_.drain_output_count(), stateful_batches.size());
+    return saw_last && stateful_session_.state() == iris::StatefulSession::State::RestartPending;
 }
 
 void Context::mark_source_buffer_dequeued(unsigned index)
 {
+    const bool model_owned_output = stateful_session_.on_output_dequeued(index);
     auto batch = stateful_batches.find(index);
-    if (batch == stateful_batches.end())
+    if (batch == stateful_batches.end()) {
+        if (trace_enabled() && !model_owned_output)
+            std::fprintf(stderr, "stateful output dequeue untracked index=%u\n", index);
         return;
+    }
     for (auto surface_id : batch->second) {
         if (driver_data->surfaces.contains(surface_id))
             driver_data->surfaces.at(surface_id).source_buffer_queued = false;
@@ -1050,9 +1079,9 @@ void Context::mark_source_buffer_dequeued(unsigned index)
 
 void Context::resume_after_drain()
 {
-    // A START is legal only after the terminal CAPTURE LAST marker. Keep this
-    // guard even when a caller invokes resume directly after a bounded wait.
-    if (!stateful_draining || !stateful_last_marker_seen)
+    // RestartPending is reached only after terminal CAPTURE LAST and every
+    // pre-STOP OUTPUT DQBUF. It is the sole authority for issuing START.
+    if (stateful_session_.state() != iris::StatefulSession::State::RestartPending)
         return;
     // STREAMON/STOP returns completed CAPTURE buffers to userspace. Requeue
     // only targets that are no longer being rendered before restarting the
@@ -1068,7 +1097,8 @@ void Context::resume_after_drain()
         }
     }
     device.decoder_start();
-    stateful_draining = false;
+    if (!stateful_session_.restart())
+        throw std::runtime_error("stateful restart barrier changed during START");
     queue_zero_copy_capture();
     // A producer may have accumulated the next VA pictures while the
     // previous drain was completing. Submit them only after START succeeds.
@@ -1218,10 +1248,11 @@ bool Context::bind_surface(VASurfaceID surface_id){
     if (uses_stateful_streaming()) {
         const auto& surface = driver_data->surfaces.at(surface_id);
         if (surface.width != static_cast<unsigned>(picture_width)
-            || surface.height != static_cast<unsigned>(picture_height)) {
-            if (!reconfigure_stateful_dimensions(surface_id))
-                return false;
-        }
+            || surface.height != static_cast<unsigned>(picture_height))
+            // Geometry changes are decoder state transitions owned by
+            // beginPicture(). Binding and export must never hide STREAMOFF or
+            // queue reconstruction behind a resource lookup.
+            return false;
     }
 
     if (surface_buffer_indices.contains(surface_id)) {
@@ -1344,16 +1375,28 @@ bool Context::reconfigure_stateful_dimensions(VASurfaceID surface_id)
     // the in-flight experimental queue immediately and rebuild this context
     // on the stable MMAP/copy path instead of attempting a long drain.
     const bool zero_copy_fallback = capture_uses_dmabuf();
-    if (zero_copy_fallback) {
-        zero_copy_disabled_ = true;
-        if (trace_enabled())
-            std::fprintf(stderr, "stateful zero-copy fallback reason=dynamic_resolution\n");
+    const bool failed_rebuild = stateful_session_.failed();
+    if (zero_copy_fallback || failed_rebuild) {
+        stateful_session_.request_resolution_change();
+        if (zero_copy_fallback) {
+            zero_copy_disabled_ = true;
+            if (trace_enabled())
+                std::fprintf(stderr, "stateful zero-copy fallback reason=dynamic_resolution\n");
+        } else if (trace_enabled()) {
+            // A failed session cannot complete a cooperative STOP barrier.
+            // STREAMOFF/REQBUFS(0) below abandons the obsolete ownership and
+            // the successful initialize establishes the new sequence.
+            std::fprintf(stderr, "stateful resize force rebuild reason=failed_session\n");
+        }
     } else {
         // Reap already-ready CAPTURE buffers before deciding whether a batch is
         // still in flight. If one remains, drain it so STREAMOFF cannot discard
         // a decoded frame or leave an OUTPUT timestamp mapped to old geometry.
         service_stateful_queues();
         if (!stateful_pending.empty() && flush_stateful_batch() != VA_STATUS_SUCCESS)
+            return false;
+        if (!stateful_session_.request_resolution_change()
+            && !stateful_session_.failed())
             return false;
         if (!stateful_batches.empty() && !drain_stateful_decoder())
             return false;
@@ -1378,16 +1421,8 @@ bool Context::reconfigure_stateful_dimensions(VASurfaceID surface_id)
         if (surface.status == VASurfaceRendering)
             surface.status = VASurfaceDisplaying;
         surface.source_size_used = 0;
-        if (zero_copy_fallback) {
-            if (surface.export_buffer_mapping)
-                munmap(surface.export_buffer_mapping, surface.export_buffer_size);
-            if (surface.export_buffer_fd >= 0)
-                close(surface.export_buffer_fd);
-            surface.export_buffer_fd = -1;
-            surface.export_buffer_mapping = nullptr;
-            surface.export_buffer_size = 0;
-            surface.export_plane_offsets.clear();
-        }
+        if (zero_copy_fallback)
+            surface.reset_export_buffer();
     }
 
     try {
@@ -1411,13 +1446,6 @@ bool Context::reconfigure_stateful_dimensions(VASurfaceID surface_id)
     stateful_capture_done.clear();
     stateful_batch_order.clear();
     stateful_sequence_starts.clear();
-    stateful_draining = false;
-    stateful_last_marker_seen = false;
-    stateful_queue_restart_pending = false;
-    stateful_submitted_count = 0;
-    stateful_completed_count = 0;
-    stateful_cold_start_exhausted_ = false;
-    stateful_barren_syncs_ = 0;
     stateful_last_timestamp = {};
     surface_buffer_indices.clear();
     surface_ids.clear();
@@ -1437,6 +1465,7 @@ bool Context::reconfigure_stateful_dimensions(VASurfaceID surface_id)
             std::fprintf(stderr, "stateful resize initialize failed: %s\n", error.what());
         return false;
     }
+    note_stateful_new_sequence();
     return true;
 }
 
@@ -1554,7 +1583,6 @@ std::optional<VASurfaceID> Context::surface_for_timestamp(timeval timestamp, uin
     }
     const auto surface_id = *selected;
     batch->second.erase(selected);
-    stateful_completed_count++;
     if (batch->second.empty()) {
         stateful_batch_timestamps.erase(it);
         if (stateful_output_dequeued.erase(batch->first) != 0) {

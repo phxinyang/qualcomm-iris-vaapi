@@ -11,12 +11,12 @@
 # corpus downloads alone.
 #
 # Environment:
-#   IRIS_REMOTE_HOST   ssh destination   (default xinyang@192.168.3.139)
+#   IRIS_REMOTE_HOST   ssh destination   (default xinyang@192.168.3.142)
 #   IRIS_LAB_ROOT      remote lab root   (default ~/Lab/iris-vaapi-lab)
 
 set -eu
 
-host=${IRIS_REMOTE_HOST:-xinyang@192.168.3.139}
+host=${IRIS_REMOTE_HOST:-xinyang@192.168.3.142}
 lab_root=${IRIS_LAB_ROOT:-Lab/iris-vaapi-lab}
 
 ssh "$host" "sh -s" <<REMOTE

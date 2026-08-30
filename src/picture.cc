@@ -98,7 +98,9 @@ VAStatus beginPicture(VADriverContextP va_context, VAContextID context_id, VASur
             // first decode call. Include those still-ready targets as well;
             // otherwise stateful batching sees only the first surface and
             // immediately runs out of bindings on the second picture.
-            if (id != surface_id && candidate.format == surface.format && candidate.status == VASurfaceReady) {
+            if (id != surface_id && candidate.format == surface.format
+                && candidate.width == surface.width && candidate.height == surface.height
+                && candidate.status == VASurfaceReady) {
                 surface_ids.push_back(id);
             }
         }
@@ -118,6 +120,24 @@ VAStatus beginPicture(VADriverContextP va_context, VAContextID context_id, VASur
         // before accepting a new picture for either V4L2 mode.
         if (syncSurface(va_context, surface_id) != VA_STATUS_SUCCESS || surface.status == VASurfaceRendering)
             return VA_STATUS_ERROR_SURFACE_BUSY;
+    }
+
+    if (context.initialized() && context.uses_stateful_streaming()
+        && (surface.width != static_cast<unsigned>(context.picture_width)
+            || surface.height != static_cast<unsigned>(context.picture_height))) {
+        // Exporting a future Chrome surface pool is deliberately side-effect
+        // free. Move the stateful decoder to that geometry only when the first
+        // picture for the pool is actually submitted.
+        try {
+            surface.capture_source_layout.clear();
+            if (!context.reconfigure_stateful_dimensions(surface_id)) {
+                error_log(va_context, "Unable to reconfigure stateful decoder for surface %u\n", surface_id);
+                return VA_STATUS_ERROR_OPERATION_FAILED;
+            }
+        } catch (const std::exception& e) {
+            error_log(va_context, "Unable to reconfigure stateful decoder: %s\n", e.what());
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        }
     }
 
     if (!context.bind_surface(surface_id)) {

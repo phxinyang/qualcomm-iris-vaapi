@@ -9,6 +9,13 @@ if libva_drm_dep.found()
 		dependencies: [libva_dep, libva_drm_dep, libdrm_dep])
 endif
 
+stateful_session_test = executable(
+	'stateful-session-test',
+	['stateful-session-test.cc', '../src/stateful_session.cc'],
+	include_directories: include_directories('../src'),
+	cpp_args: ['-Wall', '-Wextra', '-Werror', '-std=c++20'])
+test('stateful-session', stateful_session_test)
+
 # Hardware-independent regression guards for the browser-facing queue and
 # stable-export invariants. The integration probe above remains opt-in because
 # hosts without /dev/video nodes cannot execute it.
@@ -25,4 +32,10 @@ test('iris-stateful-order-check', find_program('iris-stateful-order-check.sh'),
 test('iris-env-doc-check', find_program('iris-env-doc-check.sh'),
      args: [meson.project_source_root()])
 test('iris-surface-limits-check', find_program('iris-surface-limits-check.sh'),
+     args: [meson.project_source_root()])
+test('iris-profile-capability-check', find_program('iris-profile-capability-check.sh'),
+     args: [meson.project_source_root()])
+test('iris-deploy-path-check', find_program('iris-deploy-path-check.sh'),
+     args: [meson.project_source_root()])
+test('provenance-self-test', find_program('provenance-self-test.sh'),
      args: [meson.project_source_root()])

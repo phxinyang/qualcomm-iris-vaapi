@@ -111,6 +111,10 @@ public:
     // codec-independent VA surface limit. V4L2 enumerates sizes by format;
     // callers use this for the selected capture pixel format.
     std::optional<V4L2FrameSizeLimits> frame_size_limits(unsigned pixelformat) const;
+    // Return the valid indices advertised by a V4L2 MENU control.  A missing
+    // optional means the driver does not expose a usable menu; an empty set
+    // means the menu exists but has no queryable entries.
+    std::optional<std::set<int32_t>> menu_control_values(uint32_t id) const;
     unsigned buffer_count(v4l2_buf_type type) const;
     const Buffer& buffer(v4l2_buf_type type, unsigned index);
     const Buffer& buffer(v4l2_buf_type type, unsigned index) const;

@@ -16,8 +16,8 @@
 # timer, which made corpus runs unreproducible a day later.
 
 # iris_resolve_device: echo the decoder node.
-# Honours an explicit override, otherwise probes for the iris driver, and only
-# then falls back to /dev/video0.
+# Honours an explicit override, otherwise probes for the iris driver. Fail
+# closed when no Iris node is found: /dev/video0 may be a camera after reboot.
 iris_resolve_device() {
     if [ -n "${LIBVA_V4L2_VIDEO_PATH:-}" ]; then
         printf '%s\n' "$LIBVA_V4L2_VIDEO_PATH"
@@ -36,7 +36,8 @@ iris_resolve_device() {
             fi
         done
     fi
-    printf '%s\n' /dev/video0
+    echo 'FAIL no /dev/video* node reports iris_driver; set LIBVA_V4L2_VIDEO_PATH only after checking the node' >&2
+    return 1
 }
 
 # iris_artifact_dir <name>: echo a durable directory for logs and media.

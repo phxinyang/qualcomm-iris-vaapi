@@ -44,6 +44,7 @@ extern "C" {
 }
 
 #include "buffer.h"
+#include "stateful_session.h"
 #include "v4l2.h"
 
 struct DriverData;
@@ -83,20 +84,34 @@ public:
     // Chrome submits VA pictures asynchronously. Reap any completed V4L2
     // CAPTURE/OUTPUT buffers before claiming another OUTPUT slot.
     void service_stateful_queues();
+    // Consume exactly one dequeued CAPTURE buffer. All public VA entry points
+    // use this transition so copy/requeue/ownership semantics cannot drift
+    // depending on whether the client polls, synchronizes, or keeps decoding.
+    // Returns true when the dequeued buffer carried the terminal LAST marker.
+    bool handle_capture_completion(unsigned capture_index, bool force_requeue = false);
+    void service_output_queue();
     void discard_stateful_error_frame();
     void remove_stateful_batch_order(unsigned index);
     void mark_source_buffer_dequeued(unsigned index);
     bool has_pending_stateful_batch() const { return !stateful_pending.empty(); }
-    bool capture_draining() const { return stateful_draining; }
+    bool capture_draining() const
+    {
+        const auto state = stateful_session_.state();
+        return state == iris::StatefulSession::State::Draining
+            || state == iris::StatefulSession::State::RestartPending
+            || state == iris::StatefulSession::State::Reconfiguring;
+    }
     bool has_queued_stateful_output() const;
-    // Permit at most one HEVC timeout recovery after enough history has been
-    // submitted to distinguish a startup delay from a trailing reorder.
-    bool try_begin_stateful_timeout_recovery();
-    void reset_stateful_timeout_recovery() { stateful_timeout_recovery_used = false; }
+    // Feed every bounded sync timeout to the state model. The existing
+    // eight-AU/in-flight-OUTPUT guard controls only whether the model may
+    // request its one STOP-drain recovery.
+    iris::StatefulSession::TimeoutAction on_stateful_sync_timeout(bool startup);
     void discard_stateful_surface(VASurfaceID surface_id);
     bool has_stateful_history() const { return stateful_submitted_count != 0; }
     unsigned stateful_submitted_frames() const { return stateful_submitted_count; }
     unsigned stateful_completed_frames() const { return stateful_completed_count; }
+    bool stateful_failed() const { return stateful_session_.failed(); }
+    unsigned stateful_consecutive_timeouts() const { return stateful_session_.consecutive_timeout_count(); }
 
     // Whether a full cold-start wait has already been spent without the
     // decoder producing anything. Once that has happened the generous startup
@@ -169,6 +184,7 @@ private:
     fourcc pixelformat;
     bool stateful_cold_start_exhausted_ = false;
     unsigned stateful_barren_syncs_ = 0;
+    iris::StatefulSession stateful_session_;
     bool queues_initialized;
     bool capture_initialized;
     std::map<VASurfaceID, unsigned> surface_buffer_indices;
@@ -184,18 +200,15 @@ private:
     std::set<VASurfaceID> stateful_sequence_starts;
     std::vector<VASurfaceID> stateful_pending;
     size_t stateful_pending_size = 0;
-    bool stateful_draining = false;
     unsigned stateful_submitted_count = 0;
     unsigned stateful_completed_count = 0;
-    bool stateful_last_marker_seen = false;
-    bool stateful_timeout_recovery_used = false;
-    bool stateful_queue_restart_pending = false;
     bool zero_copy_disabled_ = false;
     timeval stateful_last_timestamp = {};
     mutable std::recursive_mutex synchronization_mutex_;
 
     void stateful_watchdog_loop();
     void stop_stateful_watchdog();
+    void note_stateful_new_sequence();
     std::thread stateful_watchdog_;
     std::mutex stateful_watchdog_mutex_;
     std::condition_variable stateful_watchdog_cv_;

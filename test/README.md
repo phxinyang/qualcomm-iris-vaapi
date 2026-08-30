@@ -29,7 +29,9 @@ clean.
 To force a software baseline in Chrome, unset the VA-API variables and launch
 with `--disable-features=VaapiVideoDecoder --disable-accelerated-video-decode`.
 `chrome://media-internals` should then show `FFmpegVideoDecoder` for the video;
-the same page with the rebuilt driver shows `VaapiVideoDecoder`.
+the same page with the rebuilt driver must show `VaapiVideoDecoder`. Record
+`kIsPlatformVideoDecoder=true` when that property is exposed by the tested
+Chrome build; playback alone is not evidence that hardware decode was used.
 
 ## Qualcomm Iris codec matrix
 
@@ -48,10 +50,12 @@ oracle, and per-frame MD5 comparison) is available as:
 ./test/iris-matrix.sh
 ```
 
-On the SM8550 tablet at `192.168.3.139`, select its Iris decoder explicitly:
+On the SM8550 tablet, resolve the Iris node by driver name before the matrix:
 
 ```
-LIBVA_V4L2_VIDEO_PATH=/dev/video0 \
+. ./test/lib/iris-env.sh
+device=$(iris_resolve_device)
+LIBVA_V4L2_VIDEO_PATH="$device" \
 IRIS_MATRIX_DIR=$HOME/Lab/Bridge/tmp/trash/iris-va-matrix-139 \
 ./test/iris-matrix.sh
 ```
@@ -65,7 +69,9 @@ matrix. It generates all-I, IP-only, B=2 and B=4 streams and requires exact
 software/VA per-frame MD5 equality:
 
 ```
-LIBVA_V4L2_VIDEO_PATH=/dev/video0 \
+. ./test/lib/iris-env.sh
+device=$(iris_resolve_device)
+LIBVA_V4L2_VIDEO_PATH="$device" \
 IRIS_STRUCTURE_DIR=$HOME/Lab/Bridge/tmp/trash/iris-va-structure-matrix \
 ./test/iris-structure-matrix.sh
 ```
@@ -89,13 +95,27 @@ The HEVC VA pass runs before its native baseline because some Iris firmware
 revisions leave a reorder queue warm when a GStreamer session closes; the
 ordering keeps the VA cold-start and EOS checks deterministic.
 
-The dynamic-resolution probe uses the VP9 vector that alternates 432x240 and
-3840x2160 keyframes. Compare full-size raw frames from the native V4L2 decoder
-with software output to separate firmware capability differences from VA
-filter negotiation; the VA and native streams must be byte-identical for each
-segment. The backend reports the device range through
-`vaQuerySurfaceAttributes()` and rebuilds stateful queues when a client reuses
-one VA context for a new surface geometry.
+The production dynamic-resolution gate is `iris-dynamic-resolution.sh`. It
+generates H.264 and VP9 streams that alternate 640x360 and 1280x720 exactly 100
+times, then requires byte-identical native V4L2/software output, exact
+single-VA-context frame MD5 across all changes, and exact output from 101 fresh
+VA decoder contexts. Unsupported formats or missing native decoder elements
+fail the run; they are not recorded as passes or skips. Use
+`IRIS_DYNAMIC_SWITCHES` only to shorten a development run.
+
+For multi-context and long-run qualification, use:
+
+```
+./test/iris-concurrency-soak.sh dual-h264
+./test/iris-concurrency-soak.sh mixed
+```
+
+Both scenarios default to two wall-clock hours and retain FFmpeg progress,
+stateful traces, temperature samples, uptime and boot IDs. The script rejects
+an interrupted/rebooted predecessor through a durable guard file, enforces a
+thermal ceiling, and runs an exact software/VA MD5 preflight before starting.
+`IRIS_SOAK_SECONDS` is available for development, but shortened output is
+labelled explicitly and is not release evidence.
 
 For the stateful multi-context regression probe on the tablet:
 
@@ -158,12 +178,12 @@ initiates a drain, both queues remain active until CAPTURE
 `iris-hardware-suite.sh` combines the repository matrices with a V4L2
 capability inventory, `v4l2-compliance`, native GStreamer EOS checks, the
 Qualcomm `v4l-video-test-app`, and optional Fluster conformance runs. It is
-device-agnostic and defaults to `/dev/video0`; set `V4L2_DEVICE` (or
-`LIBVA_V4L2_VIDEO_PATH`) for another node. All logs and generated media stay
+device-agnostic, probes for `iris_driver`, and fails rather than guessing a
+node; set `V4L2_DEVICE` (or `LIBVA_V4L2_VIDEO_PATH`) for an inspected override.
+All logs and generated media stay
 under `$HOME/Lab/Bridge/tmp/trash`:
 
 ```
-V4L2_DEVICE=/dev/video0 \
 IRIS_HARDWARE_SUITE_DIR=$HOME/Lab/Bridge/tmp/trash/iris-hardware-suite \
 ./test/iris-hardware-suite.sh
 ```

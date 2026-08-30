@@ -37,6 +37,7 @@
 #include <limits>
 #include <new>
 #include <stdexcept>
+#include <utility>
 
 extern "C" {
 #include <fcntl.h>
@@ -58,6 +59,59 @@ extern "C" {
 #include "media.h"
 #include "utils.h"
 #include "v4l2.h"
+
+SurfaceStableExport::SurfaceStableExport(SurfaceStableExport&& other) noexcept
+    : export_buffer_fd(std::exchange(other.export_buffer_fd, -1))
+    , export_buffer_mapping(std::exchange(other.export_buffer_mapping, nullptr))
+    , export_buffer_size(std::exchange(other.export_buffer_size, 0))
+    , export_plane_offsets(std::move(other.export_plane_offsets))
+    , stable_export_layout(std::move(other.stable_export_layout))
+{
+}
+
+SurfaceStableExport& SurfaceStableExport::operator=(SurfaceStableExport&& other) noexcept
+{
+    if (this == &other)
+        return *this;
+    reset_export_buffer();
+    export_buffer_fd = std::exchange(other.export_buffer_fd, -1);
+    export_buffer_mapping = std::exchange(other.export_buffer_mapping, nullptr);
+    export_buffer_size = std::exchange(other.export_buffer_size, 0);
+    export_plane_offsets = std::move(other.export_plane_offsets);
+    stable_export_layout = std::move(other.stable_export_layout);
+    return *this;
+}
+
+SurfaceStableExport::~SurfaceStableExport()
+{
+    reset_export_buffer();
+}
+
+void SurfaceStableExport::adopt_export_buffer(int fd, void* mapping, size_t size) noexcept
+{
+    // The layout is selected before allocation and remains the public contract
+    // for every replacement backing store, so replace only the owned handles.
+    if (export_buffer_mapping)
+        munmap(export_buffer_mapping, export_buffer_size);
+    if (export_buffer_fd >= 0)
+        close(export_buffer_fd);
+    export_buffer_fd = fd;
+    export_buffer_mapping = mapping;
+    export_buffer_size = size;
+}
+
+void SurfaceStableExport::reset_export_buffer() noexcept
+{
+    if (export_buffer_mapping)
+        munmap(export_buffer_mapping, export_buffer_size);
+    if (export_buffer_fd >= 0)
+        close(export_buffer_fd);
+    export_buffer_fd = -1;
+    export_buffer_mapping = nullptr;
+    export_buffer_size = 0;
+    export_plane_offsets.clear();
+    stable_export_layout.clear();
+}
 
 namespace {
 
@@ -92,8 +146,12 @@ int allocate_dma_buf_fd(size_t size)
 
 bool allocate_surface_dma_buf(Surface& surface, size_t size)
 {
-    if (surface.export_buffer_fd >= 0)
+    if (surface.export_buffer_fd >= 0 && surface.export_buffer_mapping)
         return surface.export_buffer_size >= size;
+    if (surface.export_buffer_fd >= 0 || surface.export_buffer_mapping) {
+        surface.reset_export_buffer();
+        return false;
+    }
     const int fd = allocate_dma_buf_fd(size);
     if (fd < 0)
         return false;
@@ -102,31 +160,72 @@ bool allocate_surface_dma_buf(Surface& surface, size_t size)
         close(fd);
         return false;
     }
-    surface.export_buffer_fd = fd;
-    surface.export_buffer_mapping = mapping;
-    surface.export_buffer_size = size;
+    surface.adopt_export_buffer(fd, mapping, size);
     std::memset(mapping, 0, size);
     if (trace_enabled())
         std::fprintf(stderr, "va stable surface dma-buf fd=%d size=%zu\n", surface.export_buffer_fd, size);
     return true;
 }
 
-size_t prepare_export_plane_offsets(Surface& surface, size_t physical_plane_count)
+bool same_layout(const BufferLayout& left, const BufferLayout& right)
 {
-    surface.export_plane_offsets.clear();
-    surface.export_plane_offsets.reserve(surface.logical_destination_layout.size());
+    if (left.size() != right.size())
+        return false;
+    for (size_t i = 0; i < left.size(); ++i) {
+        if (left[i].physical_plane_index != right[i].physical_plane_index
+            || left[i].size != right[i].size || left[i].pitch != right[i].pitch
+            || left[i].offset != right[i].offset)
+            return false;
+    }
+    return true;
+}
+
+size_t install_stable_export_layout(Surface& surface, BufferLayout layout, size_t physical_plane_count)
+{
+    // A released allocation no longer has a public pitch/offset contract, so
+    // the next export may install the layout for its new backing store.
+    if (surface.export_buffer_fd < 0 && !surface.export_buffer_mapping
+        && surface.export_plane_offsets.empty())
+        surface.stable_export_layout.clear();
 
     size_t cursor = 0;
     size_t total = 0;
     const bool contiguous_source = physical_plane_count <= 1;
-    for (const auto& plane : surface.logical_destination_layout) {
-        const size_t offset = contiguous_source ? plane.offset : cursor;
-        surface.export_plane_offsets.push_back(static_cast<unsigned>(offset));
-        total = std::max(total, offset + static_cast<size_t>(plane.size));
+    for (auto& plane : layout) {
+        if (!contiguous_source) {
+            plane.physical_plane_index = 0;
+            plane.offset = static_cast<unsigned>(cursor);
+        }
+        total = std::max(total, static_cast<size_t>(plane.offset) + plane.size);
         if (!contiguous_source)
             cursor += plane.size;
     }
+
+    if (!surface.stable_export_layout.empty()) {
+        if (!same_layout(surface.stable_export_layout, layout))
+            return 0;
+    } else {
+        surface.stable_export_layout = std::move(layout);
+    }
+
+    surface.export_plane_offsets.clear();
+    surface.export_plane_offsets.reserve(surface.stable_export_layout.size());
+    for (const auto& plane : surface.stable_export_layout)
+        surface.export_plane_offsets.push_back(plane.offset);
     return total;
+}
+
+size_t prepare_compact_nv12_export_layout(Surface& surface)
+{
+    const auto derive_layout = lookup_format(V4L2_PIX_FMT_NV12).v4l2.derive_layout;
+    if (!derive_layout)
+        return 0;
+    return install_stable_export_layout(surface, derive_layout(surface.width, surface.height), 1);
+}
+
+size_t prepare_capture_export_layout(Surface& surface, size_t physical_plane_count)
+{
+    return install_stable_export_layout(surface, surface.logical_destination_layout, physical_plane_count);
 }
 
 // Whether the caller pinned the sync timeout. An explicit bound must never be
@@ -241,6 +340,9 @@ bool import_surface_dma_buf(Surface& surface, const V4L2M2MDevice::Buffer& captu
 {
     if (!capture.uses_dmabuf() || size == 0)
         return false;
+    const size_t required = prepare_capture_export_layout(surface, 1);
+    if (required == 0 || required > size)
+        return false;
     if (surface.export_buffer_fd >= 0 && surface.export_buffer_mapping)
         return surface.export_buffer_size >= size;
 
@@ -252,10 +354,7 @@ bool import_surface_dma_buf(Surface& surface, const V4L2M2MDevice::Buffer& captu
         close(fds[0]);
         return false;
     }
-    surface.export_buffer_fd = fds[0];
-    surface.export_buffer_mapping = mapping;
-    surface.export_buffer_size = size;
-    prepare_export_plane_offsets(surface, 1);
+    surface.adopt_export_buffer(fds[0], mapping, size);
     if (trace_enabled())
         std::fprintf(stderr, "va zero-copy surface import fd=%d size=%zu\n", surface.export_buffer_fd, size);
     return true;
@@ -279,39 +378,66 @@ void copy_surface_frame(Surface& surface, const V4L2M2MDevice::Buffer& capture)
     if (source.empty())
         return;
 
+    const size_t total = prepare_compact_nv12_export_layout(surface);
+    if (total == 0)
+        return;
     // Allocate lazily as well as from exportSurfaceHandle(). FFmpeg commonly
     // uses vaDeriveImage/vaGetImage without exporting a PRIME handle first;
     // those callers still need a stable snapshot because Iris rotates CAPTURE
     // buffers immediately after dequeue.
-    if (surface.export_buffer_fd < 0 || !surface.export_buffer_mapping) {
-        const size_t size = prepare_export_plane_offsets(surface, source.size());
-        if (size == 0 || !allocate_surface_dma_buf(surface, size))
+    if ((surface.export_buffer_fd < 0 || !surface.export_buffer_mapping)
+        && !allocate_surface_dma_buf(surface, total))
+        return;
+    if (total > surface.export_buffer_size)
+        return;
+
+    // Context installs the padded V4L2 layout when it binds the CAPTURE pool.
+    // Cache it before exposing the immutable compact layout to image clients.
+    if (!same_layout(surface.logical_destination_layout, surface.stable_export_layout))
+        surface.capture_source_layout = surface.logical_destination_layout;
+    const auto& capture_layout = surface.capture_source_layout.empty()
+        ? surface.logical_destination_layout
+        : surface.capture_source_layout;
+    if (capture_layout.size() != surface.stable_export_layout.size())
+        return;
+
+    for (size_t i = 0; i < capture_layout.size(); ++i) {
+        const auto& source_plane = capture_layout[i];
+        const auto& destination_plane = surface.stable_export_layout[i];
+        if (source_plane.physical_plane_index >= source.size() || destination_plane.pitch == 0)
+            return;
+        const auto source_mapping = source[source_plane.physical_plane_index];
+        const size_t source_offset = source.size() == 1 ? source_plane.offset : 0;
+        const size_t source_pitch = source_plane.pitch ? source_plane.pitch : destination_plane.pitch;
+        const size_t rows = destination_plane.size / destination_plane.pitch;
+        const size_t row_bytes = destination_plane.pitch;
+        if (source_pitch < row_bytes || rows == 0)
+            return;
+        const size_t source_end = source_offset + (rows - 1) * source_pitch + row_bytes;
+        const size_t destination_end = static_cast<size_t>(destination_plane.offset)
+            + (rows - 1) * destination_plane.pitch + row_bytes;
+        if (source_end > source_mapping.size() || destination_end > surface.export_buffer_size)
             return;
     }
 
-    const size_t total = prepare_export_plane_offsets(surface, source.size());
-    if (total == 0 || total > surface.export_buffer_size)
-        return;
-
     dma_buf_sync_cpu(surface.export_buffer_fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW);
-    for (size_t i = 0; i < surface.logical_destination_layout.size(); ++i) {
-        const auto& plane = surface.logical_destination_layout[i];
-        if (plane.physical_plane_index >= source.size())
-            continue;
-        const auto src = source[plane.physical_plane_index];
-        const size_t src_offset = source.size() == 1 ? plane.offset : 0;
-        const size_t dst_offset = surface.export_plane_offsets[i];
-        if (src_offset >= src.size() || dst_offset >= surface.export_buffer_size)
-            continue;
-        const size_t available = std::min(src.size() - src_offset, surface.export_buffer_size - dst_offset);
-        const size_t size = std::min<size_t>(plane.size, available);
-        std::memcpy(static_cast<uint8_t*>(surface.export_buffer_mapping) + dst_offset,
-            src.data() + src_offset, size);
+    for (size_t i = 0; i < capture_layout.size(); ++i) {
+        const auto& source_plane = capture_layout[i];
+        const auto& destination_plane = surface.stable_export_layout[i];
+        const auto source_mapping = source[source_plane.physical_plane_index];
+        const size_t source_offset = source.size() == 1 ? source_plane.offset : 0;
+        const size_t source_pitch = source_plane.pitch ? source_plane.pitch : destination_plane.pitch;
+        const size_t rows = destination_plane.size / destination_plane.pitch;
+        auto* destination = static_cast<uint8_t*>(surface.export_buffer_mapping) + destination_plane.offset;
+        for (size_t row = 0; row < rows; ++row)
+            std::memcpy(destination + row * destination_plane.pitch,
+                source_mapping.data() + source_offset + row * source_pitch, destination_plane.pitch);
     }
     dma_buf_sync_cpu(surface.export_buffer_fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW);
+    surface.logical_destination_layout = surface.stable_export_layout;
     if (trace_enabled())
-        std::fprintf(stderr, "copy_surface_frame copied planes=%zu to mapping=%p\n",
-            surface.logical_destination_layout.size(), surface.export_buffer_mapping);
+        std::fprintf(stderr, "copy_surface_frame copied compact planes=%zu to mapping=%p\n",
+            surface.stable_export_layout.size(), surface.export_buffer_mapping);
 }
 
 VAStatus createSurfaces2(VADriverContextP context, unsigned int format, unsigned int width, unsigned int height,
@@ -441,8 +567,8 @@ void createSurfacesDeferred(
         for (unsigned i = 0; i < zero_copy_count; i++) {
             if (i < surface_ids.size()) {
                 auto& surface = driver_data->surfaces.at(surface_ids[i]);
-                const size_t required = prepare_export_plane_offsets(surface, 1);
-                if (size == 0 || required > size || !allocate_surface_dma_buf(surface, size)) {
+                const size_t required = prepare_capture_export_layout(surface, 1);
+                if (size == 0 || required == 0 || required > size || !allocate_surface_dma_buf(surface, size)) {
                     zero_copy = false;
                     if (trace_enabled())
                         std::fprintf(stderr, "stateful zero-copy fallback reason=surface_dma_buf index=%u size=%zu required=%zu\n",
@@ -565,10 +691,7 @@ VAStatus destroySurfaces(VADriverContextP context, VASurfaceID* surfaces_ids, in
 
         if (surface.request_fd > 0)
             close(surface.request_fd);
-        if (surface.export_buffer_mapping)
-            munmap(surface.export_buffer_mapping, surface.export_buffer_size);
-        if (surface.export_buffer_fd >= 0)
-            close(surface.export_buffer_fd);
+        surface.reset_export_buffer();
 
         driver_data->surfaces.erase(surfaces_ids[i]);
         // A context is retained after vaDestroyContext so a late VA sync can
@@ -666,71 +789,7 @@ VAStatus syncSurface(VADriverContextP context, VASurfaceID surface_id)
             auto destination_index = device.dequeue_ready(device.capture_buf_type, remaining);
             if (!destination_index)
                 break;
-            auto completed = decode_context->surface_for_timestamp(device.last_dequeued_timestamp(),
-                device.last_dequeued_flags());
-            if (device.last_dequeued_error() && !completed)
-                // ERROR CAPTURE buffers carry timestamp 0, so they cannot be
-                // matched to a VA surface. Release the corresponding oldest
-                // stateful batch before returning the buffer to Iris.
-                decode_context->discard_stateful_error_frame();
-            if (!completed && !decode_context->uses_stateful_streaming())
-                completed = decode_context->surface_for_capture_flags(device.last_dequeued_flags());
-            if (!completed && !decode_context->uses_stateful_streaming())
-                completed = decode_context->surface_for_buffer(device.capture_buf_type, *destination_index);
-            bool capture_requeued = false;
-            if (completed && driver_data->surfaces.contains(*completed)) {
-                auto& completed_surface = driver_data->surfaces.at(*completed);
-                if (!decode_context->capture_uses_dmabuf())
-                    copy_surface_frame(completed_surface, device.buffer(device.capture_buf_type, *destination_index));
-                // The stable DMA-BUF path copies the decoded frame before
-                // Chrome imports it. Return the rotating V4L2 CAPTURE slot
-                // immediately instead of pinning it to this VA surface.
-                if (!decode_context->capture_uses_dmabuf() && copy_surfaces_enabled()
-                    && completed_surface.export_buffer_fd >= 0
-                    && completed_surface.export_buffer_mapping) {
-                    device.buffer(device.capture_buf_type, *destination_index).queue();
-                    capture_requeued = true;
-                // Stateful CAPTURE indices are a pool, not stable surface
-                // identities. The timestamp identifies the decoded VA frame;
-                // retain the actual buffer returned for its next reuse.
-                } else if (decode_context->capture_slots_scheduled()) {
-                    const auto expected = decode_context->surface_for_buffer(device.capture_buf_type,
-                        *destination_index);
-                    if (expected && *expected != *completed && trace_enabled())
-                        error_log(context, "trace scheduled capture mismatch index=%u mapped=%u timestamp=%u\\n",
-                            *destination_index, *expected, *completed);
-                    if (!expected || *expected != *completed) {
-                        device.buffer(device.capture_buf_type, *destination_index).queue();
-                        capture_requeued = true;
-                    }
-                } else {
-                    completed_surface.destination_buffer = std::cref(device.buffer(device.capture_buf_type,
-                        *destination_index));
-                    completed_surface.destination_buffer_index = *destination_index;
-                }
-                completed_surface.status = VASurfaceDisplaying;
-                completed_surface.source_size_used = 0;
-                if (capture_requeued)
-                    completed_surface.destination_buffer_queued = true;
-                else if (!decode_context->capture_slots_scheduled()
-                    || decode_context->surface_for_buffer(device.capture_buf_type, *destination_index) == completed)
-                    completed_surface.destination_buffer_queued = device.last_dequeued_error();
-                if (trace_enabled())
-                    error_log(context, "trace sync dq capture=%u surface=%u target=%u\n", *destination_index,
-                        *completed, surface_id);
-            } else if (trace_enabled()) {
-                error_log(context, "trace sync dq capture=%u no-surface ts=%lld.%06ld target=%u\n", *destination_index,
-                    static_cast<long long>(device.last_dequeued_timestamp().tv_sec),
-                    static_cast<long>(device.last_dequeued_timestamp().tv_usec), surface_id);
-            }
-            if ((!completed || !driver_data->surfaces.contains(*completed) || device.last_dequeued_error())
-                && !capture_requeued) {
-                // A deliberately dropped B-frame (or the decoder's terminal
-                // marker with timestamp 0) has no VA surface to update, but
-                // its CAPTURE slot is still reusable.
-                device.buffer(device.capture_buf_type, *destination_index).queue();
-            }
-            if (device.last_dequeued_last()) {
+            if (decode_context->handle_capture_completion(*destination_index)) {
                 try {
                     decode_context->resume_after_drain();
                 } catch (const std::system_error& e) {
@@ -740,21 +799,24 @@ VAStatus syncSurface(VADriverContextP context, VASurfaceID surface_id)
             }
 
             // Iris publishes CAPTURE before recycling compressed OUTPUT.
-            while (auto source_index = device.dequeue_ready(device.output_buf_type, 0)) {
-                if (decode_context->uses_stateful_streaming())
-                    decode_context->mark_source_buffer_dequeued(*source_index);
-                else if (auto completed = decode_context->surface_for_buffer(device.output_buf_type, *source_index))
-                    driver_data->surfaces.at(*completed).source_buffer_queued = false;
+            decode_context->service_output_queue();
+            try {
+                decode_context->resume_after_drain();
+            } catch (const std::system_error& e) {
+                error_log(context, "Failed to resume Iris after trailing OUTPUT: %s\\n", e.what());
+                return VA_STATUS_ERROR_OPERATION_FAILED;
             }
             decode_context->queue_zero_copy_capture();
         }
         if (surface.status == VASurfaceRendering) {
+            const bool had_completed_frames = decode_context->stateful_completed_frames() != 0;
+            const auto timeout_action = decode_context->on_stateful_sync_timeout(!had_completed_frames);
             // Some stateful codecs (notably HEVC with B-frame reordering)
             // publish their final CAPTURE frames only after DECODER_CMD_STOP.
             // Give the context one bounded recovery attempt before retiring
             // the VA surface, otherwise the last decoded pictures are lost
             // and callers observe stale/flash frames at EOS.
-            if (decode_context->try_begin_stateful_timeout_recovery()) {
+            if (timeout_action == iris::StatefulSession::TimeoutAction::RecoveryRequested) {
                 if (!decode_context->reset_stateful_decoder()) {
                     error_log(context, "Stateful decoder drain did not reach LAST for surface %u\n", surface_id);
                     surface.status = VASurfaceDisplaying;
@@ -763,6 +825,14 @@ VAStatus syncSurface(VADriverContextP context, VASurfaceID surface_id)
                 }
                 if (surface.status != VASurfaceRendering)
                     return VA_STATUS_SUCCESS;
+            }
+            if (timeout_action == iris::StatefulSession::TimeoutAction::Failed) {
+                error_log(context,
+                    "Decoder timed out for %u consecutive surfaces after producing frames; failing context\n",
+                    decode_context->stateful_consecutive_timeouts());
+                surface.status = VASurfaceDisplaying;
+                surface.source_size_used = 0;
+                return VA_STATUS_ERROR_DECODING_ERROR;
             }
             // A cold-start wait that produced nothing has told us what it can.
             // Record it so the next picture uses the ordinary bounded timeout
@@ -887,56 +957,11 @@ VAStatus querySurfaceStatus(VADriverContextP context, VASurfaceID surface_id, VA
 
             try {
                 while (auto capture_index = device.dequeue_ready(device.capture_buf_type, 0)) {
-                    auto completed = decode_context->surface_for_timestamp(device.last_dequeued_timestamp(),
-                        device.last_dequeued_flags());
-                    if (device.last_dequeued_error() && !completed)
-                        decode_context->discard_stateful_error_frame();
-                    if (!completed && !decode_context->uses_stateful_streaming())
-                        completed = decode_context->surface_for_capture_flags(device.last_dequeued_flags());
-                    if (!completed && !decode_context->uses_stateful_streaming())
-                        completed = decode_context->surface_for_buffer(device.capture_buf_type, *capture_index);
-                    bool capture_requeued = false;
-                    if (completed && driver_data->surfaces.contains(*completed)) {
-                        auto& completed_surface = driver_data->surfaces.at(*completed);
-                        if (!decode_context->capture_uses_dmabuf())
-                            copy_surface_frame(completed_surface, device.buffer(device.capture_buf_type, *capture_index));
-                        if (!decode_context->capture_uses_dmabuf() && copy_surfaces_enabled()
-                            && completed_surface.export_buffer_fd >= 0
-                            && completed_surface.export_buffer_mapping) {
-                            device.buffer(device.capture_buf_type, *capture_index).queue();
-                            capture_requeued = true;
-                        } else if (!decode_context->capture_slots_scheduled()) {
-                            completed_surface.destination_buffer = std::cref(device.buffer(device.capture_buf_type,
-                                *capture_index));
-                            completed_surface.destination_buffer_index = *capture_index;
-                        } else if (decode_context->surface_for_buffer(device.capture_buf_type, *capture_index) != completed) {
-                            device.buffer(device.capture_buf_type, *capture_index).queue();
-                            capture_requeued = true;
-                        }
-                        completed_surface.status = VASurfaceDisplaying;
-                        if (capture_requeued)
-                            completed_surface.destination_buffer_queued = true;
-                        else if (!decode_context->capture_slots_scheduled()
-                            || decode_context->surface_for_buffer(device.capture_buf_type, *capture_index) == completed)
-                            completed_surface.destination_buffer_queued = false;
-                        completed_surface.source_size_used = 0;
-                        if (trace_enabled())
-                            error_log(context, "trace query dq capture=%u surface=%u\n", *capture_index, *completed);
-                    } else if (!capture_requeued) {
-                        device.buffer(device.capture_buf_type, *capture_index).queue();
-                    }
-                    if (device.last_dequeued_last())
+                    if (decode_context->handle_capture_completion(*capture_index))
                         decode_context->resume_after_drain();
                 }
-                while (auto output_index = device.dequeue_ready(device.output_buf_type, 0)) {
-                    if (decode_context->uses_stateful_streaming()) {
-                        decode_context->mark_source_buffer_dequeued(*output_index);
-                    } else if (auto completed = decode_context->surface_for_buffer(device.output_buf_type, *output_index);
-                               completed && driver_data->surfaces.contains(*completed)) {
-                        auto& completed_surface = driver_data->surfaces.at(*completed);
-                        completed_surface.source_buffer_queued = false;
-                    }
-                }
+                decode_context->service_output_queue();
+                decode_context->resume_after_drain();
                 decode_context->queue_zero_copy_capture();
             } catch (const std::exception& e) {
                 error_log(context, "Failed to reap V4L2 buffers: %s\n", e.what());
@@ -990,56 +1015,36 @@ VAStatus exportSurfaceHandle(
     }
     auto& surface = driver_data->surfaces.at(surface_id);
 
-    if (!surface.destination_buffer.has_value()) {
-        // Chromium exports its VA surfaces while setting up the decoder,
-        // before the first vaBeginPicture call. Prefer the context hint made
-        // by createSurfaces(); falling back to a dimension match is retained
-        // for applications that create surfaces before any context exists.
-        auto bind_context = [&](auto& context) {
-            std::lock_guard<std::recursive_mutex> guard(context->synchronization_mutex());
-            if (context->picture_width < static_cast<int>(surface.width)
-                || context->picture_height < static_cast<int>(surface.height))
-                return false;
-            std::array<VASurfaceID, 1> ids { surface_id };
-            try {
-                if (!context->initialized())
-                    context->initialize(ids);
-                if (context->bind_surface(surface_id))
-                    return true;
-            } catch (const std::exception&) {
-                return false;
-            }
-            return false;
-        };
-        if (surface.owner_context != VA_INVALID_ID) {
-            auto owner = driver_data->contexts.find(surface.owner_context);
-            if (owner != driver_data->contexts.end())
-                bind_context(owner->second);
-        }
-        if (!surface.destination_buffer) {
-            for (auto& [id, context] : driver_data->contexts) {
-                if (id == surface.owner_context)
-                    continue;
-                if (bind_context(context))
-                    break;
-            }
-        }
+    const bool capture_bound = surface.destination_buffer.has_value();
+    if (!capture_bound && !copy_surfaces_enabled()) {
+        // With no V4L2 CAPTURE binding there is nothing direct to export. A
+        // successful zero-filled handle would be worse than an explicit
+        // failure because the client would display stale black frames.
+        return VA_STATUS_ERROR_OPERATION_FAILED;
     }
-
-    if (!surface.destination_buffer.has_value()) {
-        return VA_STATUS_ERROR_INVALID_SURFACE;
-    }
-
-    if (trace_enabled())
+    if (trace_enabled() && capture_bound)
         std::fprintf(stderr, "va export_surface binding id=%u capture_index=%u\n", surface_id,
             surface.destination_buffer_index);
 
     std::vector<int> export_fds;
     bool stable_export = false;
-    const auto mapping = surface.destination_buffer->get().mapping();
+    const auto mapping = capture_bound ? surface.destination_buffer->get().mapping()
+                                       : std::vector<std::span<uint8_t>> {};
     try {
-        if (surface.destination_buffer->get().uses_dmabuf() && surface.export_buffer_fd >= 0) {
-            const size_t required = prepare_export_plane_offsets(surface, 1);
+        // Chromium exports a new pool before its first vaBeginPicture. Give an
+        // unbound surface an independent compact NV12 buffer; exporting must
+        // never bind it to (or reconfigure) an already-running decoder.
+        if (surface.export_buffer_fd < 0 || !surface.export_buffer_mapping) {
+            if (!capture_bound || copy_surfaces_enabled()) {
+                const size_t required = prepare_compact_nv12_export_layout(surface);
+                if (required == 0 || !allocate_surface_dma_buf(surface, required))
+                    return VA_STATUS_ERROR_ALLOCATION_FAILED;
+            }
+        }
+        if (surface.export_buffer_fd >= 0 && surface.export_buffer_mapping) {
+            size_t required = 0;
+            for (const auto& plane : surface.stable_export_layout)
+                required = std::max(required, static_cast<size_t>(plane.offset) + plane.size);
             if (required == 0 || required > surface.export_buffer_size)
                 return VA_STATUS_ERROR_OPERATION_FAILED;
             const int exported = dup(surface.export_buffer_fd);
@@ -1047,30 +1052,28 @@ VAStatus exportSurfaceHandle(
                 return VA_STATUS_ERROR_OPERATION_FAILED;
             export_fds.push_back(exported);
             stable_export = true;
-        } else if (copy_surfaces_enabled()) {
-            const size_t size = prepare_export_plane_offsets(surface, mapping.size());
-            if (!mapping.empty() && size != 0 && allocate_surface_dma_buf(surface, size)) {
-                const int exported = dup(surface.export_buffer_fd);
-                if (exported < 0)
-                    return VA_STATUS_ERROR_OPERATION_FAILED;
-                export_fds.push_back(exported);
-                stable_export = true;
-            }
         }
-        if (export_fds.empty()) {
+        if (!capture_bound && stable_export)
+            surface.logical_destination_layout = surface.stable_export_layout;
+        if (export_fds.empty() && capture_bound)
             export_fds = surface.destination_buffer->get().export_(O_RDONLY);
-        }
     } catch (std::runtime_error& e) {
         error_log(context, "Failed to export buffer: %s\n", e.what());
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
+    if (export_fds.empty())
+        return VA_STATUS_ERROR_OPERATION_FAILED;
 
     surface_descriptor->fourcc = VA_FOURCC_NV12;
     surface_descriptor->width = surface.width;
     surface_descriptor->height = surface.height;
     surface_descriptor->num_objects = export_fds.size();
 
-    auto format_spec = lookup_format(surface.destination_buffer->get().owner().capture_format.fmt.pix_mp.pixelformat);
+    const auto& format_spec = stable_export
+        ? lookup_format(V4L2_PIX_FMT_NV12)
+        : lookup_format(surface.destination_buffer->get().owner().capture_format.fmt.pix_mp.pixelformat);
+    const auto& descriptor_layout = stable_export ? surface.stable_export_layout
+                                                  : surface.logical_destination_layout;
     for (unsigned i = 0; i < export_fds.size(); i += 1) {
         surface_descriptor->objects[i].drm_format_modifier = format_spec.drm.modifier;
         surface_descriptor->objects[i].fd = export_fds[i];
@@ -1084,28 +1087,28 @@ VAStatus exportSurfaceHandle(
         // VA_EXPORT_SURFACE_SEPARATE_LAYERS requires one plane per layer.
         // Chromium's NativePixmap importer relies on this shape and duplicates
         // the object FD when both NV12 planes share one dmabuf.
-        surface_descriptor->num_layers = surface.logical_destination_layout.size();
+        surface_descriptor->num_layers = descriptor_layout.size();
         for (unsigned i = 0; i < surface_descriptor->num_layers; i++) {
             auto& layer = surface_descriptor->layers[i];
             layer.drm_format = i == 0 ? DRM_FORMAT_R8 : DRM_FORMAT_GR88;
             layer.num_planes = 1;
-            layer.object_index[0] = stable_export ? 0 : surface.logical_destination_layout[i].physical_plane_index;
-            layer.pitch[0] = surface.logical_destination_layout[i].pitch;
+            layer.object_index[0] = stable_export ? 0 : descriptor_layout[i].physical_plane_index;
+            layer.pitch[0] = descriptor_layout[i].pitch;
             layer.offset[0] = stable_export && i < surface.export_plane_offsets.size()
                 ? surface.export_plane_offsets[i]
-                : surface.logical_destination_layout[i].offset;
+                : descriptor_layout[i].offset;
         }
     } else {
         surface_descriptor->num_layers = 1;
         surface_descriptor->layers[0].drm_format = format_spec.drm.format;
-        surface_descriptor->layers[0].num_planes = surface.logical_destination_layout.size();
+        surface_descriptor->layers[0].num_planes = descriptor_layout.size();
         for (unsigned i = 0; i < surface_descriptor->layers[0].num_planes; i++) {
             surface_descriptor->layers[0].object_index[i] = stable_export ? 0
-                                                                           : surface.logical_destination_layout[i].physical_plane_index;
-            surface_descriptor->layers[0].pitch[i] = surface.logical_destination_layout[i].pitch;
+                                                                           : descriptor_layout[i].physical_plane_index;
+            surface_descriptor->layers[0].pitch[i] = descriptor_layout[i].pitch;
             surface_descriptor->layers[0].offset[i] = stable_export && i < surface.export_plane_offsets.size()
                 ? surface.export_plane_offsets[i]
-                : surface.logical_destination_layout[i].offset;
+                : descriptor_layout[i].offset;
         }
     }
 

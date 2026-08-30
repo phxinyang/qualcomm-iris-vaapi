@@ -884,10 +884,33 @@ int H264Context::set_controls()
 
 std::set<VAProfile> H264Context::supported_profiles(const V4L2M2MDevice& device)
 {
-    // TODO: query `h264_profile` control for more details
-    return (device.format_supported(device.output_buf_type, V4L2_PIX_FMT_H264_SLICE)
-               || device.format_supported(device.output_buf_type, V4L2_PIX_FMT_H264))
-        ? std::set<VAProfile>({ VAProfileH264Main, VAProfileH264High, VAProfileH264ConstrainedBaseline,
-              VAProfileH264MultiviewHigh, VAProfileH264StereoHigh })
-        : std::set<VAProfile>();
+    const bool stateless = device.format_supported(device.output_buf_type, V4L2_PIX_FMT_H264_SLICE);
+    const bool stateful = device.format_supported(device.output_buf_type, V4L2_PIX_FMT_H264);
+    const bool has_8bit_420_surface = device.format_supported(device.capture_buf_type, V4L2_PIX_FMT_NV12)
+        || device.format_supported(device.capture_buf_type, V4L2_PIX_FMT_NV12M);
+    if ((!stateless && !stateful) || !has_8bit_420_surface)
+        return {};
+
+    const auto menu = device.menu_control_values(V4L2_CID_MPEG_VIDEO_H264_PROFILE);
+    if (!menu) {
+        // Stateless decoders describe profile-independent syntax through the
+        // Request API and commonly omit the legacy MPEG profile menu.  The
+        // implemented 8-bit paths remain a safe fallback there.  A stateful
+        // decoder has no equivalent per-frame capability contract, so fail
+        // closed instead of guessing what its firmware accepts.
+        if (stateless && !stateful)
+            return { VAProfileH264ConstrainedBaseline, VAProfileH264Main, VAProfileH264High };
+        return {};
+    }
+
+    std::set<VAProfile> result;
+    if (menu->contains(V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE)
+        || menu->contains(V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_BASELINE))
+        result.insert(VAProfileH264ConstrainedBaseline);
+    if (menu->contains(V4L2_MPEG_VIDEO_H264_PROFILE_MAIN))
+        result.insert(VAProfileH264Main);
+    if (menu->contains(V4L2_MPEG_VIDEO_H264_PROFILE_HIGH)
+        || menu->contains(V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_HIGH))
+        result.insert(VAProfileH264High);
+    return result;
 };
