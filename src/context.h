@@ -119,6 +119,18 @@ public:
     virtual unsigned stateful_frame_type(VASurfaceID) const { return 255; }
     virtual bool stateful_sequence_start(VASurfaceID) { return false; }
 
+    // Submission seam for codecs that cannot finish an access unit at
+    // vaEndPicture time. AV1 is the only such case today: its frame header
+    // needs refresh_frame_flags, which VA-API does not provide and which can
+    // only be recovered from the following frame's reference map.
+    virtual VAStatus stateful_submit_picture(VASurfaceID surface_id)
+    {
+        return append_stateful_picture(surface_id);
+    }
+    // Release anything a codec is still holding back. Called before any drain
+    // or reset so a deferred access unit cannot be stranded across an EOS.
+    virtual VAStatus stateful_flush_deferred() { return VA_STATUS_SUCCESS; }
+
     int picture_width;
     int picture_height;
     DriverData* driver_data;

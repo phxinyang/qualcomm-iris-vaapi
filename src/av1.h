@@ -2,7 +2,9 @@
 
 #pragma once
 
+#include <cstdint>
 #include <set>
+#include <vector>
 
 extern "C" {
 #include "linux/videodev2.h"
@@ -15,6 +17,7 @@ extern "C" {
 #define V4L2_PIX_FMT_AV1 v4l2_fourcc('A', 'V', '0', '1')
 #endif
 
+#include "av1_obu.h"
 #include "context.h"
 
 struct Buffer;
@@ -39,4 +42,28 @@ public:
     bool uses_stateful_streaming() const override { return true; }
     unsigned stateful_frame_type(VASurfaceID surface_id) const override;
     bool stateful_sequence_start(VASurfaceID surface_id) override;
+
+    // An OBU frame header must state which reference slots the frame writes
+    // into, and VA-API does not carry refresh_frame_flags. The only way to
+    // recover it is to compare the reference map of the following frame
+    // against this frame's surface, so a frame is held back until its
+    // successor arrives.
+    VAStatus stateful_submit_picture(VASurfaceID surface_id) override;
+    VAStatus stateful_flush_deferred() override;
+
+private:
+    void observe_picture(const VADecPictureParameterBufferAV1& picture) const;
+    VAStatus release_deferred(uint8_t refresh_frame_flags);
+
+    mutable AV1SequenceState sequence_;
+    mutable AV1ReferenceState references_;
+    mutable VASurfaceID deferred_surface_ = VA_INVALID_SURFACE;
+    mutable VADecPictureParameterBufferAV1 deferred_picture_ {};
+    mutable std::vector<AV1TileEntry> deferred_tiles_;
+    mutable std::vector<AV1TileEntry> tiles_;
+    mutable bool deferred_emits_sequence_header_ = false;
+    mutable bool emit_sequence_header_ = false;
+    mutable bool seen_sequence_ = false;
+    mutable uint8_t pending_refresh_ = 0;
+    mutable bool pending_refresh_known_ = false;
 };

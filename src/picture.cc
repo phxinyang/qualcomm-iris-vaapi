@@ -240,7 +240,7 @@ VAStatus endPicture(VADriverContextP va_context, VAContextID context_id)
     }
 
     if (context.uses_stateful_streaming()) {
-        status = context.append_stateful_picture(render_surface_id);
+        status = context.stateful_submit_picture(render_surface_id);
         if (status != VA_STATUS_SUCCESS) {
             // A codec translator can reject a VA payload before an OUTPUT AU
             // is queued (for example AV1 tile data without its OBU headers).

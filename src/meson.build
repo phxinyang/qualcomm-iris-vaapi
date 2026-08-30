@@ -39,6 +39,7 @@ sources = [
 	'vp9_stateful.cc',
 	'hevc.cc',
 	'av1.cc',
+	'av1_obu.cc',
 ]
 
 headers = [
@@ -60,6 +61,9 @@ headers = [
 	'vp9_stateful.h',
 	'hevc.h',
 	'av1.h',
+	'av1_obu.h',
+	'bitwriter.h',
+	'trace.h',
 ]
 cpp_args = [
 	'-Wall',

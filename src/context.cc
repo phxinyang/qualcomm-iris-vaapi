@@ -685,6 +685,10 @@ bool Context::reset_stateful_decoder()
         return false;
     if (stateful_draining)
         return false;
+    // A codec may still be holding an access unit back. Submit it before STOP
+    // so the drain covers the whole stream rather than stranding the last
+    // frame until the context is destroyed.
+    stateful_flush_deferred();
     try {
         device.decoder_stop();
         stateful_draining = true;
@@ -818,6 +822,7 @@ bool Context::reset_stateful_decoder()
 
 bool Context::drain_stateful_decoder()
 {
+    stateful_flush_deferred();
     if (!capture_initialized)
         return false;
 
