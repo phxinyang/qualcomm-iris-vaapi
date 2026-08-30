@@ -408,3 +408,11 @@ The remote clean rebuild and `ldd -r` gate passed for every iteration. The
 experiment removes the CAPTURE-to-stable-buffer memcpy only for the validated
 no-B H.264/VP9 path; it is not yet a universal replacement for native
 multi-slot zero-copy behavior.
+
+After the first dynamic VP9 probe, the tablet powered off before the bounded
+command returned and the SSH endpoint changed. A follow-up guard now detects a
+dynamic-resolution request while DMA-BUF capture is active, releases the
+experimental queue without a long drain, and rebuilds the context on MMAP plus
+stable copy. This guard passed local static checks and remote compilation on
+`.133/.135`; hardware confirmation on the replacement `.148` endpoint is still
+pending because that address was not reachable during this run.

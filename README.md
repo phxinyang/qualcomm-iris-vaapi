@@ -60,6 +60,9 @@ The current ownership contract is validated for no-B H.264 and VP9 streams.
 H.264 streams with B-frame reordering must leave this switch off, while HEVC
 and AV1 are automatically kept on the stable-copy path until a multi-slot
 DMA-BUF ownership protocol is validated.
+If a stateful stream requests a dynamic-resolution reconfiguration while the
+experiment is active, the context drops that DMA-BUF queue and rebuilds on
+MMAP/copy for the new geometry.
 
 Surface size attributes are read from the selected V4L2 capture format with
 `VIDIOC_ENUM_FRAMESIZES`; the VA limits therefore follow each decoder's real
