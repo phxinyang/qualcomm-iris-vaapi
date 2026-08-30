@@ -29,6 +29,7 @@
 
 #include "trace.h"
 
+#include <array>
 #include <cassert>
 #include <cerrno>
 #include <algorithm>
@@ -83,33 +84,41 @@ size_t stateful_batch_limit_from_env()
 
 }
 
+std::set<VAProfile> Context::supported_profiles(const V4L2M2MDevice& device)
+{
+    std::set<VAProfile> result;
+    for (auto&& profile : MPEG2Context::supported_profiles(device)) {
+        result.insert(profile);
+    }
+    for (auto&& profile : H264Context::supported_profiles(device)) {
+        result.insert(profile);
+    }
+    for (auto&& profile : VP8Context::supported_profiles(device)) {
+        result.insert(profile);
+    }
+#ifdef ENABLE_VP9
+    for (auto&& profile : VP9Context::supported_profiles(device)) {
+        result.insert(profile);
+    }
+#endif
+    for (auto&& profile : VP9StatefulContext::supported_profiles(device)) {
+        result.insert(profile);
+    }
+    for (auto&& profile : HEVCContext::supported_profiles(device)) {
+        result.insert(profile);
+    }
+    for (auto&& profile : AV1Context::supported_profiles(device)) {
+        result.insert(profile);
+    }
+    return result;
+}
+
 std::set<VAProfile> Context::supported_profiles(const std::deque<V4L2M2MDevice>& devices)
 {
     std::set<VAProfile> result;
-    for (auto&& device : devices) {
-        for (auto&& profile : MPEG2Context::supported_profiles(device)) {
-            result.insert(profile);
-        }
-        for (auto&& profile : H264Context::supported_profiles(device)) {
-            result.insert(profile);
-        }
-        for (auto&& profile : VP8Context::supported_profiles(device)) {
-            result.insert(profile);
-        }
-#ifdef ENABLE_VP9
-        for (auto&& profile : VP9Context::supported_profiles(device)) {
-            result.insert(profile);
-        }
-#endif
-        for (auto&& profile : VP9StatefulContext::supported_profiles(device)) {
-            result.insert(profile);
-        }
-        for (auto&& profile : HEVCContext::supported_profiles(device)) {
-            result.insert(profile);
-        }
-        for (auto&& profile : AV1Context::supported_profiles(device)) {
-            result.insert(profile);
-        }
+    for (const auto& device : devices) {
+        const auto profiles = supported_profiles(device);
+        result.insert(profiles.begin(), profiles.end());
     }
     return result;
 }
@@ -260,7 +269,10 @@ void Context::initialize(std::span<VASurfaceID> surface_ids)
     }
 
     if (uses_stateful_streaming()) {
-        device.subscribe_source_change();
+        if (!source_change_subscribed_) {
+            device.subscribe_source_change();
+            source_change_subscribed_ = true;
+        }
         // Iris must see the first compressed buffer in OUTPUT before STREAMON;
         // flush_stateful_batch() starts OUTPUT after it queues that AU.
     } else {
@@ -1110,6 +1122,16 @@ void Context::stateful_watchdog_loop()
 bool Context::bind_surface(VASurfaceID surface_id){
     if (!queues_initialized || !driver_data->surfaces.contains(surface_id))
         return false;
+
+    if (uses_stateful_streaming()) {
+        const auto& surface = driver_data->surfaces.at(surface_id);
+        if (surface.width != static_cast<unsigned>(picture_width)
+            || surface.height != static_cast<unsigned>(picture_height)) {
+            if (!reconfigure_stateful_dimensions(surface_id))
+                return false;
+        }
+    }
+
     if (surface_buffer_indices.contains(surface_id)) {
         if (!uses_stateful_streaming() || driver_data->surfaces.at(surface_id).destination_buffer) {
             if (trace_enabled()) {
@@ -1196,6 +1218,99 @@ bool Context::bind_surface(VASurfaceID surface_id){
     if (trace_enabled())
         std::fprintf(stderr, "va bind stateless surface=%u index=%u dest=%u\n", surface_id, index,
             surface.destination_buffer_index);
+    return true;
+}
+
+bool Context::reconfigure_stateful_dimensions(VASurfaceID surface_id)
+{
+    if (!uses_stateful_streaming() || !queues_initialized || !driver_data->surfaces.contains(surface_id))
+        return false;
+
+    const auto& requested = driver_data->surfaces.at(surface_id);
+    const unsigned width = requested.width;
+    const unsigned height = requested.height;
+    if (width == 0 || height == 0)
+        return false;
+    if (width == static_cast<unsigned>(picture_width) && height == static_cast<unsigned>(picture_height))
+        return true;
+
+    // Reap already-ready CAPTURE buffers before deciding whether a batch is
+    // still in flight. If one remains, drain it so STREAMOFF cannot discard a
+    // decoded frame or leave an OUTPUT timestamp mapped to the old geometry.
+    service_stateful_queues();
+    if (!stateful_pending.empty() && flush_stateful_batch() != VA_STATUS_SUCCESS)
+        return false;
+    if (!stateful_batches.empty() && !drain_stateful_decoder())
+        return false;
+
+    const auto owns_device = [&](const Surface& surface) {
+        return (surface.source_buffer && &surface.source_buffer->get().owner() == &device)
+            || (surface.destination_buffer && &surface.destination_buffer->get().owner() == &device);
+    };
+    for (auto& [id, surface] : driver_data->surfaces) {
+        if (!owns_device(surface))
+            continue;
+        // Buffer objects are about to be unmapped by request_buffers(0). Drop
+        // every reference before rebuilding the queues, including surfaces
+        // that the VA client has already retired but whose stable export is
+        // still kept alive.
+        surface.source_buffer.reset();
+        surface.destination_buffer.reset();
+        surface.source_buffer_queued = false;
+        surface.destination_buffer_queued = false;
+        surface.logical_destination_layout.clear();
+        if (surface.status == VASurfaceRendering)
+            surface.status = VASurfaceDisplaying;
+        surface.source_size_used = 0;
+    }
+
+    try {
+        if (device.capture_streaming)
+            device.stream_capture(false);
+        if (device.output_streaming)
+            device.stream_output(false);
+        device.request_buffers(device.capture_buf_type, 0);
+        device.request_buffers(device.output_buf_type, 0);
+    } catch (const std::system_error& error) {
+        if (trace_enabled())
+            std::fprintf(stderr, "stateful resize stream reset failed: %s\n", error.what());
+        return false;
+    }
+
+    stateful_pending.clear();
+    stateful_pending_size = 0;
+    stateful_batches.clear();
+    stateful_batch_timestamps.clear();
+    stateful_output_dequeued.clear();
+    stateful_capture_done.clear();
+    stateful_batch_order.clear();
+    stateful_sequence_starts.clear();
+    stateful_draining = false;
+    stateful_last_marker_seen = false;
+    stateful_queue_restart_pending = false;
+    stateful_submitted_count = 0;
+    stateful_completed_count = 0;
+    stateful_cold_start_exhausted_ = false;
+    stateful_barren_syncs_ = 0;
+    stateful_last_timestamp = {};
+    surface_buffer_indices.clear();
+    surface_ids.clear();
+    queues_initialized = false;
+    capture_initialized = false;
+    picture_width = static_cast<int>(width);
+    picture_height = static_cast<int>(height);
+
+    if (trace_enabled())
+        std::fprintf(stderr, "stateful resize reconfigure surface=%u size=%ux%u\n", surface_id, width, height);
+
+    try {
+        std::array<VASurfaceID, 1> ids { surface_id };
+        initialize(ids);
+    } catch (const std::exception& error) {
+        if (trace_enabled())
+            std::fprintf(stderr, "stateful resize initialize failed: %s\n", error.what());
+        return false;
+    }
     return true;
 }
 

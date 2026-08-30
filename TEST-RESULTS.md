@@ -356,3 +356,26 @@ pool and toggling `V4L2_VA_COPY_SURFACES` did not remove it. `AUD_MW_E` returned
 backpressure records, but its frame hashes still differed from software. These
 are open surface/firmware interaction diagnostics, not grounds for another
 unverified production patch.
+
+## Codex dynamic-resolution follow-up (2026-08-30, `codex/claude-followup`, `.133`)
+
+The next Claude investigation item was completed against the current Iris node
+`/dev/video4` on the SM8550 tablet. `VIDIOC_ENUM_FRAMESIZES` reports the NV12
+capture range `96x96 - 8192x8192`; the VA runtime probe returned the same
+`MinWidth=96`, `MaxWidth=8192`, `MinHeight=96`, and `MaxHeight=8192` values.
+The old hard-coded `32/2048` surface attributes are gone. The range is scoped
+to the profile's eligible decoder devices and uses their common intersection.
+
+The deployed driver passed the 48-frame VA matrix for H.264, VP9, and HEVC:
+each codec matched the software framemd5 exactly, with strict EOS accounting
+(`48 OUTPUT`, `49 CAPTURE`, one `LAST`, zero timeout or timestamp-miss
+diagnostics). The two-context isolation probe also passed.
+
+The Fluster VP9 dynamic vector
+`vp90-2-14-resize-fp-tiles-1-8.webm` completed all 18 frames through VA. The
+driver and native `v4l2vp9dec` outputs were byte-identical for every 432x240 and
+3840x2160 segment. One 3840x2160 segment from both hardware paths differs from
+the software decoder at the same byte offset, so that isolated difference is
+recorded as deterministic firmware behavior rather than a VA-driver mismatch.
+The backend now also drains and rebuilds stateful V4L2 queues when a VA client
+reuses one context for a surface with a new geometry.

@@ -161,6 +161,47 @@ decltype(formats)::const_iterator matching_format(const V4L2M2MDevice& device, u
     });
 }
 
+std::optional<V4L2FrameSizeLimits> surface_size_limits(
+    const DriverData& driver_data, VAConfigID config)
+{
+    std::optional<VAProfile> profile;
+    if (const auto config_it = driver_data.configs.find(config); config_it != driver_data.configs.end())
+        profile = config_it->second.profile;
+
+    std::optional<V4L2FrameSizeLimits> common;
+    bool eligible_device_seen = false;
+    for (const auto& device : driver_data.devices) {
+        if (profile && !Context::supported_profiles(device).contains(*profile))
+            continue;
+
+        const auto format = matching_format(device, VA_RT_FORMAT_YUV420);
+        if (format == formats.end())
+            continue;
+        eligible_device_seen = true;
+
+        const auto limits = device.frame_size_limits(format->v4l2.format);
+        if (!limits)
+            return std::nullopt;
+        if (!common) {
+            common = limits;
+            continue;
+        }
+
+        // A VA config may be usable on more than one decoder node. Advertise
+        // the intersection so surface creation cannot select a node whose
+        // range is narrower than the global query result.
+        common->min_width = std::max(common->min_width, limits->min_width);
+        common->min_height = std::max(common->min_height, limits->min_height);
+        common->max_width = std::min(common->max_width, limits->max_width);
+        common->max_height = std::min(common->max_height, limits->max_height);
+    }
+
+    if (!eligible_device_seen || !common || common->min_width > common->max_width
+        || common->min_height > common->max_height)
+        return std::nullopt;
+    return common;
+}
+
 } // namespace
 
 bool ensure_stateful_bitstream_capacity(Surface& surface, size_t required)
@@ -646,6 +687,8 @@ VAStatus syncSurface(VADriverContextP context, VASurfaceID surface_id)
 VAStatus querySurfaceAttributes(
     VADriverContextP context, VAConfigID config, VASurfaceAttrib* attributes, unsigned int* attributes_count)
 {
+    auto driver_data = static_cast<DriverData*>(context->pDriverData);
+    std::lock_guard<std::recursive_mutex> guard(driver_data->mutex);
     VASurfaceAttrib* attributes_list;
     unsigned int attributes_list_size = Config::max_attributes * sizeof(*attributes);
     int memory_types;
@@ -660,29 +703,22 @@ VAStatus querySurfaceAttributes(
     attributes_list[i].value.value.i = VA_FOURCC_NV12;
     i++;
 
-    attributes_list[i].type = VASurfaceAttribMinWidth;
-    attributes_list[i].flags = VA_SURFACE_ATTRIB_GETTABLE;
-    attributes_list[i].value.type = VAGenericValueTypeInteger;
-    attributes_list[i].value.value.i = 32;
-    i++;
-
-    attributes_list[i].type = VASurfaceAttribMaxWidth;
-    attributes_list[i].flags = VA_SURFACE_ATTRIB_GETTABLE;
-    attributes_list[i].value.type = VAGenericValueTypeInteger;
-    attributes_list[i].value.value.i = 2048;
-    i++;
-
-    attributes_list[i].type = VASurfaceAttribMinHeight;
-    attributes_list[i].flags = VA_SURFACE_ATTRIB_GETTABLE;
-    attributes_list[i].value.type = VAGenericValueTypeInteger;
-    attributes_list[i].value.value.i = 32;
-    i++;
-
-    attributes_list[i].type = VASurfaceAttribMaxHeight;
-    attributes_list[i].flags = VA_SURFACE_ATTRIB_GETTABLE;
-    attributes_list[i].value.type = VAGenericValueTypeInteger;
-    attributes_list[i].value.value.i = 2048;
-    i++;
+    if (const auto limits = surface_size_limits(*driver_data, config); limits) {
+        const auto va_dimension = [](unsigned value) {
+            return static_cast<int>(std::min<unsigned>(value, std::numeric_limits<int>::max()));
+        };
+        const auto append_dimension = [&](VASurfaceAttribType type, int value) {
+            attributes_list[i].type = type;
+            attributes_list[i].flags = VA_SURFACE_ATTRIB_GETTABLE;
+            attributes_list[i].value.type = VAGenericValueTypeInteger;
+            attributes_list[i].value.value.i = value;
+            i++;
+        };
+        append_dimension(VASurfaceAttribMinWidth, va_dimension(limits->min_width));
+        append_dimension(VASurfaceAttribMaxWidth, va_dimension(limits->max_width));
+        append_dimension(VASurfaceAttribMinHeight, va_dimension(limits->min_height));
+        append_dimension(VASurfaceAttribMaxHeight, va_dimension(limits->max_height));
+    }
 
     attributes_list[i].type = VASurfaceAttribMemoryType;
     attributes_list[i].flags = VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE;

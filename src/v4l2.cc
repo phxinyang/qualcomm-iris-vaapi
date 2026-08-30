@@ -34,6 +34,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <limits>
 #include <ranges>
 #include <stdexcept>
 #include <system_error>
@@ -535,6 +536,47 @@ bool V4L2M2MDevice::format_supported(v4l2_buf_type type, unsigned pixelformat) c
         }
     }
     return false;
+}
+
+std::optional<V4L2FrameSizeLimits> V4L2M2MDevice::frame_size_limits(unsigned pixelformat) const
+{
+    V4L2FrameSizeLimits result {
+        .min_width = std::numeric_limits<unsigned>::max(),
+        .min_height = std::numeric_limits<unsigned>::max(),
+        .max_width = 0,
+        .max_height = 0,
+    };
+
+    bool found = false;
+    for (v4l2_frmsizeenum framesize = { .index = 0, .pixel_format = pixelformat };; framesize.index++) {
+        if (ioctl(video_fd, VIDIOC_ENUM_FRAMESIZES, &framesize) < 0)
+            break;
+
+        switch (framesize.type) {
+        case V4L2_FRMSIZE_TYPE_DISCRETE:
+            result.min_width = std::min(result.min_width, framesize.discrete.width);
+            result.min_height = std::min(result.min_height, framesize.discrete.height);
+            result.max_width = std::max(result.max_width, framesize.discrete.width);
+            result.max_height = std::max(result.max_height, framesize.discrete.height);
+            found = true;
+            break;
+        case V4L2_FRMSIZE_TYPE_STEPWISE:
+        case V4L2_FRMSIZE_TYPE_CONTINUOUS:
+            result.min_width = std::min(result.min_width, framesize.stepwise.min_width);
+            result.min_height = std::min(result.min_height, framesize.stepwise.min_height);
+            result.max_width = std::max(result.max_width, framesize.stepwise.max_width);
+            result.max_height = std::max(result.max_height, framesize.stepwise.max_height);
+            found = true;
+            break;
+        default:
+            break;
+        }
+    }
+
+    if (!found || result.max_width == 0 || result.max_height == 0
+        || result.min_width > result.max_width || result.min_height > result.max_height)
+        return std::nullopt;
+    return result;
 }
 
 unsigned V4L2M2MDevice::buffer_count(v4l2_buf_type type) const

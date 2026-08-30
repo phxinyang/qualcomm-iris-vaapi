@@ -49,6 +49,13 @@ that explicitly manage rotating V4L2 CAPTURE buffer lifetime themselves.
 The complete CAPTURE pool is queued by default so firmware reorder and EOS
 drain cannot run out of free slots.
 
+Surface size attributes are read from the selected V4L2 capture format with
+`VIDIOC_ENUM_FRAMESIZES`; the VA limits therefore follow each decoder's real
+minimum and maximum instead of assuming a 2048-pixel ceiling. Stateful clients
+may also reuse one VA context across a resolution change: the backend drains
+the old queue and rebuilds its V4L2 capture/output pools for the new surface
+geometry before submitting the next access unit.
+
 Stateful Iris may hold a reordered B/P frame until a later AU is submitted.
 `vaSyncSurface()` therefore uses a bounded 1000 ms wait by default, allowing
 an asynchronous producer to continue after a stalled reorder point instead of

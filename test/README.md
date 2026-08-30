@@ -89,6 +89,14 @@ The HEVC VA pass runs before its native baseline because some Iris firmware
 revisions leave a reorder queue warm when a GStreamer session closes; the
 ordering keeps the VA cold-start and EOS checks deterministic.
 
+The dynamic-resolution probe uses the VP9 vector that alternates 432x240 and
+3840x2160 keyframes. Compare full-size raw frames from the native V4L2 decoder
+with software output to separate firmware capability differences from VA
+filter negotiation; the VA and native streams must be byte-identical for each
+segment. The backend reports the device range through
+`vaQuerySurfaceAttributes()` and rebuilds stateful queues when a client reuses
+one VA context for a new surface geometry.
+
 For the stateful multi-context regression probe on the tablet:
 
 ```

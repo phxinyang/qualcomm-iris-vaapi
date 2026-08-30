@@ -51,12 +51,13 @@ struct DriverData;
 // Stateful capture normally keeps the complete CAPTURE pool queued. The
 // optional scheduled mode is deliberately opt-in because it can starve
 // firmware reorder/flush paths when a surface is not yet associated.
-bool stateful_capture_scheduled();
+    bool stateful_capture_scheduled();
 
 class Context {
 public:
     static Context* create(DriverData* driver_data, VAProfile profile, int picture_width, int picture_height,
         std::span<VASurfaceID> surface_ids);
+    static std::set<VAProfile> supported_profiles(const V4L2M2MDevice& device);
     static std::set<VAProfile> supported_profiles(const std::deque<V4L2M2MDevice>& devices);
 
     Context(DriverData* driver_data, V4L2M2MDevice& device, fourcc pixelformat, int picture_width, int picture_height,
@@ -110,6 +111,10 @@ public:
     bool capture_started() const { return capture_initialized; }
     std::recursive_mutex& synchronization_mutex() const { return synchronization_mutex_; }
     bool bind_surface(VASurfaceID surface_id);
+    // VA clients may reuse one context while allocating a new surface pool
+    // after a mid-stream resolution change. Rebuild the stateful V4L2 queues
+    // before the first AU for the new geometry is submitted.
+    bool reconfigure_stateful_dimensions(VASurfaceID surface_id);
     void begin_surface(VASurfaceID surface_id);
     void end_surface();
     VASurfaceID current_surface() const;
@@ -184,6 +189,7 @@ private:
     std::chrono::steady_clock::time_point stateful_last_submission_ = {};
     bool stateful_watchdog_stop_ = false;
     bool stateful_watchdog_handled_ = false;
+    bool source_change_subscribed_ = false;
 };
 
 VAStatus createContext(VADriverContextP va_context, VAConfigID config_id, int picture_width, int picture_height,

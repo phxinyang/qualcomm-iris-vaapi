@@ -46,6 +46,13 @@ extern "C" {
 
 using fourcc = uint32_t;
 
+struct V4L2FrameSizeLimits {
+    unsigned min_width;
+    unsigned min_height;
+    unsigned max_width;
+    unsigned max_height;
+};
+
 class V4L2M2MDevice {
 private:
     std::string video_path_;
@@ -92,6 +99,10 @@ public:
     void set_format(enum v4l2_buf_type type, unsigned int pixelformat, unsigned int width, unsigned int height);
     unsigned request_buffers(enum v4l2_buf_type type, unsigned count);
     bool format_supported(v4l2_buf_type type, unsigned pixelformat) const;
+    // Read the driver's advertised frame-size range instead of assuming a
+    // codec-independent VA surface limit. V4L2 enumerates sizes by format;
+    // callers use this for the selected capture pixel format.
+    std::optional<V4L2FrameSizeLimits> frame_size_limits(unsigned pixelformat) const;
     unsigned buffer_count(v4l2_buf_type type) const;
     const Buffer& buffer(v4l2_buf_type type, unsigned index);
     int32_t get_control(uint32_t id) const;
