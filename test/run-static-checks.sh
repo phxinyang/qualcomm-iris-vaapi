@@ -29,10 +29,24 @@ run() {
 # of the trace checkers shipped broken for a while because a typo made it grep
 # a path instead of a file, so parse every script we own on every run.
 echo "== shell syntax"
-for script in "$test_dir"/*.sh "$test_dir"/remote/*.sh; do
+for script in "$test_dir"/*.sh "$test_dir"/remote/*.sh "$root"/scripts/*.sh; do
     [ -f "$script" ] || continue
     run "syntax $(basename "$script")" sh -n "$script"
 done
+
+echo "== browser launcher invariants"
+launcher="$root/scripts/iris-vaapi-browser"
+run browser-launcher-syntax sh -n "$launcher"
+run browser-launcher-unsets-build-path grep -Fq 'unset LIBVA_DRIVERS_PATH' "$launcher"
+run browser-launcher-dynamic-node grep -Fq 'iris_driver' "$launcher"
+run browser-launcher-no-fixed-node sh -c '! grep -Eq "/dev/video[0-9]+" "$1"' sh "$launcher"
+
+# Keep the known-good Chrome path free of the Linux GL decode feature. That
+# feature selects ImageProcessor output negotiation on Chrome 151 and causes
+# an immediate VA context teardown before the first picture. It remains valid
+# as a separately documented experiment only when explicitly requested.
+default_launcher=$(sed -n '/common_args=/,/if \[ "\$graphics_mode" = vulkan-webgpu \]/p' "$launcher")
+run browser-launcher-default-no-linux-gl-feature sh -c '! printf "%s\\n" "$1" | grep -Fq AcceleratedVideoDecodeLinuxGL' sh "$default_launcher"
 
 echo "== source invariants"
 run iris-source-invariants sh "$test_dir/iris-source-invariants.sh" "$root"

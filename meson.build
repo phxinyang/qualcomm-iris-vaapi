@@ -51,3 +51,20 @@ va_driver_init_func = '__vaDriverInit_@0@_@1@'.format(va_api_major_version, va_a
 
 subdir('src')
 subdir('test')
+
+# Packaging with --prefix=/usr installs the driver, process-scoped browser
+# launcher and desktop entries together. For direct system deployment, the
+# install-system.sh helper additionally reads libva's canonical driverdir so
+# a /usr/local project prefix cannot hide the driver from libva.
+install_data(
+	'scripts/iris-vaapi-browser',
+	install_dir: get_option('bindir'),
+	install_mode: 'rwxr-xr-x',
+)
+install_data(
+	'data/chromium-iris-v4l2.desktop',
+	'data/google-chrome-iris-v4l2.desktop',
+	'data/chromium-iris-vulkan-webgpu.desktop',
+	'data/google-chrome-iris-vulkan-webgpu.desktop',
+	install_dir: join_paths(get_option('datadir'), 'applications'),
+)

@@ -19,10 +19,33 @@ Applications using the backend can be launched by adding the build directory to 
 LIBVA_DRIVERS_PATH=<project dir>/build/src LIBVA_DRIVER_NAME=v4l2 vainfo
 ```
 
-Alternatively, the library can be installed to the default driver path:
+Alternatively, a packaging build configured with the system prefix installs
+the driver, browser launcher, and desktop entries together:
 ```
-meson install -Cbuild
+meson setup build --prefix=/usr
+meson compile -C build
+sudo meson install -C build
 ```
+
+For direct deployment, prefer the helper below. It reads libva's canonical
+`driverdir` from `libva.pc`, so the driver does not accidentally land under
+`/usr/local/lib*/dri` while the system libva only scans `/usr/lib*/dri`:
+
+```
+sudo ./scripts/install-system.sh build
+```
+
+The helper also installs `iris-vaapi-browser` and four desktop entries for
+Chromium and Google Chrome. The normal entries are VA-only: they use Wayland,
+leave the packaged browser's video-decoder feature selection at its tested
+default, dynamically select the `iris_driver` decoder node, and intentionally
+do not enable Vulkan, ANGLE Vulkan, or unsafe WebGPU. The separately named
+Vulkan/WebGPU entries are an isolated experiment and may fall back to software
+video decode. Neither path sets a global `LIBVA_DRIVERS_PATH` or stores a
+`/dev/videoN` number.
+
+See [`docs/build-and-deploy.md`](docs/build-and-deploy.md) for installation,
+desktop migration, and browser decoder acceptance checks.
 
 The driver probes the system for appropriate V4L2 devices, advertising all of their capabilities.
 This can be overriden by explicitly specifying a device pair to use:

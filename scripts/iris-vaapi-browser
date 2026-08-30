@@ -1,0 +1,187 @@
+#!/bin/sh
+
+# Launch Chromium-family browsers against the Qualcomm Iris decoder without
+# depending on a boot-specific /dev/video number or a build-tree driver path.
+
+set -eu
+
+usage() {
+    cat <<'EOF'
+Usage: iris-vaapi-browser [OPTIONS] [--] [BROWSER_ARGUMENTS...]
+
+Options:
+  --browser=auto|chromium|chrome  Select the browser family (default: auto).
+  --vulkan-webgpu                Use the isolated Vulkan/ANGLE/WebGPU experiment.
+  --print-node                   Print the resolved Iris decoder and exit.
+  -h, --help                     Show this help.
+
+The VA-only default deliberately does not enable Vulkan, ANGLE Vulkan, or
+unsafe WebGPU. It also leaves Chromium's Linux video-decoder feature selection
+at its packaged default: on the qualified Chrome build, forcing the Linux GL
+decode feature selects an ImageProcessor path that immediately falls back from
+VA-API. LIBVA_V4L2_VIDEO_PATH may override automatic node discovery.
+IRIS_BROWSER_BIN may override browser executable discovery.
+IRIS_BROWSER_PROFILE_ROOT may override the isolated profile root.
+EOF
+}
+
+fail() {
+    echo "iris-vaapi-browser: $*" >&2
+    exit 1
+}
+
+resolve_iris_decoder() {
+    if [ -n "${LIBVA_V4L2_VIDEO_PATH:-}" ]; then
+        [ -c "$LIBVA_V4L2_VIDEO_PATH" ] \
+            || fail "LIBVA_V4L2_VIDEO_PATH is not a character device: $LIBVA_V4L2_VIDEO_PATH"
+        printf '%s\n' "$LIBVA_V4L2_VIDEO_PATH"
+        return 0
+    fi
+
+    command -v v4l2-ctl >/dev/null 2>&1 \
+        || fail 'v4l2-ctl is required to resolve the iris_driver decoder dynamically'
+
+    decoder=''
+    fallback=''
+    iris_count=0
+    for candidate in /dev/video*; do
+        [ -c "$candidate" ] || continue
+        info=$(v4l2-ctl -d "$candidate" --info 2>/dev/null || true)
+        driver=$(printf '%s\n' "$info" \
+            | sed -n 's/^[[:space:]]*Driver name[[:space:]]*:[[:space:]]*//p' \
+            | sed -n '1p')
+        [ "$driver" = iris_driver ] || continue
+
+        iris_count=$((iris_count + 1))
+        fallback=$candidate
+        card=$(printf '%s\n' "$info" \
+            | sed -n 's/^[[:space:]]*Card type[[:space:]]*:[[:space:]]*//p' \
+            | sed -n '1p')
+        sys_name=$(cat "/sys/class/video4linux/${candidate##*/}/name" 2>/dev/null || true)
+        case "$card:$sys_name" in
+            *[Dd]ecoder*)
+                [ -z "$decoder" ] \
+                    || fail "multiple iris_driver decoder nodes found: $decoder and $candidate"
+                decoder=$candidate
+                ;;
+        esac
+    done
+
+    if [ -n "$decoder" ]; then
+        printf '%s\n' "$decoder"
+        return 0
+    fi
+    if [ "$iris_count" -eq 1 ]; then
+        printf '%s\n' "$fallback"
+        return 0
+    fi
+    if [ "$iris_count" -gt 1 ]; then
+        fail 'multiple iris_driver nodes found but none identifies itself as the decoder'
+    fi
+    fail 'no /dev/video* node reports iris_driver; refusing a fixed-node fallback'
+}
+
+find_browser() {
+    if [ -n "${IRIS_BROWSER_BIN:-}" ]; then
+        case "$IRIS_BROWSER_BIN" in
+            */*) [ -x "$IRIS_BROWSER_BIN" ] || fail "browser is not executable: $IRIS_BROWSER_BIN" ;;
+            *) command -v "$IRIS_BROWSER_BIN" >/dev/null 2>&1 \
+                || fail "browser is not on PATH: $IRIS_BROWSER_BIN" ;;
+        esac
+        command -v "$IRIS_BROWSER_BIN" 2>/dev/null || printf '%s\n' "$IRIS_BROWSER_BIN"
+        return 0
+    fi
+
+    case "$browser_family" in
+        chromium) candidates='chromium chromium-browser' ;;
+        chrome) candidates='google-chrome-stable google-chrome' ;;
+        auto) candidates='chromium chromium-browser google-chrome-stable google-chrome' ;;
+        *) fail "unsupported browser family: $browser_family" ;;
+    esac
+    for candidate in $candidates; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            command -v "$candidate"
+            return 0
+        fi
+    done
+    fail "no supported $browser_family browser found on PATH"
+}
+
+browser_family=auto
+graphics_mode=vaapi
+print_node=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --browser=auto|--browser=chromium|--browser=chrome)
+            browser_family=${1#--browser=}
+            shift
+            ;;
+        --vulkan-webgpu)
+            graphics_mode=vulkan-webgpu
+            shift
+            ;;
+        --print-node)
+            print_node=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+node=$(resolve_iris_decoder)
+if [ "$print_node" -eq 1 ]; then
+    printf '%s\n' "$node"
+    exit 0
+fi
+
+browser=$(find_browser)
+case "${browser##*/}" in
+    chromium|chromium-browser*) profile_browser=chromium ;;
+    google-chrome*) profile_browser=google-chrome ;;
+    *)
+        case "$browser_family" in
+            chrome) profile_browser=google-chrome ;;
+            *) profile_browser=chromium ;;
+        esac
+        ;;
+esac
+
+profile_root=${IRIS_BROWSER_PROFILE_ROOT:-${XDG_CONFIG_HOME:-$HOME/.config}/iris-vaapi-browser}
+profile_dir=$profile_root/$profile_browser-$graphics_mode
+mkdir -p "$profile_dir"
+
+# The installed driver must be discoverable from libva's standard driver
+# directory. Do not let a stale build-tree override leak into desktop starts.
+unset LIBVA_DRIVERS_PATH
+LIBVA_DRIVER_NAME=v4l2
+LIBVA_V4L2_VIDEO_PATH=$node
+export LIBVA_DRIVER_NAME LIBVA_V4L2_VIDEO_PATH
+
+common_args="--ozone-platform=wayland"
+
+if [ "$graphics_mode" = vulkan-webgpu ]; then
+    exec "$browser" \
+        "$common_args" \
+        "--user-data-dir=$profile_dir" \
+        "--enable-features=Vulkan" \
+        --disable-features=AcceleratedVideoDecodeLinuxZeroCopyGL \
+        --use-angle=vulkan \
+        --enable-unsafe-webgpu \
+        "$@"
+fi
+
+exec "$browser" \
+    "$common_args" \
+    "--user-data-dir=$profile_dir" \
+    --disable-features=AcceleratedVideoDecodeLinuxZeroCopyGL \
+    "$@"
