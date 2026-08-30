@@ -63,7 +63,11 @@ assert_rejected outside-lab 'Projects/iris-vaapi'
 assert_rejected lab-root-only 'Lab'
 
 : >"$calls"
-if PATH="$scratch/bin:$PATH" IRIS_REMOTE_ROOT='Lab/iris-vaapi-lab/src' sh "$deploy" \
+if PATH="$scratch/bin:$PATH" \
+    IRIS_REMOTE_ROOT='Lab/iris-vaapi-lab/src' \
+    IRIS_SOURCE_COMMIT=0000000000000000000000000000000000000000 \
+    IRIS_TRACKED_SOURCE_SHA256=1111111111111111111111111111111111111111111111111111111111111111 \
+    sh "$deploy" \
     >"$scratch/out" 2>"$scratch/err"; then
     echo 'FAIL command shim unexpectedly let deploy complete' >&2
     exit 1
