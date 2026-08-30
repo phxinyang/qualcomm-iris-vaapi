@@ -56,6 +56,11 @@ if ! grep -Fq "awk -F, 'NF >= 2 { print \$1 \",\" \$2 }'" "$dynamic_resolution";
     echo "FAIL dynamic-resolution switch count does not normalize ffprobe side-data columns" >&2
     exit 1
 fi
+if ! grep -Fq 'low-reference.yuv' "$dynamic_resolution" \
+    || ! grep -Fq 'cat "$high_raw" >>"$software_raw"' "$dynamic_resolution"; then
+    echo "FAIL dynamic-resolution native oracle uses a fixed-size rawvideo reference" >&2
+    exit 1
+fi
 
 if ! grep -q 'device.buffer(device.capture_buf_type, i).queue()' "$context"; then
     echo "FAIL stateful start_capture does not queue the CAPTURE pool" >&2

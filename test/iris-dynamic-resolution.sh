@@ -146,14 +146,35 @@ run_native_baseline() {
     codec=$1
     parser=$2
     decoder=$3
+    extension=$4
     stream="$root/$codec-dynamic.mkv"
+    low="$root/$codec-low.$extension"
+    high="$root/$codec-high.$extension"
+    low_raw="$root/$codec-low-reference.yuv"
+    high_raw="$root/$codec-high-reference.yuv"
     software_raw="$root/$codec-software.yuv"
     native_raw="$root/$codec-native.yuv"
     native_log="$root/$codec-native.log"
 
     require_element "$decoder"
-    timeout "$timeout_seconds" ffmpeg -y -hide_banner -loglevel error -i "$stream" \
-        -pix_fmt yuv420p -f rawvideo "$software_raw"
+    # rawvideo has no per-frame geometry metadata, so FFmpeg locks one output
+    # stream to the first frame's size when a decoded stream changes geometry.
+    # Decode the two source segments independently and assemble the known
+    # alternating reference instead of silently scaling every high segment.
+    timeout "$timeout_seconds" ffmpeg -y -hide_banner -loglevel error -i "$low" \
+        -pix_fmt yuv420p -fps_mode passthrough -f rawvideo "$low_raw"
+    timeout "$timeout_seconds" ffmpeg -y -hide_banner -loglevel error -i "$high" \
+        -pix_fmt yuv420p -fps_mode passthrough -f rawvideo "$high_raw"
+    : >"$software_raw"
+    index=0
+    while [ "$index" -lt "$segment_count" ]; do
+        if [ $((index % 2)) -eq 0 ]; then
+            cat "$low_raw" >>"$software_raw"
+        else
+            cat "$high_raw" >>"$software_raw"
+        fi
+        index=$((index + 1))
+    done
     timeout "$timeout_seconds" gst-launch-1.0 -e filesrc location="$stream" ! \
         matroskademux ! "$parser" ! "$decoder" capture-io-mode=2 output-io-mode=2 ! \
         videoconvert ! video/x-raw,format=I420 ! filesink location="$native_raw" \
@@ -245,7 +266,7 @@ for codec in $codecs; do
             require_format H264 h264
             make_concat_stream h264 "${IRIS_H264_ENCODER:-libx264}" mkv \
                 '-preset ultrafast -tune zerolatency -g 1 -bf 0 -pix_fmt yuv420p'
-            run_native_baseline h264 h264parse v4l2h264dec
+            run_native_baseline h264 h264parse v4l2h264dec mkv
             run_va_same_context h264
             run_va_new_contexts h264 mkv
             ;;
@@ -253,7 +274,7 @@ for codec in $codecs; do
             require_format VP90 vp9
             make_concat_stream vp9 "${IRIS_VP9_ENCODER:-libvpx-vp9}" webm \
                 '-deadline realtime -cpu-used 8 -g 1 -b:v 2M -pix_fmt yuv420p'
-            run_native_baseline vp9 vp9parse v4l2vp9dec
+            run_native_baseline vp9 vp9parse v4l2vp9dec webm
             run_va_same_context vp9
             run_va_new_contexts vp9 webm
             ;;
