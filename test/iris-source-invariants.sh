@@ -12,6 +12,7 @@ env_helper="$root/test/lib/iris-env.sh"
 matrix="$root/test/iris-matrix.sh"
 structure_matrix="$root/test/iris-structure-matrix.sh"
 concurrency_soak="$root/test/iris-concurrency-soak.sh"
+dynamic_resolution="$root/test/iris-dynamic-resolution.sh"
 
 grep -q 'return !value || std::strcmp(value, "0") != 0;' "$surface"
 grep -q 'size_t limit = 1;' "$context"
@@ -48,6 +49,11 @@ fi
 if grep -q "capture\[\^:\]\*error|undefined symbol" "$concurrency_soak" \
     || ! grep -q 'capture\[\^:\]\*error=\[1-9\]' "$concurrency_soak"; then
     echo "FAIL concurrency soak treats successful CAPTURE logs as errors" >&2
+    exit 1
+fi
+
+if ! grep -Fq "awk -F, 'NF >= 2 { print \$1 \",\" \$2 }'" "$dynamic_resolution"; then
+    echo "FAIL dynamic-resolution switch count does not normalize ffprobe side-data columns" >&2
     exit 1
 fi
 

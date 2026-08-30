@@ -91,9 +91,14 @@ check_single_context_trace() {
 check_stream_switches() {
     stream=$1
     codec=$2
+    dimensions_raw="$root/$codec-dimensions-raw.txt"
     dimensions="$root/$codec-dimensions.txt"
     timeout "$timeout_seconds" ffprobe -v error -select_streams v:0 \
-        -show_entries frame=width,height -of csv=p=0 "$stream" >"$dimensions"
+        -show_entries frame=width,height -of csv=p=0 "$stream" >"$dimensions_raw"
+    # Some ffprobe builds append an empty side-data column to keyframes. Only
+    # width and height define a geometry transition; retaining the trailing
+    # comma makes every keyframe look like a fake resolution change.
+    awk -F, 'NF >= 2 { print $1 "," $2 }' "$dimensions_raw" >"$dimensions"
     actual_frames=$(wc -l <"$dimensions" | tr -d ' ')
     actual_switches=$(awk 'NR == 1 { previous=$0; next } $0 != previous { changes++; previous=$0 } END { print changes + 0 }' "$dimensions")
     invalid=$(awk -F, '$0 != "640,360" && $0 != "1280,720" { count++ } END { print count + 0 }' "$dimensions")
