@@ -11,6 +11,7 @@ surface="$root/src/surface.cc"
 env_helper="$root/test/lib/iris-env.sh"
 matrix="$root/test/iris-matrix.sh"
 structure_matrix="$root/test/iris-structure-matrix.sh"
+concurrency_soak="$root/test/iris-concurrency-soak.sh"
 
 grep -q 'return !value || std::strcmp(value, "0") != 0;' "$surface"
 grep -q 'size_t limit = 1;' "$context"
@@ -41,6 +42,12 @@ fi
 if grep -q "capture\.\*error\\\\|V4L2_BUF_FLAG_ERROR" "$structure_matrix" \
     || ! grep -q 'capture\.\*error=\[1-9\]' "$structure_matrix"; then
     echo "FAIL Iris structure matrix treats successful CAPTURE logs as errors" >&2
+    exit 1
+fi
+
+if grep -q "capture\[\^:\]\*error|undefined symbol" "$concurrency_soak" \
+    || ! grep -q 'capture\[\^:\]\*error=\[1-9\]' "$concurrency_soak"; then
+    echo "FAIL concurrency soak treats successful CAPTURE logs as errors" >&2
     exit 1
 fi
 

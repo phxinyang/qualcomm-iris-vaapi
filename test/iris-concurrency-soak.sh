@@ -260,7 +260,7 @@ validate_job() {
         echo "FAIL $name trace does not prove the stateful driver ran" >&2
         return 1
     fi
-    if grep -Eqi 'stateful timestamp miss|bounded sync timeout|capture[^:]*error|undefined symbol' "$trace"; then
+    if grep -Eqi 'stateful timestamp miss|bounded sync timeout|capture[^:]*error=[1-9]|v4l2 dq ERROR type=9|undefined symbol' "$trace"; then
         echo "FAIL $name trace contains a stateful decode error" >&2
         return 1
     fi
