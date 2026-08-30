@@ -63,15 +63,14 @@ if grep -Eq 'mixed-vp9|preflight vp9|VP90' "$concurrency_soak"; then
     echo "FAIL concurrency qualification still exercises withdrawn VP9 VA" >&2
     exit 1
 fi
-if grep -q 'start_job mixed-hevc' "$concurrency_soak" \
-    || ! grep -q 'start_repeated_job mixed-hevc' "$concurrency_soak"; then
-    echo "FAIL mixed HEVC soak reuses one VA context across artificial stream loops" >&2
+if grep -Eq 'start_job mixed-hevc|start_repeated_job mixed-hevc' "$concurrency_soak" \
+    || ! grep -q 'start_once_job mixed-hevc .*hevc-soak\.mkv' "$concurrency_soak"; then
+    echo "FAIL mixed HEVC soak does not use one continuous duration-sized stream" >&2
     exit 1
 fi
-repeated_block=$(sed -n '/va_decode_repeated()/,/^}/p' "$concurrency_soak")
-if printf '%s\n' "$repeated_block" | grep -Fq -- '-progress "$repeated_segment_progress" -re' \
-    || ! printf '%s\n' "$repeated_block" | grep -q 'repeated_next_start'; then
-    echo "FAIL repeated HEVC soak input pacing can starve reordered access units" >&2
+if ! grep -Fq 'hevc_soak_frames=$((duration * fps))' "$concurrency_soak" \
+    || ! grep -q '"$media_dir/hevc-soak.mkv"' "$concurrency_soak"; then
+    echo "FAIL mixed HEVC media does not span the requested soak duration" >&2
     exit 1
 fi
 scenario_block=$(sed -n '/run_scenario()/,/^}/p' "$concurrency_soak")

@@ -121,13 +121,12 @@ stateful traces, temperature samples, uptime and boot IDs. The script rejects
 an interrupted/rebooted predecessor through a durable guard file, enforces a
 thermal ceiling, and runs an exact software/VA MD5 preflight before starting.
 H.264 workers keep one VA context for the full duration. The mixed HEVC worker
-decodes complete 48-frame clips in fresh contexts and checks strict EOS after
-every clip: FFmpeg `-stream_loop` does not expose an EOS boundary between
-independent HEVC sequences, so using it would test an artificial POC/reorder
-carry-over rather than concurrent decode and context teardown. Each HEVC clip
-is submitted without per-packet `-re` throttling so reordered pictures can see
-their future access units; the supervisor paces clip starts to wall clock and
-still enforces the real-time aggregate frame floor.
+also uses one long-lived context, but its generated input spans the complete
+requested duration with a continuous POC/reference timeline. Repeating a
+48-frame HEVC file with FFmpeg `-stream_loop` would omit EOS between independent
+sequences and create an artificial reorder carry-over that eventually exhausts
+bounded timeout recovery. The real-time aggregate frame floor still applies to
+both concurrent workers.
 `IRIS_SOAK_SECONDS` is available for development, but shortened output is
 labelled explicitly and is not release evidence.
 

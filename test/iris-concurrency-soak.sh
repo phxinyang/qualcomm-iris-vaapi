@@ -165,6 +165,11 @@ if [ "$scenario" = all ] || [ "$scenario" = mixed ]; then
         -frames:v "$frames" -c:v "${IRIS_HEVC_ENCODER:-libx265}" -preset ultrafast \
         -x265-params "keyint=$fps:min-keyint=$fps:scenecut=0" -pix_fmt yuv420p -an \
         "$media_dir/hevc.mkv"
+    hevc_soak_frames=$((duration * fps))
+    ffmpeg -y -hide_banner -loglevel error -f lavfi -i "testsrc2=size=640x360:rate=$fps" \
+        -frames:v "$hevc_soak_frames" -c:v "${IRIS_HEVC_ENCODER:-libx265}" -preset ultrafast \
+        -x265-params "keyint=$fps:min-keyint=$fps:scenecut=0" -pix_fmt yuv420p -an \
+        "$media_dir/hevc-soak.mkv"
 fi
 
 va_decode() {
@@ -175,84 +180,27 @@ va_decode() {
     timeout "$((duration + grace))" env \
         LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH="$driver_path" \
         LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_TRACE=1 \
-        ffmpeg -y -hide_banner -loglevel warning -nostats -progress "$progress" \
+        ffmpeg -nostdin -y -hide_banner -loglevel warning -nostats -progress "$progress" \
         -stream_loop -1 -re -vaapi_device /dev/dri/renderD128 \
         -hwaccel vaapi -hwaccel_output_format vaapi -i "$input" -t "$duration" \
         -vf 'hwdownload,format=nv12' -f null "$output" 2>"$trace"
 }
 
-# Repeating an independent HEVC file inside one FFmpeg process does not provide
-# an EOS boundary between loops. The delayed reorder tail then survives into a
-# new POC-zero sequence in the same VA context and eventually exhausts the
-# bounded timeout recovery. Decode complete clips in fresh contexts instead;
-# this keeps HEVC active beside the long-lived H.264 worker while qualifying
-# context teardown/recreation and strict EOS on every segment.
-va_decode_repeated() {
-    repeated_name=$1
-    repeated_input=$2
-    repeated_progress=$3
-    repeated_trace=$4
-    repeated_started=$(date +%s)
-    repeated_deadline=$((repeated_started + duration))
-    repeated_period=$(((frames + fps - 1) / fps))
-    repeated_next_start=$repeated_started
-    repeated_total_frames=0
-    repeated_iterations=0
-    repeated_segment_progress="$root/$repeated_name-segment.progress"
-    repeated_segment_trace="$root/$repeated_name-segment.trace"
-    : >"$repeated_progress"
-    : >"$repeated_trace"
-    : >"$root/$repeated_name-segments.log"
-
-    while [ "$(date +%s)" -lt "$repeated_deadline" ]; do
-        : >"$repeated_segment_progress"
-        : >"$repeated_segment_trace"
-        if ! timeout "$grace" env \
-            LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH="$driver_path" \
-            LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_TRACE=1 \
-            ffmpeg -nostdin -y -hide_banner -loglevel warning -nostats \
-            -progress "$repeated_segment_progress" \
-            -vaapi_device /dev/dri/renderD128 \
-            -hwaccel vaapi -hwaccel_output_format vaapi -i "$repeated_input" \
-            -vf 'hwdownload,format=nv12' -f null - 2>"$repeated_segment_trace"; then
-            echo "FAIL $repeated_name segment=$repeated_iterations decode failed" >&2
-            return 1
-        fi
-        repeated_segment_frames=$(awk -F= '$1 == "frame" { value=$2 } END { print value + 0 }' \
-            "$repeated_segment_progress")
-        if ! grep -q '^progress=end$' "$repeated_segment_progress" \
-            || [ "$repeated_segment_frames" -ne "$frames" ]; then
-            echo "FAIL $repeated_name segment=$repeated_iterations frames=$repeated_segment_frames/$frames" >&2
-            return 1
-        fi
-        if ! test/iris-eos-check.sh "$repeated_segment_trace" "$frames" \
-            >>"$root/$repeated_name-segments.log"; then
-            echo "FAIL $repeated_name segment=$repeated_iterations EOS" >&2
-            return 1
-        fi
-        cat "$repeated_segment_trace" >>"$repeated_trace"
-        repeated_total_frames=$((repeated_total_frames + repeated_segment_frames))
-        repeated_iterations=$((repeated_iterations + 1))
-        # Feed the complete reordered clip as a burst, then pace clip starts to
-        # wall clock. Per-packet -re pacing can block HEVC waiting for future
-        # access units, while an unpaced outer loop would measure churn rather
-        # than sustained real-time load.
-        repeated_next_start=$((repeated_next_start + repeated_period))
-        repeated_now=$(date +%s)
-        if [ "$repeated_next_start" -gt "$repeated_now" ]; then
-            sleep "$((repeated_next_start - repeated_now))"
-        else
-            repeated_next_start=$repeated_now
-        fi
-    done
-
-    if [ "$repeated_iterations" -eq 0 ]; then
-        echo "FAIL $repeated_name completed no segments" >&2
-        return 1
-    fi
-    printf 'frame=%s\nprogress=end\n' "$repeated_total_frames" >"$repeated_progress"
-    printf 'PASS %s segments=%s frames=%s\n' \
-        "$repeated_name" "$repeated_iterations" "$repeated_total_frames"
+# HEVC reorder needs a continuous POC/reference timeline. Generate one input
+# spanning the requested duration and decode it in a single long-lived context
+# instead of repeating independent files without an EOS boundary.
+va_decode_once() {
+    once_input=$1
+    once_output=$2
+    once_progress=$3
+    once_trace=$4
+    timeout "$((duration + grace))" env \
+        LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH="$driver_path" \
+        LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_TRACE=1 \
+        ffmpeg -nostdin -y -hide_banner -loglevel warning -nostats \
+        -progress "$once_progress" -re -vaapi_device /dev/dri/renderD128 \
+        -hwaccel vaapi -hwaccel_output_format vaapi -i "$once_input" -t "$duration" \
+        -vf 'hwdownload,format=nv12' -f null "$once_output" 2>"$once_trace"
 }
 
 preflight() {
@@ -353,18 +301,18 @@ start_job() {
     printf '%s\n' "$!" >>"$pid_file"
 }
 
-start_repeated_job() {
-    repeated_job_name=$1
-    repeated_job_input=$2
-    repeated_job_status="$root/$repeated_job_name.status"
-    rm -f "$repeated_job_status"
+start_once_job() {
+    once_job_name=$1
+    once_job_input=$2
+    once_job_status="$root/$once_job_name.status"
+    rm -f "$once_job_status"
     (
         set +e
-        va_decode_repeated "$repeated_job_name" "$repeated_job_input" \
-            "$root/$repeated_job_name.progress" "$root/$repeated_job_name.trace"
-        repeated_job_rc=$?
-        printf '%s\n' "$repeated_job_rc" >"$repeated_job_status"
-        exit "$repeated_job_rc"
+        va_decode_once "$once_job_input" - \
+            "$root/$once_job_name.progress" "$root/$once_job_name.trace"
+        once_job_rc=$?
+        printf '%s\n' "$once_job_rc" >"$once_job_status"
+        exit "$once_job_rc"
     ) &
     printf '%s\n' "$!" >>"$pid_file"
 }
@@ -384,7 +332,7 @@ run_scenario() {
             scenario_jobs='mixed-h264 mixed-hevc'
             scenario_job_count=2
             start_job mixed-h264 "$media_dir/h264.mp4"
-            start_repeated_job mixed-hevc "$media_dir/hevc.mkv"
+            start_once_job mixed-hevc "$media_dir/hevc-soak.mkv"
             ;;
     esac
 
