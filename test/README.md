@@ -169,17 +169,35 @@ To add Fluster, set `FLUSTER_DIR`,
 `IRIS_FLUSTER_SUITES` and `IRIS_FLUSTER_DECODERS`, for example:
 
 ```
-FLUSTER_DIR=$HOME/Lab/Bridge/tmp/trash/fluster \
+FLUSTER_DIR=$HOME/Lab/iris-vaapi-lab/tools/fluster \
 IRIS_FLUSTER_SUITES='JVT-AVC_V1 JCT-VC-HEVC_V1 VP9-TEST-VECTORS AV1-TEST-VECTORS' \
 IRIS_FLUSTER_DECODERS='GStreamer-H.264-V4L2' \
 ./test/iris-hardware-suite.sh
 ```
 
-Fluster's non-zero result is retained as a capability warning because its
-corpus intentionally includes profiles, bit depths, dimensions and dynamic
-resolution modes that a particular Iris firmware may not implement. The raw
-JSON and log are the review artifacts. `v4l2-compliance` is strict except for
-the known stateful mem2mem control classification; set
+`GStreamer-*-V4L2` talks directly to the Iris kernel node and therefore
+characterises firmware capabilities without loading this VA-API driver. To
+exercise this repository's code, select the matching `FFmpeg-*-VAAPI` decoder:
+
+```
+FLUSTER_DIR=$HOME/Lab/iris-vaapi-lab/tools/fluster \
+IRIS_FLUSTER_SUITES='JVT-AVC_V1' \
+IRIS_FLUSTER_DECODERS='FFmpeg-H.264-VAAPI' \
+V4L2_VA_SYNC_TIMEOUT_MS=100 \
+./test/iris-hardware-suite.sh
+```
+
+Fluster's stock FFmpeg VA-API wrapper uses a software pixel-format filter and
+does not request a VAAPI output pool explicitly. Its results are useful for
+finding surface-lifetime and timeout boundaries, but the repository's
+`iris-matrix.sh` is the authoritative positive VA-API pixel oracle. Record the
+decoder name with every Fluster result so firmware-only numbers are not
+mistaken for driver coverage. Fluster's non-zero result is retained as a
+capability warning because its corpus intentionally includes profiles, bit
+depths, dimensions and dynamic-resolution modes that a particular Iris
+firmware may not implement. The raw JSON and log are the review artifacts.
+`v4l2-compliance` is strict except for the known stateful mem2mem control
+classification; set
 `IRIS_ALLOW_KNOWN_COMPLIANCE_LIMIT=0` to make that result fail the suite.
 
 ## Open-source test corpora

@@ -306,3 +306,46 @@ This run adds the generic orchestration script and documents the distinction
 between codec correctness, V4L2 contract checks, and firmware capability
 boundaries. It does not change the production driver based on external-tool
 diagnostics.
+
+## Codex follow-up (2026-08-30, `codex/claude-followup`, `.139`)
+
+The latest Claude route was continued on the durable `.139` lab. Local
+`bash test/run-static-checks.sh` and `ninja -C build-local` passed. The remote
+deployment performed the content sync, clean rebuild and `ldd -r` gate with no
+undefined symbols; the resulting driver SHA-256 was
+`f8a8e684f6ddb072bc19b31f9bc3c33e3145b2bcc85ecede45ff560919a64ee3`.
+
+The positive 48-frame VA matrix was then repeated from the deployed checkout:
+H.264, VP9 and HEVC each produced 48/48 frames with exact software framemd5,
+strict EOS (`48 OUTPUT`, `49 CAPTURE`, one terminal `LAST`) and zero timeout or
+timestamp-miss diagnostics. Native H.264/VP9/HEVC/AV1 GStreamer baselines all
+reached EOS; AV1 VA remains intentionally disabled by its tile-payload versus
+OBU contract.
+
+The driver-path Fluster probes used `FFmpeg-*-VAAPI`, unlike the firmware-only
+`GStreamer-*-V4L2` table above. Results were deliberately kept as diagnostics:
+
+| Probe | Result |
+| --- | --- |
+| H.264 `BA1_FT_C`, `BA1_Sony_D` | `1/2` passed; `BA1_Sony_D` remains a reproducible content mismatch. |
+| HEVC `DBLK_G_VIXS_2`, `RAP_B_Bossen_2`, `SAO_G_Canon_3` | `0/3` passed; all returned content mismatches. |
+| VP9 two basic vectors plus one resize vector | `2/3` passed; resize returned an accelerator error. |
+| AV1 Chromium 8-bit, three vectors, opt-in translator | `0/3` passed; the experimental VA path returned decoder errors. |
+
+The stock Fluster FFmpeg wrapper uses `-hwaccel vaapi` followed by a software
+format filter and does not request an explicit VAAPI output pool. It is useful
+for exposing timeout and surface-lifetime boundaries, but `iris-matrix.sh` is
+the authoritative VA pixel oracle. A full 135-vector H.264 driver-path run was
+started with a 5-second per-vector bound and safely stopped after repeated
+cases still took roughly 30 seconds to terminate; its partial output is not
+claimed as a suite result.
+
+Two bounded stress checks explain the remaining H.264 signal. For
+`BA1_Sony_D`, one-, two- and three-frame keyframe-aligned streams were
+bit-exact, while the complete 17-frame stream produced 17 frames with
+non-deterministic duplicate/out-of-order hashes. Increasing FFmpeg's surface
+pool and toggling `V4L2_VA_COPY_SURFACES` did not remove it. `AUD_MW_E` returned
+100 frames in 9 seconds with 63 bounded sync timeouts and 10 startup
+backpressure records, but its frame hashes still differed from software. These
+are open surface/firmware interaction diagnostics, not grounds for another
+unverified production patch.

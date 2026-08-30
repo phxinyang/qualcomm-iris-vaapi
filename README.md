@@ -10,6 +10,9 @@ meson setup build
 meson compile -Cbuild
 ```
 
+For the clean target rebuild, symbol gate, and durable tablet lab workflow,
+see [`docs/build-and-deploy.md`](docs/build-and-deploy.md).
+
 ## Usage
 Applications using the backend can be launched by adding the build directory to the libVA driver path, and, optionally, setting the driver name to load:
 ```
