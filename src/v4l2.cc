@@ -25,6 +25,8 @@
 
 #include "v4l2.h"
 
+#include "trace.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cerrno>
@@ -256,7 +258,7 @@ void V4L2M2MDevice::Buffer::queue(int request_fd, timeval* timestamp, unsigned s
     if (timestamp != NULL)
         buffer.timestamp = *timestamp;
 
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "v4l2 q type=%u index=%u size=%u planes=%u len=%u field=%u\\n", type_, index_, size,
             buffer.length, buffer.m.planes ? buffer.m.planes[0].length : buffer.length, buffer.field);
 
@@ -520,7 +522,7 @@ void V4L2M2MDevice::subscribe_source_change()
 void V4L2M2MDevice::decoder_stop()
 {
     v4l2_decoder_cmd command = { .cmd = V4L2_DEC_CMD_STOP };
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "v4l2 decoder STOP\n");
     errno_wrapper(ioctl, video_fd, VIDIOC_DECODER_CMD, &command);
 }
@@ -528,7 +530,7 @@ void V4L2M2MDevice::decoder_stop()
 void V4L2M2MDevice::decoder_start()
 {
     v4l2_decoder_cmd command = { .cmd = V4L2_DEC_CMD_START };
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "v4l2 decoder START\n");
     errno_wrapper(ioctl, video_fd, VIDIOC_DECODER_CMD, &command);
 }
@@ -540,14 +542,14 @@ bool V4L2M2MDevice::wait_for_source_change(int timeout_ms)
         .events = POLLPRI,
     };
     const int result = poll(&pollfd, 1, timeout_ms);
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "v4l2 source poll timeout=%d result=%d revents=0x%x\n", timeout_ms, result, pollfd.revents);
     if (result <= 0 || !(pollfd.revents & POLLPRI))
         return false;
 
     v4l2_event event = {};
     while (ioctl(video_fd, VIDIOC_DQEVENT, &event) == 0) {
-        if (std::getenv("V4L2_VA_TRACE"))
+        if (trace_enabled())
             std::fprintf(stderr, "v4l2 event type=%u changes=0x%x\n", event.type, event.u.src_change.changes);
         if (event.type == V4L2_EVENT_SOURCE_CHANGE
             && (event.u.src_change.changes & V4L2_EVENT_SRC_CH_RESOLUTION)) {
@@ -580,7 +582,7 @@ std::optional<unsigned> V4L2M2MDevice::dequeue_ready(v4l2_buf_type type, int tim
             .events = static_cast<short>(V4L2_TYPE_IS_CAPTURE(type) ? (POLLIN | POLLPRI) : POLLOUT),
         };
         const int result = poll(&pollfd, 1, wait_ms);
-        if (std::getenv("V4L2_VA_TRACE") && result > 0)
+        if (trace_enabled() && result > 0)
             std::fprintf(stderr, "v4l2 poll type=%u timeout=%d result=%d revents=0x%x\n", type, wait_ms, result,
                 pollfd.revents);
         if (result < 0) {
@@ -601,19 +603,19 @@ std::optional<unsigned> V4L2M2MDevice::dequeue_ready(v4l2_buf_type type, int tim
             last_dequeued_flags_ = buffer.flags;
             last_dequeued_timestamp_ = buffer.timestamp;
             last_dequeued_was_last = (buffer.flags & V4L2_BUF_FLAG_LAST) != 0;
-            if (last_dequeued_error_ && std::getenv("V4L2_VA_TRACE"))
+            if (last_dequeued_error_ && trace_enabled())
                 std::fprintf(stderr, "v4l2 dq ERROR type=%u index=%u flags=0x%x last=%d ts=%lld.%06ld seq=%u\n", type,
                     buffer.index, buffer.flags, last_dequeued_was_last,
                     static_cast<long long>(buffer.timestamp.tv_sec), static_cast<long>(buffer.timestamp.tv_usec),
                     buffer.sequence);
-            if (std::getenv("V4L2_VA_TRACE"))
+            if (trace_enabled())
                 std::fprintf(stderr, "v4l2 dq type=%u index=%u flags=0x%x last=%d ts=%lld.%06ld seq=%u\n", type,
                     buffer.index, buffer.flags, last_dequeued_was_last,
                     static_cast<long long>(buffer.timestamp.tv_sec), static_cast<long>(buffer.timestamp.tv_usec),
                     buffer.sequence);
             return buffer.index;
         }
-        if (std::getenv("V4L2_VA_TRACE") && errno != EAGAIN)
+        if (trace_enabled() && errno != EAGAIN)
             std::fprintf(stderr, "v4l2 dq type=%u errno=%d\n", type, errno);
         if (errno == EAGAIN) {
             if (timeout_ms <= 0)

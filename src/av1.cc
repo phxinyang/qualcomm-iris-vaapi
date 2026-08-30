@@ -2,6 +2,8 @@
 
 #include "av1.h"
 
+#include "trace.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -33,7 +35,7 @@ VAStatus AV1Context::store_buffer(const Buffer& buffer) const
     switch (buffer.type) {
     case VAPictureParameterBufferType:
         surface.params.av1.picture = reinterpret_cast<VADecPictureParameterBufferAV1*>(buffer.data.get());
-        if (std::getenv("V4L2_VA_TRACE")) {
+        if (trace_enabled()) {
             const auto* picture = surface.params.av1.picture;
             std::fprintf(stderr,
                 "av1 params profile=%u bitdepth=%u size=%ux%u frame_type=%u tiles=%ux%u current=%u\n",
@@ -45,7 +47,7 @@ VAStatus AV1Context::store_buffer(const Buffer& buffer) const
 
     case VASliceParameterBufferType:
         surface.params.av1.slice = reinterpret_cast<VASliceParameterBufferAV1*>(buffer.data.get());
-        if (std::getenv("V4L2_VA_TRACE")) {
+        if (trace_enabled()) {
             const auto* slice = surface.params.av1.slice;
             std::fprintf(stderr, "av1 tile size=%u off=%u row=%u col=%u flag=0x%x\n",
                 slice->slice_data_size, slice->slice_data_offset, slice->tile_row,
@@ -62,11 +64,11 @@ VAStatus AV1Context::store_buffer(const Buffer& buffer) const
             return VA_STATUS_ERROR_NOT_ENOUGH_BUFFER;
         const auto* source = buffer.data.get();
         if (surface.source_size_used == 0 && !has_obu_header(source, bytes)) {
-            if (std::getenv("V4L2_VA_TRACE"))
+            if (trace_enabled())
                 std::fprintf(stderr, "av1 tile payload has no OBU header; stateful Iris needs a temporal unit\n");
             return VA_STATUS_ERROR_INVALID_PARAMETER;
         }
-        if (std::getenv("V4L2_VA_TRACE")) {
+        if (trace_enabled()) {
             std::fprintf(stderr, "av1 data bytes=%zu first=", bytes);
             for (size_t i = 0; i < std::min<size_t>(8, bytes); ++i)
                 std::fprintf(stderr, "%02x", source[i]);

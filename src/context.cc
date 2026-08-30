@@ -27,6 +27,8 @@
 
 #include "context.h"
 
+#include "trace.h"
+
 #include <cassert>
 #include <cerrno>
 #include <algorithm>
@@ -120,7 +122,7 @@ Context* Context::create(DriverData* driver_data, VAProfile profile, int picture
         auto create_session = [&]() -> V4L2M2MDevice& {
             driver_data->devices.emplace_back(device.clone_for_context());
             auto& session = driver_data->devices.back();
-            if (std::getenv("V4L2_VA_TRACE"))
+            if (trace_enabled())
                 std::fprintf(stderr, "va context session probe_fd=%d session_fd=%d\n", probe_fd, session.video_fd);
             return session;
         };
@@ -193,7 +195,7 @@ Context::~Context()
 
 void Context::initialize(std::span<VASurfaceID> surface_ids)
 {
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "va context initialize this=%p surfaces=%zu initialized=%d\n", this, surface_ids.size(),
             queues_initialized);
     if (queues_initialized)
@@ -270,7 +272,7 @@ void Context::initialize(std::span<VASurfaceID> surface_ids)
         capture_initialized = true;
     }
     queues_initialized = true;
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "va context initialized this=%p capture=%u output=%u\n", this,
             device.buffer_count(device.capture_buf_type), device.buffer_count(device.output_buf_type));
 }
@@ -314,7 +316,7 @@ bool Context::start_capture()
                 surface.destination_buffer_queued = true;
             }
         }
-        if (std::getenv("V4L2_VA_TRACE"))
+        if (trace_enabled())
             std::fprintf(stderr, "stateful scheduled capture buffers=%zu\n", scheduled.size());
     } else {
         for (unsigned i = 0; i < device.buffer_count(device.capture_buf_type); i++)
@@ -412,7 +414,7 @@ VAStatus Context::flush_stateful_batch()
             const VASurfaceID surface_id = stateful_pending[i];
             auto& surface = driver_data->surfaces.at(surface_id);
             if (stateful_sequence_starts.erase(surface_id) != 0) {
-                if (std::getenv("V4L2_VA_TRACE"))
+                if (trace_enabled())
                     std::fprintf(stderr, "stateful reset before IDR surface=%u\n", surface_id);
                 reset_stateful_timeout_recovery();
                 if (!reset_stateful_decoder())
@@ -429,7 +431,7 @@ VAStatus Context::flush_stateful_batch()
             batch_surfaces.push_back(surface_id);
         }
         auto batch_timestamp = driver_data->surfaces.at(batch_surfaces.front()).timestamp;
-        if (std::getenv("V4L2_VA_TRACE"))
+        if (trace_enabled())
             std::fprintf(stderr, "stateful flush batch=%u surfaces=%zu bytes=%zu ts=%lld.%06ld pending=%zu\n", batch_index,
                 batch_surfaces.size(), aggregate_size, static_cast<long long>(batch_timestamp.tv_sec),
                 static_cast<long>(batch_timestamp.tv_usec), stateful_pending.size());
@@ -473,7 +475,7 @@ VAStatus Context::flush_stateful_batch()
         // the end-of-stream idle watchdog, or explicit context teardown.
         note_stateful_submission();
     } catch (const std::system_error& error) {
-        if (std::getenv("V4L2_VA_TRACE"))
+        if (trace_enabled())
             std::fprintf(stderr, "stateful flush failed: %s\n", error.what());
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
@@ -511,7 +513,7 @@ void Context::service_stateful_queues()
                 capture_requeued = true;
             } else if (stateful_capture_scheduled()) {
                 const auto expected = surface_buffer_indices.at(*completed);
-                if (std::getenv("V4L2_VA_TRACE") && expected != *capture_index)
+                if (trace_enabled() && expected != *capture_index)
                     std::fprintf(stderr, "stateful capture mismatch surface=%u expected=%u got=%u\n", *completed,
                         expected, *capture_index);
                 // If scheduling selected another slot, return that slot and
@@ -580,7 +582,7 @@ void Context::discard_stateful_error_frame()
             remove_stateful_batch_order(index);
         } else
             stateful_capture_done.insert(index);
-        if (std::getenv("V4L2_VA_TRACE"))
+        if (trace_enabled())
             std::fprintf(stderr, "stateful discard error batch=%u remaining=%zu\n", index, stateful_batches.size());
         return;
     }
@@ -688,7 +690,7 @@ bool Context::reset_stateful_decoder()
         stateful_draining = true;
         stateful_last_marker_seen = false;
     } catch (const std::system_error& error) {
-        if (std::getenv("V4L2_VA_TRACE"))
+        if (trace_enabled())
             std::fprintf(stderr, "stateful reset stop failed: %s\n", error.what());
         return false;
     }
@@ -748,13 +750,13 @@ bool Context::reset_stateful_decoder()
         }
         mark_source_buffer_dequeued(*output_index);
     }
-    if (std::getenv("V4L2_VA_TRACE") && !stateful_batches.empty())
+    if (trace_enabled() && !stateful_batches.empty())
         std::fprintf(stderr, "stateful reset output drain incomplete remaining=%zu\n", stateful_batches.size());
     if (!saw_last) {
         // V4L2 forbids DECODER_CMD_START until the terminal CAPTURE marker is
         // dequeued. Leave the decoder stopped so a caller cannot accidentally
         // restart with stale OUTPUT buffers after a firmware timeout.
-        if (std::getenv("V4L2_VA_TRACE"))
+        if (trace_enabled())
             std::fprintf(stderr, "stateful reset incomplete last=0; decoder remains stopped\n");
         return false;
     }
@@ -781,10 +783,10 @@ bool Context::reset_stateful_decoder()
     // CAPTURE queue internally, so restart both queues and keep the userspace
     // streaming flags in sync with the kernel.
     if (restart_queues) {
-        if (std::getenv("V4L2_VA_TRACE"))
+        if (trace_enabled())
             std::fprintf(stderr, "stateful reset streamoff capture\n");
         device.stream_capture(false);
-        if (std::getenv("V4L2_VA_TRACE"))
+        if (trace_enabled())
             std::fprintf(stderr, "stateful reset streamoff output\n");
         device.stream_output(false);
         // STREAMOFF returns every CAPTURE buffer to DEQUEUED. Leave the pool
@@ -807,7 +809,7 @@ bool Context::reset_stateful_decoder()
         stateful_queue_restart_pending = false;
     }
     stateful_draining = false;
-    if (stateful_last_marker_seen && std::getenv("V4L2_VA_TRACE"))
+    if (stateful_last_marker_seen && trace_enabled())
         std::fprintf(stderr, "stateful drain complete last=1 batches=%zu\n", stateful_batches.size());
     stateful_submitted_count = 0;
     stateful_completed_count = 0;
@@ -824,7 +826,7 @@ bool Context::drain_stateful_decoder()
     // issuing another STOP during context destruction only creates a second
     // LAST event and confuses strict EOS clients.
     if (stateful_last_marker_seen && stateful_batches.empty() && stateful_pending.empty()) {
-        if (std::getenv("V4L2_VA_TRACE"))
+        if (trace_enabled())
             std::fprintf(stderr, "stateful drain already complete last=1 batches=0\n");
         return true;
     }
@@ -847,7 +849,7 @@ bool Context::drain_stateful_decoder()
         }
     } catch (const std::system_error& error) {
         stateful_draining = false;
-        if (std::getenv("V4L2_VA_TRACE"))
+        if (trace_enabled())
             std::fprintf(stderr, "stateful drain stop failed: %s\n", error.what());
         return false;
     }
@@ -901,11 +903,11 @@ bool Context::drain_stateful_decoder()
                 break;
             }
         }
-        if (std::getenv("V4L2_VA_TRACE") && !stateful_batches.empty())
+        if (trace_enabled() && !stateful_batches.empty())
             std::fprintf(stderr, "stateful drain output incomplete remaining=%zu\n", stateful_batches.size());
     }
 
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "stateful drain complete last=%d batches=%zu\n", saw_last, stateful_batches.size());
     if (!saw_last)
         return false;
@@ -1077,7 +1079,7 @@ void Context::stateful_watchdog_loop()
         }
 
         const bool consumed = stateful_input_consumed();
-        if (std::getenv("V4L2_VA_TRACE"))
+        if (trace_enabled())
             std::fprintf(stderr,
                 "stateful watchdog idle pending=%zu batches=%zu output_dequeued=%zu capture_done=%zu consumed=%d\n",
                 stateful_pending.size(), stateful_batches.size(), stateful_output_dequeued.size(),
@@ -1088,7 +1090,7 @@ void Context::stateful_watchdog_loop()
         const bool drained = drain_stateful_decoder();
         if (drained)
             resume_after_drain();
-        else if (std::getenv("V4L2_VA_TRACE"))
+        else if (trace_enabled())
             std::fprintf(stderr, "stateful watchdog drain incomplete; decoder remains stopped\n");
         std::lock_guard<std::mutex> lock(stateful_watchdog_mutex_);
         stateful_watchdog_handled_ = true;
@@ -1100,7 +1102,7 @@ bool Context::bind_surface(VASurfaceID surface_id){
         return false;
     if (surface_buffer_indices.contains(surface_id)) {
         if (!uses_stateful_streaming() || driver_data->surfaces.at(surface_id).destination_buffer) {
-            if (std::getenv("V4L2_VA_TRACE")) {
+            if (trace_enabled()) {
                 const auto& surface = driver_data->surfaces.at(surface_id);
                 std::fprintf(stderr, "va bind existing surface=%u index=%u dest=%u queued=%d\n", surface_id,
                     surface_buffer_indices.at(surface_id), surface.destination_buffer_index,
@@ -1150,7 +1152,7 @@ bool Context::bind_surface(VASurfaceID surface_id){
                 }
             }
         }
-        if (std::getenv("V4L2_VA_TRACE"))
+        if (trace_enabled())
             std::fprintf(stderr, "va bind stateful surface=%u index=%u dest=%u queued=%d\n", surface_id, index,
                 surface.destination_buffer_index, surface.destination_buffer_queued);
         return true;
@@ -1181,7 +1183,7 @@ bool Context::bind_surface(VASurfaceID surface_id){
     surface.source_buffer_index = index;
     surface.source_buffer_queued = false;
     surface_buffer_indices.emplace(surface_id, index);
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "va bind stateless surface=%u index=%u dest=%u\n", surface_id, index,
             surface.destination_buffer_index);
     return true;
@@ -1273,7 +1275,7 @@ std::optional<VASurfaceID> Context::surface_for_timestamp(timeval timestamp, uin
         if (stateful_completed_count == 0 && !stateful_batch_timestamps.empty()
             && exact_key < stateful_batch_timestamps.begin()->first)
             return std::nullopt;
-        if (std::getenv("V4L2_VA_TRACE"))
+        if (trace_enabled())
             std::fprintf(stderr, "stateful timestamp miss ts=%lld.%06ld\n",
                 static_cast<long long>(timestamp.tv_sec), static_cast<long>(timestamp.tv_usec));
         return std::nullopt;
@@ -1365,7 +1367,7 @@ VAStatus createContext(VADriverContextP va_context, VAConfigID config_id, int pi
     const auto& config = driver_data->configs.at(config_id);
 
     auto surfaces = std::span(surface_ids, surfaces_count);
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "va create_context tid=%ld config=%u size=%dx%d surfaces=%d\n",
             static_cast<long>(syscall(SYS_gettid)), config_id, picture_width, picture_height, surfaces_count);
     for (auto&& surface : surfaces) {
@@ -1397,7 +1399,7 @@ VAStatus createContext(VADriverContextP va_context, VAConfigID config_id, int pi
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
 
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "va create_context done id=%u ptr=%p\n", *context_id,
             driver_data->contexts.at(*context_id).get());
 
@@ -1418,7 +1420,7 @@ VAStatus destroyContext(VADriverContextP va_context, VAContextID context_id)
         // the VA context. Serialize destruction with syncSurface()/beginPicture()
         // so the stateful drain cannot race a caller holding the Context pointer.
         std::lock_guard<std::recursive_mutex> context_guard(context->synchronization_mutex());
-        if (std::getenv("V4L2_VA_TRACE"))
+        if (trace_enabled())
             std::fprintf(stderr, "va destroy_context id=%u ptr=%p\n", context_id,
                 context.get());
         if (context->uses_stateful_streaming())

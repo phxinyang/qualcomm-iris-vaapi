@@ -27,6 +27,8 @@
 
 #include "surface.h"
 
+#include "trace.h"
+
 #include <algorithm>
 #include <cassert>
 #include <chrono>
@@ -98,7 +100,7 @@ bool allocate_surface_dma_buf(Surface& surface, size_t size)
     surface.export_buffer_mapping = mapping;
     surface.export_buffer_size = size;
     std::memset(mapping, 0, size);
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "va stable surface dma-buf fd=%d size=%zu\n", surface.export_buffer_fd, size);
     return true;
 }
@@ -178,7 +180,7 @@ bool copy_surfaces_enabled()
 void copy_surface_frame(Surface& surface, const V4L2M2MDevice::Buffer& capture)
 {
     if (!copy_surfaces_enabled()) {
-        if (std::getenv("V4L2_VA_TRACE"))
+        if (trace_enabled())
             std::fprintf(stderr, "copy_surface_frame skip fd=%d mapping=%p\n",
                 surface.export_buffer_fd, surface.export_buffer_mapping);
         return;
@@ -217,7 +219,7 @@ void copy_surface_frame(Surface& surface, const V4L2M2MDevice::Buffer& capture)
             src.data() + src_offset, size);
     }
     dma_buf_sync_cpu(surface.export_buffer_fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW);
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "copy_surface_frame copied planes=%zu to mapping=%p\n",
             surface.logical_destination_layout.size(), surface.export_buffer_mapping);
 }
@@ -230,7 +232,7 @@ VAStatus createSurfaces2(VADriverContextP context, unsigned int format, unsigned
 
     auto driver_data = static_cast<DriverData*>(context->pDriverData);
 
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "va create_surfaces tid=%ld format=0x%x size=%ux%u count=%u\n", current_tid(), format,
             width, height, surfaces_count);
 
@@ -267,7 +269,7 @@ VAStatus createSurfaces2(VADriverContextP context, unsigned int format, unsigned
         }
     }
 
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "va create_surfaces done first=%u owner=%u\n",
             surfaces_count ? surfaces_ids[0] : VA_INVALID_SURFACE,
             surfaces_count && driver_data->surfaces.contains(surfaces_ids[0])
@@ -339,7 +341,7 @@ VAStatus destroySurfaces(VADriverContextP context, VASurfaceID* surfaces_ids, in
     auto driver_data = static_cast<DriverData*>(context->pDriverData);
 
     std::lock_guard<std::recursive_mutex> guard(driver_data->mutex);
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "va destroy_surfaces count=%d first=%u\n", surfaces_count,
             surfaces_count ? surfaces_ids[0] : VA_INVALID_SURFACE);
 
@@ -361,7 +363,7 @@ VAStatus destroySurfaces(VADriverContextP context, VASurfaceID* surfaces_ids, in
         if (surface.owner_context != VA_INVALID_ID) {
             auto owner = driver_data->contexts.find(surface.owner_context);
             if (owner != driver_data->contexts.end() && owner->second->uses_stateful_streaming()) {
-                if (std::getenv("V4L2_VA_TRACE"))
+                if (trace_enabled())
                     std::fprintf(stderr, "destroy_surfaces skip stateful sync surface=%u owner=%u\n",
                         surfaces_ids[i], surface.owner_context);
                 std::lock_guard<std::recursive_mutex> context_guard(owner->second->synchronization_mutex());
@@ -373,7 +375,7 @@ VAStatus destroySurfaces(VADriverContextP context, VASurfaceID* surfaces_ids, in
             const auto* source_device = &surface.source_buffer->get().owner();
             for (auto& retired : driver_data->retired_contexts) {
                 if (&retired->device == source_device && retired->uses_stateful_streaming()) {
-                    if (std::getenv("V4L2_VA_TRACE"))
+                    if (trace_enabled())
                         std::fprintf(stderr, "destroy_surfaces skip stateful sync surface=%u retired=1\n",
                             surfaces_ids[i]);
                     std::lock_guard<std::recursive_mutex> context_guard(retired->synchronization_mutex());
@@ -419,10 +421,10 @@ VAStatus syncSurface(VADriverContextP context, VASurfaceID surface_id)
     }
     auto& surface = driver_data->surfaces.at(surface_id);
 
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "va sync_surface id=%u status=%u\n", surface_id, surface.status);
 
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         error_log(context, "trace sync surface=%u status=%u\\n", surface_id, surface.status);
 
     if (surface.status != VASurfaceRendering) {
@@ -509,7 +511,7 @@ VAStatus syncSurface(VADriverContextP context, VASurfaceID surface_id)
                 } else if (stateful_capture_scheduled()) {
                     const auto expected = decode_context->surface_for_buffer(device.capture_buf_type,
                         *destination_index);
-                    if (expected && *expected != *completed && std::getenv("V4L2_VA_TRACE"))
+                    if (expected && *expected != *completed && trace_enabled())
                         error_log(context, "trace scheduled capture mismatch index=%u mapped=%u timestamp=%u\\n",
                             *destination_index, *expected, *completed);
                     if (!expected || *expected != *completed) {
@@ -528,10 +530,10 @@ VAStatus syncSurface(VADriverContextP context, VASurfaceID surface_id)
                 else if (!stateful_capture_scheduled()
                     || decode_context->surface_for_buffer(device.capture_buf_type, *destination_index) == completed)
                     completed_surface.destination_buffer_queued = device.last_dequeued_error();
-                if (std::getenv("V4L2_VA_TRACE"))
+                if (trace_enabled())
                     error_log(context, "trace sync dq capture=%u surface=%u target=%u\n", *destination_index,
                         *completed, surface_id);
-            } else if (std::getenv("V4L2_VA_TRACE")) {
+            } else if (trace_enabled()) {
                 error_log(context, "trace sync dq capture=%u no-surface ts=%lld.%06ld target=%u\n", *destination_index,
                     static_cast<long long>(device.last_dequeued_timestamp().tv_sec),
                     static_cast<long>(device.last_dequeued_timestamp().tv_usec), surface_id);
@@ -672,7 +674,7 @@ VAStatus querySurfaceStatus(VADriverContextP context, VASurfaceID surface_id, VA
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
     auto& surface = driver_data->surfaces.at(surface_id);
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "va query_status id=%u status=%u dest=%d\n", surface_id, surface.status,
             surface.destination_buffer ? 1 : 0);
     if (surface.status == VASurfaceRendering && surface.destination_buffer) {
@@ -715,7 +717,7 @@ VAStatus querySurfaceStatus(VADriverContextP context, VASurfaceID surface_id, VA
                             || decode_context->surface_for_buffer(device.capture_buf_type, *capture_index) == completed)
                             completed_surface.destination_buffer_queued = false;
                         completed_surface.source_size_used = 0;
-                        if (std::getenv("V4L2_VA_TRACE"))
+                        if (trace_enabled())
                             error_log(context, "trace query dq capture=%u surface=%u\n", *capture_index, *completed);
                     } else if (!capture_requeued) {
                         device.buffer(device.capture_buf_type, *capture_index).queue();
@@ -772,7 +774,7 @@ VAStatus exportSurfaceHandle(
 
     std::lock_guard<std::recursive_mutex> driver_guard(driver_data->mutex);
 
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "va export_surface id=%u mem=0x%x flags=0x%x\n", surface_id, mem_type, flags);
 
     if (mem_type != VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2) {
@@ -824,7 +826,7 @@ VAStatus exportSurfaceHandle(
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
 
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "va export_surface binding id=%u capture_index=%u\n", surface_id,
             surface.destination_buffer_index);
 
@@ -894,7 +896,7 @@ VAStatus exportSurfaceHandle(
         }
     }
 
-    if (std::getenv("V4L2_VA_TRACE")) {
+    if (trace_enabled()) {
         std::fprintf(stderr, "va export_surface done id=%u size=%ux%u fourcc=0x%x objects=%u layers=%u\n", surface_id,
             surface_descriptor->width, surface_descriptor->height, surface_descriptor->fourcc,
             surface_descriptor->num_objects, surface_descriptor->num_layers);

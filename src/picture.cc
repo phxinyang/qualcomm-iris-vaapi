@@ -27,6 +27,8 @@
 
 #include "picture.h"
 
+#include "trace.h"
+
 #include <cassert>
 #include <cstring>
 #include <functional>
@@ -76,15 +78,15 @@ VAStatus beginPicture(VADriverContextP va_context, VAContextID context_id, VASur
     if (surface.owner_context != VA_INVALID_ID && surface.owner_context != context_id
         && owner_context != driver_data->contexts.end()
         && owner_context->second->uses_stateful_streaming() && context.uses_stateful_streaming()) {
-        if (std::getenv("V4L2_VA_TRACE"))
+        if (trace_enabled())
             std::fprintf(stderr, "va surface context mismatch surface=%u owner=%u caller=%u\n", surface_id,
                 surface.owner_context, context_id);
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "va begin_picture tid=%ld ctx=%u surface=%u status=%u initialized=%d\n",
             static_cast<long>(syscall(SYS_gettid)), context_id, surface_id, surface.status, context.initialized());
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         error_log(va_context, "trace begin surface=%u status=%u initialized=%d\\n", surface_id, surface.status,
             context.initialized());
 
@@ -191,14 +193,14 @@ VAStatus endPicture(VADriverContextP va_context, VAContextID context_id)
     if (!driver_data->surfaces.contains(render_surface_id))
         return VA_STATUS_ERROR_INVALID_SURFACE;
     auto& surface = driver_data->surfaces.at(render_surface_id);
-    if (std::getenv("V4L2_VA_TRACE")) {
+    if (trace_enabled()) {
         struct timespec wall = {};
         clock_gettime(CLOCK_REALTIME, &wall);
         std::fprintf(stderr, "va end_picture ctx=%u surface=%u bytes=%u stateful=%d wall=%lld%03ld\n", context_id,
             render_surface_id, surface.source_size_used, context.uses_stateful_streaming(),
             static_cast<long long>(wall.tv_sec), wall.tv_nsec / 1000000);
     }
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         error_log(va_context, "trace end surface=%u bytes=%u request=%d\\n", render_surface_id,
             surface.source_size_used, surface.request_fd);
     if (std::getenv("V4L2_VA_DUMP") && surface.source_size_used > 0) {

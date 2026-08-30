@@ -27,6 +27,8 @@
 
 #include "driver.h"
 
+#include "trace.h"
+
 #include <cassert>
 #include <cstdarg>
 #include <cstdio>
@@ -89,7 +91,7 @@ void reap_retired_contexts(DriverData* driver_data)
             continue;
         }
 
-        if (std::getenv("V4L2_VA_TRACE"))
+        if (trace_enabled())
             std::fprintf(stderr, "va reap retired context ptr=%p fd=%d\n", candidate.get(), candidate->device.video_fd);
         context = driver_data->retired_contexts.erase(context);
     }

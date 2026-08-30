@@ -28,6 +28,8 @@
 
 #include "h264.h"
 
+#include "trace.h"
+
 #include "bitwriter.h"
 #include "linux/v4l2-controls.h"
 
@@ -584,7 +586,7 @@ bool H264Context::stateful_sequence_start(VASurfaceID surface_id)
         }
         i = start;
     }
-    if (std::getenv("V4L2_VA_TRACE")) {
+    if (trace_enabled()) {
         std::fprintf(stderr, "stateful nals surface=%u bytes=%u:", surface_id, surface.source_size_used);
         for (size_t i = 0; i + 3 < surface.source_size_used;) {
             size_t start = i;
@@ -610,13 +612,13 @@ bool H264Context::stateful_sequence_start(VASurfaceID surface_id)
     // frame_num wrap does not reset POC, so it is not treated as a restart.
     const bool metadata_start = slice_type == 2 && frame_num == 0 && poc == 0;
     const bool restart = stateful_seen_frame && (idr || metadata_start);
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "stateful sequence probe surface=%u seen=%d last=%u current=%u poc=%d type=%u idr=%d restart=%d refs=%u\n",
             surface_id, stateful_seen_frame, stateful_last_frame_num, frame_num,
             surface.params.h264.picture->CurrPic.TopFieldOrderCnt,
             slice_type, idr, restart,
             surface.params.h264.picture->num_ref_frames);
-    if (std::getenv("V4L2_VA_TRACE")) {
+    if (trace_enabled()) {
         std::fprintf(stderr, "stateful refpics surface=%u:", surface_id);
         for (const auto& ref : surface.params.h264.picture->ReferenceFrames) {
             if (ref.flags & VA_PICTURE_H264_INVALID)
@@ -642,7 +644,7 @@ bool H264Context::prepend_parameter_sets(Surface& surface) const
 
     const auto sps = make_h264_sps(*this, surface, *surface.params.h264.picture);
     const auto pps = make_h264_pps(*this, *surface.params.h264.picture, *surface.params.h264.slice);
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "iris va params w=%u h=%u chroma=%u lf=%u poc=%u poclsb=%u refs=%u frameonly=%u crop=%ux%u sps=%zu pps=%zu\\n",
             surface.params.h264.picture->picture_width_in_mbs_minus1,
             surface.params.h264.picture->picture_height_in_mbs_minus1,
@@ -653,7 +655,7 @@ bool H264Context::prepend_parameter_sets(Surface& surface) const
             surface.params.h264.picture->num_ref_frames,
             surface.params.h264.picture->seq_fields.bits.frame_mbs_only_flag,
             surface.width, surface.height, sps.size(), pps.size());
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "iris va slice l0=%u l1=%u type=%u qp=%d chroma=%d weighted=%u/%u deblock=%u\\n",
             surface.params.h264.slice->num_ref_idx_l0_active_minus1,
             surface.params.h264.slice->num_ref_idx_l1_active_minus1,
@@ -663,7 +665,7 @@ bool H264Context::prepend_parameter_sets(Surface& surface) const
             surface.params.h264.picture->pic_fields.bits.weighted_pred_flag,
             surface.params.h264.picture->pic_fields.bits.weighted_bipred_idc,
             surface.params.h264.picture->pic_fields.bits.deblocking_filter_control_present_flag);
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "iris va frame frame_num=%u poc=%d/%d ref=%u\\n",
             surface.params.h264.picture->frame_num,
             surface.params.h264.picture->CurrPic.TopFieldOrderCnt,
@@ -686,14 +688,14 @@ VAStatus H264Context::store_buffer(const Buffer& buffer) const
 {
     auto& surface = driver_data->surfaces.at(current_surface());
 
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "h264 store type=%u size=%u count=%u before=%u cap=%zu stateful=%d\\n", buffer.type,
             buffer.size, buffer.count, surface.source_size_used, surface.stateful_bitstream.size(), stateful);
 
     switch (buffer.type) {
     case VASliceDataBufferType: {
         if (stateful && !prepend_parameter_sets(surface)) {
-            if (std::getenv("V4L2_VA_TRACE"))
+            if (trace_enabled())
                 std::fprintf(stderr, "h264 store prepend failed\\n");
             return VA_STATUS_ERROR_NOT_ENOUGH_BUFFER;
         }
@@ -709,7 +711,7 @@ VAStatus H264Context::store_buffer(const Buffer& buffer) const
         auto source_data = stateful ? std::span<uint8_t>(surface.stateful_bitstream)
                                     : surface.source_buffer->get().mapping()[0];
         if (required > source_data.size()) {
-            if (std::getenv("V4L2_VA_TRACE"))
+            if (trace_enabled())
                 std::fprintf(stderr, "h264 store data overflow before=%u add=%u cap=%zu\\n", surface.source_size_used,
                     buffer.size * buffer.count, source_data.size());
             return VA_STATUS_ERROR_NOT_ENOUGH_BUFFER;

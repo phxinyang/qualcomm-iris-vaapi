@@ -2,6 +2,8 @@
 
 #include "hevc.h"
 
+#include "trace.h"
+
 #include "bitwriter.h"
 
 #include <algorithm>
@@ -257,7 +259,7 @@ bool HEVCContext::prepend_parameter_sets(Surface& surface) const
         offset += nal->size();
     }
     surface.source_size_used = offset;
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "hevc generated parameter sets vps=%zu sps=%zu pps=%zu total=%zu\n",
             vps.size(), sps.size(), pps.size(), required);
     return true;
@@ -269,7 +271,7 @@ VAStatus HEVCContext::store_buffer(const Buffer& buffer) const
     switch (buffer.type) {
     case VAPictureParameterBufferType:
         surface.params.hevc.picture = reinterpret_cast<VAPictureParameterBufferHEVC*>(buffer.data.get());
-        if (std::getenv("V4L2_VA_TRACE")) {
+        if (trace_enabled()) {
             const auto* picture = surface.params.hevc.picture;
             std::fprintf(stderr, "hevc params w=%u h=%u chroma=%u bitdepth=%u/%u poc=%u refs=%u reorder=%u\n",
                 picture->pic_width_in_luma_samples, picture->pic_height_in_luma_samples,
@@ -287,7 +289,7 @@ VAStatus HEVCContext::store_buffer(const Buffer& buffer) const
 
     case VASliceParameterBufferType:
         surface.params.hevc.slice = reinterpret_cast<VASliceParameterBufferHEVC*>(buffer.data.get());
-        if (std::getenv("V4L2_VA_TRACE")) {
+        if (trace_enabled()) {
             const auto* slice = surface.params.hevc.slice;
             std::fprintf(stderr, "hevc slice size=%u off=%u hdr=%u type=%u addr=%u last=%u\n",
                 slice->slice_data_size, slice->slice_data_offset,
@@ -301,7 +303,7 @@ VAStatus HEVCContext::store_buffer(const Buffer& buffer) const
         if (bytes == 0)
             return VA_STATUS_SUCCESS;
 
-        if (std::getenv("V4L2_VA_TRACE")) {
+        if (trace_enabled()) {
             std::fprintf(stderr, "hevc data bytes=%zu first=", bytes);
             for (size_t i = 0; i < std::min<size_t>(8, bytes); ++i)
                 std::fprintf(stderr, "%02x", buffer.data.get()[i]);

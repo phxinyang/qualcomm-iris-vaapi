@@ -27,6 +27,8 @@
 
 #include "image.h"
 
+#include "trace.h"
+
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
@@ -51,14 +53,14 @@ VAStatus copy_surface_to_image(DriverData* driver_data, const Surface& surface, 
     unsigned int i;
 
     if (!driver_data->buffers.contains(image->buf)) {
-        if (std::getenv("V4L2_VA_TRACE"))
+        if (trace_enabled())
             std::fprintf(stderr, "va image copy invalid buffer=%u surface=%p\n", image->buf, &surface);
         return VA_STATUS_ERROR_INVALID_BUFFER;
     }
     auto& buffer = driver_data->buffers.at(image->buf);
 
     if (image->num_planes != surface.logical_destination_layout.size()) {
-        if (std::getenv("V4L2_VA_TRACE"))
+        if (trace_enabled())
             std::fprintf(stderr, "va image layout mismatch image_planes=%u surface_planes=%zu image=%ux%u surface=%ux%u\n",
                 image->num_planes, surface.logical_destination_layout.size(), image->width, image->height,
                 surface.width, surface.height);
@@ -245,7 +247,7 @@ VAStatus getImage(VADriverContextP context, VASurfaceID surface_id, int x, int y
     }
     auto& image = driver_data->images.at(image_id);
 
-    if (std::getenv("V4L2_VA_TRACE"))
+    if (trace_enabled())
         std::fprintf(stderr, "va get_image surface=%u image=%u buf=%u status=%u\n", surface_id, image_id, image.buf,
             driver_data->surfaces.at(surface_id).status);
 
