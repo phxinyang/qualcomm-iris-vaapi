@@ -56,6 +56,9 @@ memcpy is removed while the exported fd and CPU mapping stay unchanged. The
 experiment is restricted to single-plane NV12 and automatically falls back to
 MMAP plus the stable copy if allocation, plane validation, or QBUF fails. It is
 disabled by default and is not required for Chrome or other clients.
+The current ownership contract is validated for no-B H.264 and VP9 streams;
+H.264 streams with B-frame reordering, plus HEVC/AV1, stay on the stable-copy
+path until a multi-slot DMA-BUF ownership protocol is validated.
 
 Surface size attributes are read from the selected V4L2 capture format with
 `VIDIOC_ENUM_FRAMESIZES`; the VA limits therefore follow each decoder's real
