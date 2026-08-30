@@ -32,9 +32,25 @@ for key in ("decoded_frames", "dropped_frames"):
     assert value is None or (isinstance(value, int) and value >= 0), key
 assert isinstance(doc.get("limitations"), list) and doc["limitations"]
 
+# A hardware pass is a release claim, so its provenance must be usable to
+# reproduce the run. Keep the schema permissive for unqualified exploratory
+# reports, but reject placeholders and abbreviated hashes when pass evidence is
+# requested.
+provenance = doc["target"]
+if doc["result"] == "pass" or expect_hardware:
+    assert re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", provenance["source_commit"]), \
+        "pass report requires a full source commit"
+    assert re.fullmatch(r"[0-9a-fA-F]{64}", provenance["driver_sha256"]), \
+        "pass report requires a driver SHA-256"
+    assert provenance["boot_id"] not in {"unknown", "paste boot id before and after playback"}, \
+        "pass report requires boot-id evidence"
+    assert provenance["resolved_iris_node"] not in {"unknown", "/dev/videoX"}, \
+        "pass report requires the resolved Iris node"
+
 hardware = (media["decoder_name"] == "VaapiVideoDecoder" and
             media["is_platform_video_decoder"] is True and
-            isinstance(media.get("decoded_frames"), int) and media["decoded_frames"] > 0)
+            isinstance(media.get("decoded_frames"), int) and media["decoded_frames"] > 0 and
+            isinstance(media.get("dropped_frames"), int) and media["dropped_frames"] >= 0)
 if doc["result"] == "pass":
     assert hardware, "pass report lacks VaapiVideoDecoder/platform/frame evidence"
 if expect_hardware:

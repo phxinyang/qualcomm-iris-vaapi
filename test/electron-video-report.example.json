@@ -8,7 +8,7 @@
     "application_version": "1.13.7",
     "electron_version": "43.3.0",
     "chrome_version": "150.0.7871.212",
-    "user_agent": "paste the renderer user agent here"
+    "user_agent": "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 Chrome/150.0.7871.212 Electron/43.3.0 Safari/537.36"
   },
   "display": { "server": "wayland", "ozone_platform": "wayland" },
   "launch": {
@@ -16,10 +16,10 @@
     "va_environment": "LIBVA_DRIVER_NAME=v4l2;LIBVA_V4L2_VIDEO_PATH=/dev/videoX"
   },
   "target": {
-    "resolved_iris_node": "/dev/videoX",
-    "boot_id": "paste boot id before and after playback",
-    "source_commit": "paste full source commit",
-    "driver_sha256": "paste 64-character artifact sha256"
+    "resolved_iris_node": "/dev/video17",
+    "boot_id": "e7a7e621-3b4d-40bb-862d-f18830351706",
+    "source_commit": "b49207cf8f2a7b50ed61dd810531d18273d94bc5",
+    "driver_sha256": "f879e5ea417c770ac7042d520625e9cadcec1ffd00b43ca6658cfb811d5763ef"
   },
   "media": {
     "source": "test/electron-video-acceptance.html",
