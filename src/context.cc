@@ -141,9 +141,8 @@ Context* Context::create(DriverData* driver_data, VAProfile profile, int picture
 {
     for (auto&& device : driver_data->devices) {
         const int probe_fd = device.video_fd;
-        auto create_session = [&]() -> V4L2M2MDevice& {
-            driver_data->devices.emplace_back(device.clone_for_context());
-            auto& session = driver_data->devices.back();
+        auto create_session = [&]() {
+            auto session = device.clone_for_context();
             if (trace_enabled())
                 std::fprintf(stderr, "va context session probe_fd=%d session_fd=%d\n", probe_fd, session.video_fd);
             return session;
@@ -152,14 +151,18 @@ Context* Context::create(DriverData* driver_data, VAProfile profile, int picture
             return new MPEG2Context(driver_data, create_session(), picture_width, picture_height, surface_ids);
         }
         if (H264Context::supported_profiles(device).contains(profile)) {
-            return new H264Context(driver_data, create_session(), profile, picture_width, picture_height, surface_ids);
+            const fourcc output_format = H264Context::output_format(device);
+            return new H264Context(
+                driver_data, create_session(), output_format, profile, picture_width, picture_height, surface_ids);
         }
         if (VP8Context::supported_profiles(device).contains(profile)) {
             return new VP8Context(driver_data, create_session(), picture_width, picture_height, surface_ids);
         }
 #ifdef ENABLE_VP9
         if (VP9Context::supported_profiles(device).contains(profile)) {
-            return new VP9Context(driver_data, create_session(), picture_width, picture_height, surface_ids);
+            const fourcc output_format = VP9Context::output_format(device);
+            return new VP9Context(
+                driver_data, create_session(), output_format, picture_width, picture_height, surface_ids);
         }
 #endif
         if (VP9StatefulContext::supported_profiles(device).contains(profile)) {
@@ -176,12 +179,12 @@ Context* Context::create(DriverData* driver_data, VAProfile profile, int picture
     throw std::invalid_argument("Unimplemented profile");
 }
 
-Context::Context(DriverData* driver_data, V4L2M2MDevice& dev, fourcc pixelformat, int picture_width, int picture_height,
+Context::Context(DriverData* driver_data, V4L2M2MDevice dev, fourcc pixelformat, int picture_width, int picture_height,
     std::span<VASurfaceID> surface_ids)
     : picture_width(picture_width)
     , picture_height(picture_height)
     , driver_data(driver_data)
-    , device(dev)
+    , device(std::move(dev))
     , pixelformat(pixelformat)
     , queues_initialized(false)
     , capture_initialized(false)

@@ -60,8 +60,9 @@ struct h264_dpb {
 class H264Context : public Context {
 public:
     static std::set<VAProfile> supported_profiles(const V4L2M2MDevice& device);
+    static fourcc output_format(const V4L2M2MDevice& device);
 
-    H264Context(DriverData* driver_data, V4L2M2MDevice& device, VAProfile profile, int picture_width,
+    H264Context(DriverData* driver_data, V4L2M2MDevice device, fourcc output_format, VAProfile profile, int picture_width,
         int picture_height, std::span<VASurfaceID> surface_ids);
     VAStatus store_buffer(const Buffer& buffer) const override;
     int set_controls() override;

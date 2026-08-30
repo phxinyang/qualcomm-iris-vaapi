@@ -581,13 +581,19 @@ void h264_va_slice_to_predicted_weights(
 
 } // namespace
 
-H264Context::H264Context(DriverData* driver_data, V4L2M2MDevice& device, VAProfile profile, int picture_width,
-    int picture_height, std::span<VASurfaceID> surface_ids)
-    : Context(driver_data, device, h264_output_format(device), picture_width, picture_height, surface_ids)
+fourcc H264Context::output_format(const V4L2M2MDevice& device)
+{
+    return h264_output_format(device);
+}
+
+H264Context::H264Context(DriverData* driver_data, V4L2M2MDevice device, fourcc output_format, VAProfile profile,
+    int picture_width, int picture_height, std::span<VASurfaceID> surface_ids)
+    : Context(driver_data, std::move(device), output_format, picture_width, picture_height, surface_ids)
     , profile(va_profile_to_profile_idc(profile))
-    , stateful(device.format_supported(device.output_buf_type, V4L2_PIX_FMT_H264))
+    , stateful(output_format == V4L2_PIX_FMT_H264)
     , mode(stateful ? V4L2_STATELESS_H264_DECODE_MODE_FRAME_BASED
-                    : static_cast<v4l2_stateless_h264_decode_mode>(device.get_control(V4L2_CID_STATELESS_H264_DECODE_MODE)))
+                    : static_cast<v4l2_stateless_h264_decode_mode>(
+                          this->device.get_control(V4L2_CID_STATELESS_H264_DECODE_MODE)))
 {
     if (!surface_ids.empty())
         initialize(surface_ids);

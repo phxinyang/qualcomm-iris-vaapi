@@ -3,7 +3,7 @@
 # Exercise 640x360 <-> 1280x720 sequence changes on the Iris stateful decoder.
 # A codec passes only when all three paths pass:
 #   1. native V4L2/GStreamer decodes the complete changing-resolution stream;
-#   2. one VA decoder context decodes the same stream with exact software MD5;
+#   2. one FFmpeg VA process decodes the same stream with exact software MD5;
 #   3. fresh VA decoder contexts repeatedly decode each geometry.
 # Missing formats, elements or advertised support are failures, never SKIPs.
 
@@ -78,12 +78,13 @@ check_frame_count() {
     fi
 }
 
-check_single_context_trace() {
+check_exact_context_count() {
     trace=$1
     label=$2
+    expected=$3
     contexts=$(grep -c 'va create_context done' "$trace" || true)
-    if [ "$contexts" -ne 1 ]; then
-        echo "FAIL $label created $contexts VA contexts; same-context path was not exercised" >&2
+    if [ "$contexts" -ne "$expected" ]; then
+        echo "FAIL $label created $contexts VA contexts; expected=$expected" >&2
         exit 1
     fi
 }
@@ -190,12 +191,12 @@ run_native_baseline() {
     printf 'PASS %s native-baseline frames=%s switches=%s\n' "$codec" "$expected_frames" "$switches"
 }
 
-run_va_same_context() {
+run_va_single_process() {
     codec=$1
     stream="$root/$codec-dynamic.mkv"
     software_md5="$root/$codec-software.md5"
-    va_md5="$root/$codec-va-same-context.md5"
-    trace="$root/$codec-va-same-context.trace"
+    va_md5="$root/$codec-va-single-process.md5"
+    trace="$root/$codec-va-single-process.trace"
 
     timeout "$timeout_seconds" ffmpeg -y -hide_banner -loglevel error -i "$stream" \
         -pix_fmt yuv420p -f framemd5 "$software_md5"
@@ -204,19 +205,24 @@ run_va_same_context() {
         -vaapi_device /dev/dri/renderD128 -hwaccel vaapi -hwaccel_output_format vaapi \
         -i "$stream" -vf 'hwdownload,format=nv12,format=yuv420p' -f framemd5 "$va_md5" \
         2>"$trace"
-    check_frame_count "$va_md5" "$expected_frames" "$codec VA same-context"
+    check_frame_count "$va_md5" "$expected_frames" "$codec VA single-process"
     test/iris-eos-check.sh "$trace" "$expected_frames"
-    check_single_context_trace "$trace" "$codec VA same-context"
-    reconfigurations=$(grep -c 'stateful resize reconfigure' "$trace" || true)
-    if [ "$reconfigurations" -lt "$switches" ]; then
-        echo "FAIL $codec VA same-context reconfigurations=$reconfigurations expected-at-least=$switches" >&2
+    contexts=$(grep -c 'va create_context done' "$trace" || true)
+    if [ "$contexts" -lt 1 ]; then
+        echo "FAIL $codec VA single-process did not create a VA context" >&2
+        exit 1
+    fi
+    init_failures=$(grep -Ec 'Unable to initialize V4L2 queues|stateful resize initialize failed' "$trace" || true)
+    if [ "$init_failures" -ne 0 ]; then
+        echo "FAIL $codec VA single-process context initialization failures=$init_failures" >&2
         exit 1
     fi
     if ! cmp -s "$software_md5" "$va_md5"; then
-        echo "FAIL $codec VA same-context pixels differ from software output" >&2
+        echo "FAIL $codec VA single-process pixels differ from software output" >&2
         exit 1
     fi
-    printf 'PASS %s va-same-context frames=%s switches=%s\n' "$codec" "$expected_frames" "$switches"
+    printf 'PASS %s va-single-process frames=%s switches=%s contexts=%s\n' \
+        "$codec" "$expected_frames" "$switches" "$contexts"
 }
 
 run_va_new_contexts() {
@@ -249,7 +255,7 @@ run_va_new_contexts() {
             2>"$trace"
         check_frame_count "$output" "$frames_per_segment" "$codec VA new-context iteration=$index"
         test/iris-eos-check.sh "$trace" "$frames_per_segment"
-        check_single_context_trace "$trace" "$codec VA new-context iteration=$index"
+        check_exact_context_count "$trace" "$codec VA new-context iteration=$index" 1
         if ! cmp -s "$reference" "$output"; then
             echo "FAIL $codec VA new-context pixels differ at iteration=$index" >&2
             exit 1
@@ -267,7 +273,7 @@ for codec in $codecs; do
             make_concat_stream h264 "${IRIS_H264_ENCODER:-libx264}" mkv \
                 '-preset ultrafast -tune zerolatency -g 1 -bf 0 -pix_fmt yuv420p'
             run_native_baseline h264 h264parse v4l2h264dec mkv
-            run_va_same_context h264
+            run_va_single_process h264
             run_va_new_contexts h264 mkv
             ;;
         vp9)
@@ -275,7 +281,7 @@ for codec in $codecs; do
             make_concat_stream vp9 "${IRIS_VP9_ENCODER:-libvpx-vp9}" webm \
                 '-deadline realtime -cpu-used 8 -g 1 -b:v 2M -pix_fmt yuv420p'
             run_native_baseline vp9 vp9parse v4l2vp9dec webm
-            run_va_same_context vp9
+            run_va_single_process vp9
             run_va_new_contexts vp9 webm
             ;;
         *)

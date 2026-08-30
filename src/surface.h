@@ -150,7 +150,7 @@ struct Surface : SurfaceStableExport {
 bool ensure_stateful_bitstream_capacity(Surface& surface, size_t required);
 
 void createSurfacesDeferred(
-    DriverData* driver_data, const Context& context, std::span<VASurfaceID> surface_ids, unsigned buffer_count);
+    DriverData* driver_data, Context& context, std::span<VASurfaceID> surface_ids, unsigned buffer_count);
 VAStatus createSurfaces2(VADriverContextP context, unsigned int format, unsigned int width, unsigned int height,
     VASurfaceID* surfaces_ids, unsigned int surfaces_count, VASurfaceAttrib* attributes, unsigned int attributes_count);
 VAStatus createSurfaces(

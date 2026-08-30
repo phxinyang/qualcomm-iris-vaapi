@@ -7,6 +7,7 @@ set -eu
 
 root=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
 context="$root/src/context.cc"
+context_header="$root/src/context.h"
 surface="$root/src/surface.cc"
 env_helper="$root/test/lib/iris-env.sh"
 matrix="$root/test/iris-matrix.sh"
@@ -17,6 +18,13 @@ dynamic_resolution="$root/test/iris-dynamic-resolution.sh"
 grep -q 'return !value || std::strcmp(value, "0") != 0;' "$surface"
 grep -q 'size_t limit = 1;' "$context"
 grep -q 'VA_DRIVER_INIT_FUNC' "$root/src/driver.cc"
+
+if grep -q 'devices\.emplace_back(device\.clone_for_context())' "$context" \
+    || ! grep -q 'V4L2M2MDevice device;' "$context_header" \
+    || ! grep -q 'auto session = device\.clone_for_context();' "$context"; then
+    echo "FAIL VA contexts do not own and close their cloned V4L2 sessions" >&2
+    exit 1
+fi
 
 if grep -Eq 'printf .* /dev/video0|echo .* /dev/video0' "$env_helper" \
     || ! grep -q 'no /dev/video\* node reports iris_driver' "$env_helper"; then
@@ -59,6 +67,11 @@ fi
 if ! grep -Fq 'low-reference.yuv' "$dynamic_resolution" \
     || ! grep -Fq 'cat "$high_raw" >>"$software_raw"' "$dynamic_resolution"; then
     echo "FAIL dynamic-resolution native oracle uses a fixed-size rawvideo reference" >&2
+    exit 1
+fi
+if grep -q 'va-same-context\|same-context path' "$dynamic_resolution" \
+    || ! grep -q 'va-single-process' "$dynamic_resolution"; then
+    echo "FAIL dynamic-resolution gate claims FFmpeg reuses one VA context" >&2
     exit 1
 fi
 

@@ -20,9 +20,9 @@ class HEVCContext : public Context {
 public:
     static std::set<VAProfile> supported_profiles(const V4L2M2MDevice& device);
 
-    HEVCContext(DriverData* driver_data, V4L2M2MDevice& device, VAProfile profile, int picture_width,
+    HEVCContext(DriverData* driver_data, V4L2M2MDevice device, VAProfile profile, int picture_width,
         int picture_height, std::span<VASurfaceID> surface_ids)
-        : Context(driver_data, device, V4L2_PIX_FMT_HEVC, picture_width, picture_height, surface_ids)
+        : Context(driver_data, std::move(device), V4L2_PIX_FMT_HEVC, picture_width, picture_height, surface_ids)
         , profile(profile)
     {
         if (!surface_ids.empty())

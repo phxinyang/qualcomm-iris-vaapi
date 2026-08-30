@@ -38,6 +38,7 @@
 #include <deque>
 #include <mutex>
 #include <thread>
+#include <utility>
 
 extern "C" {
 #include <va/va_backend.h>
@@ -64,7 +65,7 @@ public:
     static std::set<VAProfile> supported_profiles(const V4L2M2MDevice& device);
     static std::set<VAProfile> supported_profiles(const std::deque<V4L2M2MDevice>& devices);
 
-    Context(DriverData* driver_data, V4L2M2MDevice& device, fourcc pixelformat, int picture_width, int picture_height,
+    Context(DriverData* driver_data, V4L2M2MDevice device, fourcc pixelformat, int picture_width, int picture_height,
         std::span<VASurfaceID> surface_ids);
     virtual ~Context();
 
@@ -178,7 +179,10 @@ public:
     int picture_width;
     int picture_height;
     DriverData* driver_data;
-    V4L2M2MDevice& device;
+    // Every VA context owns an independent V4L2 session. Keeping the device
+    // by value closes its fd when the active or retired Context is reaped;
+    // capability probes in DriverData must never accumulate live sessions.
+    V4L2M2MDevice device;
 
 private:
     fourcc pixelformat;

@@ -143,10 +143,15 @@ v4l2_ctrl_vp9_frame va_to_v4l2_frame(DriverData* data, VADecPictureParameterBuff
 
 } // namespace
 
-VP9Context::VP9Context(DriverData* driver_data, V4L2M2MDevice& device, int picture_width, int picture_height,
-    std::span<VASurfaceID> surface_ids)
-    : Context(driver_data, device, vp9_output_format(device), picture_width, picture_height, surface_ids)
-    , stateful(device.format_supported(device.output_buf_type, V4L2_PIX_FMT_VP9))
+fourcc VP9Context::output_format(const V4L2M2MDevice& device)
+{
+    return vp9_output_format(device);
+}
+
+VP9Context::VP9Context(DriverData* driver_data, V4L2M2MDevice device, fourcc output_format, int picture_width,
+    int picture_height, std::span<VASurfaceID> surface_ids)
+    : Context(driver_data, std::move(device), output_format, picture_width, picture_height, surface_ids)
+    , stateful(output_format == V4L2_PIX_FMT_VP9)
 {
     if (!surface_ids.empty())
         initialize(surface_ids);

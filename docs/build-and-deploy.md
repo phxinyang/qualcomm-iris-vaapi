@@ -95,8 +95,11 @@ segments into streams with exactly 100 geometry changes. A codec passes only
 if the native GStreamer V4L2 decoder produces byte-identical I420 output, one
 FFmpeg VA process survives every change with exact software frame MD5 and EOS
 accounting, and 101 fresh VA processes decode the alternating geometries with
-the same checks. A missing device format, native element or VA capability is a
-failure, not a skip. Development runs may shorten the matrix explicitly with
+the same checks. FFmpeg is allowed to recreate VA contexts on a coded-size
+change; the single-process lane therefore qualifies context retirement and
+session cleanup rather than asserting a client behavior FFmpeg does not have.
+A missing device format, native element or VA capability is a failure, not a
+skip. Development runs may shorten the matrix explicitly with
 `IRIS_DYNAMIC_SWITCHES` and `IRIS_DYNAMIC_FRAMES_PER_SEGMENT`; qualification
 results must retain the defaults.
 

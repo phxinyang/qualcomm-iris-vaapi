@@ -496,7 +496,7 @@ VAStatus createSurfaces2(VADriverContextP context, unsigned int format, unsigned
 }
 
 void createSurfacesDeferred(
-    DriverData* driver_data, const Context& context, std::span<VASurfaceID> surface_ids, unsigned buffer_count)
+    DriverData* driver_data, Context& context, std::span<VASurfaceID> surface_ids, unsigned buffer_count)
 {
     if (surface_ids.size() < 1) {
         throw std::invalid_argument("No surfaces to be created");

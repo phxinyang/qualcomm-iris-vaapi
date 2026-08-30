@@ -66,9 +66,8 @@ struct DriverData {
     std::map<VASurfaceID, Surface> surfaces;
     std::map<VABufferID, Buffer> buffers;
     std::map<VAImageID, VAImage> images;
-    // The first entries are capability probes. Each VA context appends its
-    // own V4L2 session; deque keeps references held by Context stable while
-    // new sessions are added.
+    // Capability probes only. Each Context owns its independently cloned V4L2
+    // session so reaping a retired context also closes the kernel session.
     std::deque<V4L2M2MDevice> devices;
     // VA calls for a decoder stay on the thread that created its context in
     // Chromium. Use that association when createSurfaces() (which has no
