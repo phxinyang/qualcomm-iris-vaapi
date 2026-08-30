@@ -68,6 +68,37 @@ STOP draining during context teardown.
 Note that some applications need further configuration to load the library.
 In particular, gstreamer based applications have a whitelist for supported drivers, that can be disabled manually (`GST_VAAPI_ALL_DRIVERS=1`).
 
+## Environment variables
+
+Every switch the driver reads is listed here; `test/iris-env-doc-check.sh`
+fails the build if this table and the source disagree in either direction.
+Only the first group is intended for production use.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LIBVA_V4L2_VIDEO_PATH` | probe | Use a specific decoder node instead of probing. |
+| `LIBVA_V4L2_MEDIA_PATH` | probe | Media node paired with the above; required when the video path is overridden on a stateless driver. |
+| `V4L2_VA_BATCH_SIZE` | `1` | Access units per OUTPUT buffer. Values above `1` are throughput experiments only; see the note above on display-order association. |
+| `V4L2_VA_COPY_SURFACES` | `1` | Publish each frame through a stable per-surface DMA-BUF. Set `0` only for clients that manage rotating CAPTURE lifetime themselves. |
+| `V4L2_VA_SYNC_TIMEOUT_MS` | `1000` | Bounded `vaSyncSurface()` wait, `100..60000`. |
+| `V4L2_VA_STATEFUL_EOS_DRAIN` | off | Opt-in idle drain for clients that never signal end of stream. |
+| `V4L2_VA_EOS_DRAIN` | off | Legacy spelling of the above, still honoured. |
+| `V4L2_VA_EOS_IDLE_MS` | `400` | Idle threshold for that watchdog, `10..5000`. |
+| `V4L2_VA_DISABLE_HEVC_STATEFUL` | off | Withdraw the generated parameter-set HEVC path. |
+| `V4L2_VA_ENABLE_AV1_STATEFUL` | off | Expose the experimental AV1 translator. Not part of the supported matrix. |
+
+Diagnostics. These exist to investigate firmware behaviour and are not
+supported configurations:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `V4L2_VA_TRACE` | off | Verbose per-buffer trace on stderr. Any value enables it. Leave off during normal playback. |
+| `V4L2_VA_DUMP` | off | Directory to write decoded frames into. |
+| `V4L2_VA_DUMP_BATCH` | off | Directory to write each submitted access unit into. |
+| `V4L2_VA_CAPTURE_SCHEDULED` | off | Let the queue service own CAPTURE slot rotation instead of binding a slot to the surface. |
+| `V4L2_VA_RESET_OUTPUT_STREAM` | off | Use a STREAMOFF/STREAMON pair on both queues when restarting a stateful sequence, instead of requeueing in place. |
+| `V4L2_VA_RESET_ON_IDR` | off | Reset the queues on every detected IDR. Measured to fire on ordinary mid-stream scene-change IDRs and cascade into timeouts; do not enable by default. |
+
 ## Status
 The project currently supports these codecs: MPEG2, H264, VP8, Qualcomm Iris
 stateful VP9, and stateful HEVC on nodes that advertise the corresponding V4L2

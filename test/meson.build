@@ -22,3 +22,5 @@ test('iris-source-invariants', find_program('iris-source-invariants.sh'),
      args: [meson.project_source_root()])
 test('iris-stateful-order-check', find_program('iris-stateful-order-check.sh'),
      args: [meson.project_source_root()])
+test('iris-env-doc-check', find_program('iris-env-doc-check.sh'),
+     args: [meson.project_source_root()])
