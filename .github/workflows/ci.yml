@@ -42,6 +42,7 @@ jobs:
             iris-env-doc-check \
             iris-surface-limits-check \
             iris-profile-capability-check \
+            iris-eos-check-self-test \
             iris-deploy-path-check \
             provenance-self-test; do
             grep -Eq ":${required}$" build/meson-tests.txt || {

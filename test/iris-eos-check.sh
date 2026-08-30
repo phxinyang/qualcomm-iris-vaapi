@@ -2,7 +2,9 @@
 
 # Validate a V4L2 stateful trace against the generic EOS contract (also used by
 # Chromium's video decoder tests): every submitted access unit must complete,
-# followed by one terminal CAPTURE LAST marker after decoder STOP.
+# followed by one terminal CAPTURE LAST marker per VA context after decoder
+# STOP. FFmpeg may recreate its VA context at coded-size changes while keeping
+# one decoder process alive.
 
 set -eu
 
@@ -36,6 +38,10 @@ count() {
 }
 
 flush=$(count 'stateful flush batch=')
+contexts=$(count 'va create_context done')
+# Older hand-captured traces may start after vaCreateContext. Preserve their
+# single-context interpretation while requiring explicit counts when present.
+[ "$contexts" -gt 0 ] || contexts=1
 # The stable browser path aggregates several access units in one OUTPUT
 # buffer. Diagnostic one-AU traces omit `surfaces=`; count each such batch as
 # one submitted access unit for backward compatibility.
@@ -78,6 +84,8 @@ sequence_errors=$(awk '
                 errors++
             previous = seq
             seen = 1
+            if (parts[i] ~ /last=1/)
+                seen = 0
         }
     }
     END { print errors + 0 }
@@ -94,7 +102,7 @@ terminal_last=$(awk '
     END { print (last ~ /last=1/) ? 0 : 1 }
 ' "$log")
 
-expected_capture=$((expected + 1))
+expected_capture=$((expected + contexts))
 
 fail=0
 check() {
@@ -114,9 +122,9 @@ fi
 check submitted_frames "$submitted" "$expected"
 check capture "$capture" "$expected_capture"
 check output "$output" "$flush"
-check stop "$stop" 1
-check drain "$drain" 1
-check last "$last" 1
+check stop "$stop" "$contexts"
+check drain "$drain" "$contexts"
+check last "$last" "$contexts"
 check capture_errors "$capture_errors" 0
 check capture_sequence_errors "$sequence_errors" 0
 check terminal_last "$terminal_last" 0
@@ -131,4 +139,4 @@ if [ "$fail" -ne 0 ]; then
     exit 1
 fi
 
-echo "PASS frames=$expected batches=$flush submitted=$submitted capture=$capture output=$output stop=$stop drain=$drain last=$last timeouts=$timeouts timestamp_misses=$misses"
+echo "PASS frames=$expected contexts=$contexts batches=$flush submitted=$submitted capture=$capture output=$output stop=$stop drain=$drain last=$last timeouts=$timeouts timestamp_misses=$misses"
