@@ -506,3 +506,48 @@ H.264, VP9, and HEVC each produced exact software framemd5 with strict
 `49 CAPTURE / 48 OUTPUT / 1 LAST` accounting and zero timeout/timestamp-miss
 diagnostics. H.264 and VP9 had zero `copy_surface_frame` records; HEVC had 48
 stable-copy records plus the expected `codec_reorder_contract` fallback.
+
+## Battery power comparison (2026-08-30, `.142`)
+
+The comparison used the battery gauge exposed at
+`/sys/class/power_supply/qcom-battmgr-bat`: `voltage_now` multiplied by the
+absolute value of `current_now`, sampled once per second. Each run used the
+same 1280x720 or 1920x1080, 30 fps, 60-second H.264 file with no B frames and
+ran a 30-second real-time decode. The native path was GStreamer
+`v4l2h264dec` with `capture-io-mode=4` (DMABUF capture). The VA paths used the
+deployed driver with either stable copy (`V4L2_VA_ZERO_COPY=0`) or the
+one-AU DMA-BUF experiment (`V4L2_VA_ZERO_COPY=1`); software used FFmpeg's
+ordinary CPU decoder. Every run collected 10 seconds of pre- and post-run
+baseline, 30 seconds of decode samples, temperature, load, and capacity.
+
+The primary value below is the battery-side decode increment: run power minus
+the midpoint of the pre/post baselines. It is not decoder-package power; the
+screen and the rest of the tablet remain included. Values are mean +/- a
+two-sided 95% t interval over independent runs.
+
+| Workload | Native DMABUF | VA stable copy | VA zero-copy | Software |
+| --- | ---: | ---: | ---: | ---: |
+| 1280x720, n=5 | +42 +/- 16 mW | +50 +/- 21 mW | +64 +/- 41 mW | +92 +/- 55 mW |
+| 1920x1080, filtered n=4/3/4/3 | +68 +/- 21 mW | +100 +/- 5 mW | +50 +/- 27 mW | +187 +/- 133 mW |
+
+Absolute battery power during the 720p runs was 2.554 W (native), 2.554 W
+(VA copy), 2.559 W (VA zero-copy), and 2.615 W (software). The 1080p filtered
+means were 2.595 W, 2.601 W, 2.556 W, and 2.699 W respectively. Temperature
+stayed between 30.5 and 31.0 C; capacity moved from 83% to 79% over the whole
+experiment. All 20 runs at 720p and all 16 runs at 1080p returned zero;
+the native and zero-copy traces were separately checked for the expected
+capture mode and no VA decode errors.
+
+Two 1080p samples were excluded before aggregation because their pre/post
+baseline gap was about 7.4 W, a power-management transition unrelated to the
+decoder. The raw CSV files and logs remain in
+`~/Lab/iris-vaapi-lab/artifacts/power-compare-20260830/` on the tablet (and
+the copied analysis inputs are under `~/Lab/Bridge/tmp/trash/power-compare-20260830/`).
+
+This measurement does not demonstrate a statistically significant battery
+advantage for the experimental zero-copy path over the native or VA-copy
+paths at 720p; the memcpy removed by zero-copy is small compared with gauge
+noise and whole-device background power. At 1080p the zero-copy result trends
+lower than VA copy, but the filtered sample is still too small for a firm
+claim. Software is consistently the highest path, while all hardware paths
+remain in the same roughly 2.55-2.60 W whole-device band.
