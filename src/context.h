@@ -51,7 +51,10 @@ struct DriverData;
 // Stateful capture normally keeps the complete CAPTURE pool queued. The
 // optional scheduled mode is deliberately opt-in because it can starve
 // firmware reorder/flush paths when a surface is not yet associated.
-    bool stateful_capture_scheduled();
+bool stateful_capture_scheduled();
+// Return the bounded number of access units aggregated into one stateful
+// OUTPUT buffer. The zero-copy CAPTURE ownership contract requires one AU.
+size_t stateful_batch_limit();
 
 class Context {
 public:

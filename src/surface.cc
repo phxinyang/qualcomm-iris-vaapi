@@ -402,10 +402,14 @@ void createSurfacesDeferred(
     // formats keep the proven MMAP path until all plane FDs can be validated.
     bool zero_copy = zero_copy_requested() && context.uses_stateful_streaming()
         && context.zero_copy_capture_allowed() && context.zero_copy_codec_supported()
+        && stateful_batch_limit() == 1
         && driver_format->num_planes == 1;
     if (zero_copy_requested() && context.uses_stateful_streaming() && !context.zero_copy_codec_supported()
         && trace_enabled())
         std::fprintf(stderr, "stateful zero-copy fallback reason=codec_reorder_contract\n");
+    if (zero_copy_requested() && context.uses_stateful_streaming() && stateful_batch_limit() != 1
+        && trace_enabled())
+        std::fprintf(stderr, "stateful zero-copy fallback reason=batch_contract limit=%zu\n", stateful_batch_limit());
     std::vector<int> zero_copy_fds;
     std::vector<size_t> zero_copy_lengths;
     std::vector<int> temporary_zero_copy_fds;

@@ -482,3 +482,21 @@ context-local `dynamic_resolution` zero-copy fallback is not reached before
 the firmware/input failure. Keep zero-copy disabled for dynamic-resolution
 clients until a caller that reuses one VA context across the change is tested.
 No Chrome or driver source change was made in this follow-up.
+
+## Zero-copy batch-contract guard (2026-08-30, `.142`)
+
+An opt-in probe with `V4L2_VA_ZERO_COPY=1` and `V4L2_VA_BATCH_SIZE=8` showed
+that Iris can hold the aggregated OUTPUT until STOP when only one imported
+CAPTURE slot is queued; the first `vaSyncSurface()` then failed with an empty
+framemd5 output. This is the expected limit of the current one-slot ownership
+model, not a default-path regression. The backend now requires the explicit
+one-AU batch contract for DMA-BUF capture and logs
+`stateful zero-copy fallback reason=batch_contract`, leaving the stable
+MMAP/copy path active for larger throughput batches.
+
+After deploying the guard, the explicit one-AU run (`V4L2_VA_ZERO_COPY=1`,
+`V4L2_VA_BATCH_SIZE=1`) passed the complete 48-frame matrix on `.142`:
+H.264, VP9, and HEVC each produced exact software framemd5 with strict
+`49 CAPTURE / 48 OUTPUT / 1 LAST` accounting and zero timeout/timestamp-miss
+diagnostics. H.264 and VP9 had zero `copy_surface_frame` records; HEVC had 48
+stable-copy records plus the expected `codec_reorder_contract` fallback.

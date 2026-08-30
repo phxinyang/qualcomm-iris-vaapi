@@ -63,6 +63,10 @@ DMA-BUF ownership protocol is validated.
 If a stateful stream requests a dynamic-resolution reconfiguration while the
 experiment is active, the context drops that DMA-BUF queue and rebuilds on
 MMAP/copy for the new geometry.
+The experiment also requires one AU per OUTPUT buffer: when
+`V4L2_VA_BATCH_SIZE` is greater than one, the backend keeps the stable
+MMAP/copy path instead of risking an ambiguous multi-frame CAPTURE ownership
+mapping.
 
 Surface size attributes are read from the selected V4L2 capture format with
 `VIDIOC_ENUM_FRAMESIZES`; the VA limits therefore follow each decoder's real
@@ -123,7 +127,7 @@ supported configurations:
 | `V4L2_VA_CAPTURE_SCHEDULED` | off | Let the queue service own CAPTURE slot rotation instead of binding a slot to the surface. |
 | `V4L2_VA_RESET_OUTPUT_STREAM` | off | Use a STREAMOFF/STREAMON pair on both queues when restarting a stateful sequence, instead of requeueing in place. |
 | `V4L2_VA_RESET_ON_IDR` | off | Reset the queues on every detected IDR. Measured to fire on ordinary mid-stream scene-change IDRs and cascade into timeouts; do not enable by default. |
-| `V4L2_VA_ZERO_COPY` | off | Experimental no-B H.264/VP9 single-plane NV12 DMA-BUF CAPTURE path. Keeps a surface's buffer pinned until reuse; setup failures fall back to MMAP. |
+| `V4L2_VA_ZERO_COPY` | off | Experimental no-B H.264/VP9 single-plane NV12 DMA-BUF CAPTURE path with one-AU batching. Keeps a surface's buffer pinned until reuse; setup or batch-contract failures fall back to MMAP. |
 
 ## Status
 The project currently supports these codecs: MPEG2, H264, VP8, Qualcomm Iris

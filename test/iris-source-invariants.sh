@@ -40,6 +40,11 @@ if ! grep -q 'surface_for_capture_flags(device.last_dequeued_flags())' "$context
     echo "FAIL stateful CAPTURE flag fallback is disabled" >&2
     exit 1
 fi
+if ! grep -q 'stateful_batch_limit() == 1' "$surface" \
+    || ! grep -q 'fallback reason=batch_contract' "$surface"; then
+    echo "FAIL zero-copy batch ownership guard is missing" >&2
+    exit 1
+fi
 if ! grep -q 'export_buffer_mapping' "$surface" || ! grep -q 'copy_surface_frame' "$surface"; then
     echo "FAIL stable surface snapshots have no copy path" >&2
     exit 1

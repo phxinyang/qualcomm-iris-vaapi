@@ -84,6 +84,11 @@ size_t stateful_batch_limit_from_env()
 
 }
 
+size_t stateful_batch_limit()
+{
+    return stateful_batch_limit_from_env();
+}
+
 std::set<VAProfile> Context::supported_profiles(const V4L2M2MDevice& device)
 {
     std::set<VAProfile> result;
