@@ -12,14 +12,18 @@
 # to reach silently.
 #
 # Environment:
-#   IRIS_REMOTE_HOST   ssh destination                (default sheng)
+#   IRIS_REMOTE_HOST   ssh destination                (required)
 #   IRIS_REMOTE_ROOT   remote checkout directory      (default ~/Lab/iris-vaapi-lab/src)
 #   IRIS_DEPLOY_INCREMENTAL=1  skip the clean step (still refreshes mtimes)
 #   IRIS_SOURCE_COMMIT full source object id (required only without local .git)
 
 set -eu
 
-host=${IRIS_REMOTE_HOST:-sheng}
+host=${IRIS_REMOTE_HOST:-}
+if [ -z "$host" ]; then
+    echo 'FAIL IRIS_REMOTE_HOST is required for remote deployment' >&2
+    exit 2
+fi
 if [ "${IRIS_REMOTE_ROOT+x}" = x ]; then
     remote_root=$IRIS_REMOTE_ROOT
 else

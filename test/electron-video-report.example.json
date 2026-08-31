@@ -2,7 +2,7 @@
   "schema_version": 1,
   "captured_at_utc": "2026-08-30T00:00:00Z",
   "started_at_utc": "2026-08-30T00:00:00Z",
-  "result": "pass",
+  "result": "unqualified",
   "runtime": {
     "application": "Obsidian",
     "application_version": "1.13.7",
@@ -16,25 +16,25 @@
     "va_environment": "LIBVA_DRIVER_NAME=v4l2;LIBVA_V4L2_VIDEO_PATH=/dev/videoX"
   },
   "target": {
-    "resolved_iris_node": "/dev/video17",
-    "boot_id": "e7a7e621-3b4d-40bb-862d-f18830351706",
-    "source_commit": "b49207cf8f2a7b50ed61dd810531d18273d94bc5",
-    "driver_sha256": "f879e5ea417c770ac7042d520625e9cadcec1ffd00b43ca6658cfb811d5763ef"
+    "resolved_iris_node": "/dev/videoX",
+    "boot_id": "unknown",
+    "source_commit": "unknown",
+    "driver_sha256": "unknown"
   },
   "media": {
     "source": "test/electron-video-acceptance.html",
     "width": 1920,
     "height": 1080,
     "duration_seconds": 30,
-    "decoder_name": "VaapiVideoDecoder",
-    "is_platform_video_decoder": true,
-    "decoded_frames": 720,
+    "decoder_name": "unknown",
+    "is_platform_video_decoder": null,
+    "decoded_frames": 48,
     "dropped_frames": 0,
-    "presented_callback_frames": 720,
+    "presented_callback_frames": 48,
     "quality_api": true
   },
   "limitations": [
-    "Decoder name and platform flag were transcribed from media-internals.",
-    "Counters are playback-quality evidence; the trace path must be recorded separately for a deep qualification."
+    "Obsidian completed a real video surface, but Electron did not expose decoder metadata in this run.",
+    "This example is intentionally unqualified; a hardware report must provide full provenance and media-internals evidence."
   ]
 }

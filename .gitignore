@@ -43,3 +43,36 @@ config.sub
 configure
 depcomp
 TAGS
+
+# Meson/Ninja build trees and compiler output. Keep these out of source
+# archives; a clean checkout can recreate them with `meson setup`.
+/build/
+/build-*/
+/meson-logs/
+/meson-private/
+/meson-info/
+/meson-uninstalled/
+/compile_commands.json
+
+# Locally downloaded browser packages and generated acceptance artifacts.
+# Chromium binaries, media samples, screenshots and Playwright traces are
+# machine-specific and are not project inputs.
+/chromium/
+/output/
+/.playwright-cli/
+/dist/
+/release/
+/*.mp4
+/*.webm
+*.trace
+*.log
+
+# Local test/runtime state.
+__pycache__/
+*.py[cod]
+/.DS_Store
+.DS_Store
+/FIX-LOG.md
+
+# Local research notes are retained outside the public source-of-truth.
+/docs/github-community-assets.md

@@ -1,10 +1,9 @@
 # Qualcomm Iris VA-API Test Results
 
-Primary latest documented target: Fedora 44 ARM64 tablet `192.168.3.133`,
-Snapdragon SM8550, kernel `7.2.0-sm8550`. Device numbers are historical and
-must be resolved through `iris_resolve_device`; the current Tailscale target
-(`sheng`, replacement endpoint `.142`) reports `/dev/video17` during its latest
-boot. Historical sections retain earlier `.129`, `.134` and `.139` runs.
+Primary latest documented target: Fedora 44 ARM64 Snapdragon SM8550 tablet,
+kernel `7.2.0-sm8550`. Device numbers are historical and must be resolved
+through `iris_resolve_device`; target labels below distinguish separate boots
+and replacement endpoints without exposing private network addresses.
 
 ## Passed
 
@@ -117,7 +116,7 @@ boot. Historical sections retain earlier `.129`, `.134` and `.139` runs.
 
 ## Deployment note
 
-The latest `sheng` deployment rebuilt commit `cdf9b70eaaa100ca9e9d39b423457e325056291e`
+The latest target deployment rebuilt commit `400a46aed159f8a951bcb0a3d5dc6dd797a960bb`
 and installed its driver, launcher and four desktop entries on August 30, 2026.
 The system driver is `/usr/lib64/dri/v4l2_drv_video.so` with SHA-256
 `f879e5ea417c770ac7042d520625e9cadcec1ffd00b43ca6658cfb811d5763ef`; the
@@ -126,7 +125,7 @@ records the previous-driver backup. A system-path `vainfo` smoke test resolved
 `/dev/video17` and enumerated H.264 and HEVC VA profiles. Browser playback and
 Electron decoder claims still require their separate runtime gates.
 
-## Tablet 192.168.3.139
+## Secondary target
 
 The second SM8550 tablet exposes the Iris decoder as `/dev/video0` (its
 `/dev/video17` is a camera node). The full matrix was repeated three times on
@@ -144,7 +143,7 @@ The second SM8550 tablet exposes the Iris decoder as `/dev/video0` (its
   descriptors.
 
 The browser-ending regression was reproduced with Chrome 151 on Wayland using
-the `.139` decoder. Before the fix, Chrome's context reset destroyed 14
+the secondary-target decoder. Before the fix, Chrome's context reset destroyed 14
 stateful `Rendering` surfaces and each synchronous `destroySurfaces()` call
 waited for the bounded timeout, producing 14 `Timed out waiting for surface`
 records. The driver now removes the stateful batch mapping immediately when
@@ -161,7 +160,7 @@ A clean 10-second single-pass browser probe then reached `ended=true`,
 pixel samples after `ended`. The final frame remained stable for repeated
 samples, with no additional decode submissions after EOS.
 
-## Follow-up structure tests (192.168.3.134, `/dev/video0`)
+## Follow-up structure tests (secondary target)
 
 The browser probe was repeated with full RGBA SHA-256 snapshots at 28.5-30.0s.
 The final canvas remained stable. The earlier 32-bit canvas hash result that
@@ -206,9 +205,8 @@ sync timeouts.
 
 ## Latest follow-up (2026-08-30, `test/iris-stateful-followup`)
 
-Target: Fedora ARM64 tablet `192.168.3.133`, Snapdragon SM8550, Iris decoder
-`/dev/video0`; driver built in
-`/home/xinyang/Lab/Bridge/tmp/trash/iris-restore-20260830/build/src`.
+Target: Fedora ARM64 Snapdragon SM8550 tablet, Iris decoder resolved at runtime;
+driver built in an external lab workspace.
 
 - Stateful EOS drain is opt-in with `V4L2_VA_STATEFUL_EOS_DRAIN=1` (the legacy
   `V4L2_VA_EOS_DRAIN=1` alias remains supported). The default idle threshold is
@@ -258,7 +256,7 @@ This follow-up is recorded on branch `test/iris-stateful-followup` in commits
 ## Dedicated hardware suite (2026-08-30, `/dev/video0`)
 
 The complete hardware plan from the earlier Claude investigation was run on
-the Fedora 44 ARM64 SM8550 tablet at `192.168.3.133`. The repeatable entry
+the Fedora 44 ARM64 SM8550 tablet. The repeatable entry
 point is `test/iris-hardware-suite.sh`; its logs and generated media are kept
 under `~/Lab/Bridge/tmp/trash` and are not repository inputs.
 
@@ -326,9 +324,9 @@ between codec correctness, V4L2 contract checks, and firmware capability
 boundaries. It does not change the production driver based on external-tool
 diagnostics.
 
-## Codex follow-up (2026-08-30, `codex/claude-followup`, `.139`)
+## Codex follow-up (2026-08-30, `codex/claude-followup`, secondary target)
 
-The latest Claude route was continued on the durable `.139` lab. Local
+The latest Claude route was continued on a durable secondary lab. Local
 `bash test/run-static-checks.sh` and `ninja -C build-local` passed. The remote
 deployment performed the content sync, clean rebuild and `ldd -r` gate with no
 undefined symbols; the resulting driver SHA-256 was
@@ -376,7 +374,7 @@ backpressure records, but its frame hashes still differed from software. These
 are open surface/firmware interaction diagnostics, not grounds for another
 unverified production patch.
 
-## Codex dynamic-resolution follow-up (2026-08-30, `codex/claude-followup`, `.133`)
+## Codex dynamic-resolution follow-up (2026-08-30, `codex/claude-followup`, primary target)
 
 The next Claude investigation item was completed against the current Iris node
 `/dev/video4` on the SM8550 tablet. `VIDIOC_ENUM_FRAMESIZES` reports the NV12
@@ -399,7 +397,7 @@ recorded as deterministic firmware behavior rather than a VA-driver mismatch.
 The backend now also drains and rebuilds stateful V4L2 queues when a VA client
 reuses one context for a surface with a new geometry.
 
-## Codex zero-copy experiment (2026-08-30, `codex/claude-followup`, `.133`)
+## Codex zero-copy experiment (2026-08-30, `codex/claude-followup`, primary target)
 
 The current Claude route was extended with an opt-in `V4L2_VA_ZERO_COPY=1`
 path. Stateful single-plane NV12 CAPTURE buffers can now import the per-surface
@@ -417,11 +415,11 @@ their reorder depth needs multiple simultaneously queued CAPTURE slots.
 
 | Run | Result |
 | --- | --- |
-| `.133`, zero-copy H.264 matrix, 48 frames | `48/48`, exact software framemd5, `49 CAPTURE`, one `LAST`, zero timeout/timestamp misses. Trace confirms no `copy_surface_frame` for decoded CAPTURE. |
-| `.133`, zero-copy VP9 matrix, 48 frames | `48/48`, exact software framemd5, strict EOS and zero timeout/timestamp misses. |
-| `.133`, zero-copy HEVC matrix, 48 frames | Stable-copy fallback (`codec_reorder_contract`); `48/48` exact software framemd5 and strict EOS. |
-| `.133`, zero-copy H.264 structure, 24 frames | all-I and IP/GOP12 pass; B=2/B=4 fail because the one-slot contract cannot satisfy Iris reorder depth. This is retained as a known opt-in limit, not a default-path regression. |
-| `.133`, default MMAP structure, 24 frames | all-I, IP/GOP12, B=2 and B=4 all pass with exact software framemd5. |
+| Primary target, zero-copy H.264 matrix, 48 frames | `48/48`, exact software framemd5, `49 CAPTURE`, one `LAST`, zero timeout/timestamp misses. Trace confirms no `copy_surface_frame` for decoded CAPTURE. |
+| Primary target, zero-copy VP9 matrix, 48 frames | `48/48`, exact software framemd5, strict EOS and zero timeout/timestamp misses. |
+| Primary target, zero-copy HEVC matrix, 48 frames | Stable-copy fallback (`codec_reorder_contract`); `48/48` exact software framemd5 and strict EOS. |
+| Primary target, zero-copy H.264 structure, 24 frames | all-I and IP/GOP12 pass; B=2/B=4 fail because the one-slot contract cannot satisfy Iris reorder depth. This is retained as a known opt-in limit, not a default-path regression. |
+| Primary target, default MMAP structure, 24 frames | all-I, IP/GOP12, B=2 and B=4 all pass with exact software framemd5. |
 
 The remote clean rebuild and `ldd -r` gate passed for every iteration. The
 experiment removes the CAPTURE-to-stable-buffer memcpy only for the validated
@@ -433,12 +431,13 @@ command returned and the SSH endpoint changed. A follow-up guard now detects a
 dynamic-resolution request while DMA-BUF capture is active, releases the
 experimental queue without a long drain, and rebuilds the context on MMAP plus
 stable copy. This guard passed local static checks and remote compilation on
-`.133/.135`; hardware confirmation on the replacement `.148` endpoint is still
+the earlier primary/secondary targets; hardware confirmation on a replacement
+endpoint is still
 pending because that address was not reachable during this run.
 
-## Post-reset diagnosis and stable-path regression (2026-08-30, `.142`)
+## Post-reset diagnosis and stable-path regression (2026-08-30, replacement target)
 
-The replacement endpoint `192.168.3.142` was inspected read-only before any
+The replacement target was inspected read-only before any
 decode run. The previous boot ended abruptly at `17:24:56` and the next boot
 started at `17:25:41`; there is no `reboot.target`, `shutdown`, `OOM`, panic,
 Oops, or watchdog record in the previous boot. The new boot also reported that
@@ -473,7 +472,7 @@ passed:
 The device remained on the same boot throughout this regression. The opt-in
 DMA-BUF zero-copy path was not run after the reset diagnosis.
 
-## Zero-copy follow-up (2026-08-30, `.142`)
+## Zero-copy follow-up (2026-08-30, replacement target)
 
 After the clean rebuild, the opt-in DMA-BUF path was exercised on the same
 device with the default EOS and watchdog switches unset. Static no-B H.264 and
@@ -502,7 +501,7 @@ the firmware/input failure. Keep zero-copy disabled for dynamic-resolution
 clients until a caller that reuses one VA context across the change is tested.
 No Chrome or driver source change was made in this follow-up.
 
-## Zero-copy batch-contract guard (2026-08-30, `.142`)
+## Zero-copy batch-contract guard (2026-08-30, replacement target)
 
 An opt-in probe with `V4L2_VA_ZERO_COPY=1` and `V4L2_VA_BATCH_SIZE=8` showed
 that Iris can hold the aggregated OUTPUT until STOP when only one imported
@@ -520,13 +519,14 @@ unsupported throughput experiment here; the guard's purpose is to prevent it
 from being mistaken for a working zero-copy mode.
 
 After deploying the guard, the explicit one-AU run (`V4L2_VA_ZERO_COPY=1`,
-`V4L2_VA_BATCH_SIZE=1`) passed the complete 48-frame matrix on `.142`:
+`V4L2_VA_BATCH_SIZE=1`) passed the complete 48-frame matrix on the replacement
+target:
 H.264, VP9, and HEVC each produced exact software framemd5 with strict
 `49 CAPTURE / 48 OUTPUT / 1 LAST` accounting and zero timeout/timestamp-miss
 diagnostics. H.264 and VP9 had zero `copy_surface_frame` records; HEVC had 48
 stable-copy records plus the expected `codec_reorder_contract` fallback.
 
-## Battery power comparison (2026-08-30, `.142`)
+## Battery power comparison (2026-08-30, replacement target)
 
 The comparison used the battery gauge exposed at
 `/sys/class/power_supply/qcom-battmgr-bat`: `voltage_now` multiplied by the

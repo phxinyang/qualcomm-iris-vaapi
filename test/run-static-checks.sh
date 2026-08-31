@@ -56,6 +56,7 @@ run iris-surface-limits-check sh "$test_dir/iris-surface-limits-check.sh" "$root
 run iris-codec-matrix-check sh "$test_dir/iris-codec-matrix-check.sh" "$root"
 run iris-experiment-guard-self-test sh "$test_dir/iris-experiment-guard-self-test.sh" "$root"
 run iris-eos-check-self-test sh "$test_dir/iris-eos-check-self-test.sh" "$root"
+run iris-setup-path-check sh "$test_dir/iris-setup-path-check.sh" "$root"
 run provenance-python-syntax python3 -c \
     'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' \
     "$test_dir/remote/provenance.py"

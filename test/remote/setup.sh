@@ -11,14 +11,32 @@
 # corpus downloads alone.
 #
 # Environment:
-#   IRIS_REMOTE_HOST   ssh destination   (default sheng)
+#   IRIS_REMOTE_HOST   ssh destination   (required)
 #   IRIS_LAB_ROOT      remote lab root   (default ~/Lab/iris-vaapi-lab)
 
 set -eu
 
-host=${IRIS_REMOTE_HOST:-sheng}
+host=${IRIS_REMOTE_HOST:-}
+if [ -z "$host" ]; then
+    echo 'FAIL IRIS_REMOTE_HOST is required for remote setup' >&2
+    exit 2
+fi
 lab_root=${IRIS_LAB_ROOT:-Lab/iris-vaapi-lab}
-
+fail_lab_root() {
+    echo "FAIL unsafe IRIS_LAB_ROOT: '$lab_root'" >&2
+    exit 1
+}
+case "$lab_root" in
+    ''|.|..|-*|/*|./*|../*|*/./*|*/.|*/../*|*/..|*//*|*/|*[!A-Za-z0-9_./-]*)
+        fail_lab_root
+        ;;
+esac
+case "$lab_root" in
+    Lab/*) ;;
+    *) fail_lab_root ;;
+esac
+# The lab-root whitelist above makes this deliberate local interpolation safe.
+# shellcheck disable=SC2087
 ssh "$host" "sh -s" <<REMOTE
 set -eu
 lab="\$HOME/$lab_root"

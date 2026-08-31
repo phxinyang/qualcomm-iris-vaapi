@@ -43,6 +43,8 @@ test('iris-eos-check-self-test', find_program('iris-eos-check-self-test.sh'),
      args: [meson.project_source_root()])
 test('iris-deploy-path-check', find_program('iris-deploy-path-check.sh'),
      args: [meson.project_source_root()])
+test('iris-setup-path-check', find_program('iris-setup-path-check.sh'),
+     args: [meson.project_source_root()])
 test('provenance-self-test', find_program('provenance-self-test.sh'),
      args: [meson.project_source_root()])
 test('electron-video-report-check', find_program('electron-video-report-check.sh'),

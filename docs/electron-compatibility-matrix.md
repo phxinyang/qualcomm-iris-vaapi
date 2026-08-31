@@ -48,8 +48,8 @@ The recorded launches set `LIBVA_DRIVER_NAME=v4l2` and a dynamically resolved
 profile. These runs are not a proof that a fresh Electron install discovers the
 system driver without an explicit environment override.
 
-The Iris decoder node was resolved dynamically as `/dev/video17` during this
-boot. Do not encode that number in an application launcher; use the project's
+The Iris decoder node was resolved dynamically during this boot. Do not encode
+the boot-specific number in an application launcher; use the project's
 `iris_resolve_device` logic or `LIBVA_V4L2_VIDEO_PATH` for diagnostics.
 
 ## Next Electron validation gate

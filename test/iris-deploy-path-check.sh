@@ -30,7 +30,7 @@ assert_rejected() {
     label=$1
     value=$2
     : >"$calls"
-    if PATH="$scratch/bin:$PATH" IRIS_REMOTE_ROOT="$value" sh "$deploy" >"$scratch/out" 2>"$scratch/err"; then
+    if PATH="$scratch/bin:$PATH" IRIS_REMOTE_HOST=shim IRIS_REMOTE_ROOT="$value" sh "$deploy" >"$scratch/out" 2>"$scratch/err"; then
         echo "FAIL unsafe root accepted: $label" >&2
         exit 1
     fi
@@ -64,6 +64,7 @@ assert_rejected lab-root-only 'Lab'
 
 : >"$calls"
 if PATH="$scratch/bin:$PATH" \
+    IRIS_REMOTE_HOST=shim \
     IRIS_REMOTE_ROOT='Lab/iris-vaapi-lab/src' \
     IRIS_SOURCE_COMMIT=0000000000000000000000000000000000000000 \
     IRIS_TRACKED_SOURCE_SHA256=1111111111111111111111111111111111111111111111111111111111111111 \

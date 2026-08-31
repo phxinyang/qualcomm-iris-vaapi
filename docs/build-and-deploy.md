@@ -13,11 +13,16 @@ The last command must print no `undefined symbol` lines. A successful link is
 not enough for a VA-API driver: an unresolved relocation otherwise appears to
 clients as a silent software-decoder fallback.
 
-For a tablet or other V4L2 target, set `IRIS_REMOTE_HOST` and run:
+For a tablet or other V4L2 target, set `IRIS_REMOTE_HOST` to an SSH config
+host or address and run:
 
 ```sh
-IRIS_REMOTE_HOST=sheng ./test/remote/deploy.sh
+IRIS_REMOTE_HOST=your-tablet-host ./test/remote/deploy.sh
 ```
+
+The remote scripts require this variable and do not contain a project-local
+host default. This keeps a public checkout from accidentally targeting a
+maintainer's private lab machine.
 
 The deploy script synchronizes by content, excludes generated build and test
 artifacts, refreshes source timestamps, performs a clean Ninja rebuild, and
@@ -172,7 +177,7 @@ kIsPlatformVideoDecoder = true
 ```
 
 The qualified Chrome 151 run on August 30, 2026 reached this gate with the
-project driver mapped in the GPU process, dynamic Iris node `/dev/video17`,
+project driver mapped in the GPU process and a dynamically resolved Iris node,
 `VaapiVideoDecoder`, and `kIsPlatformVideoDecoder=true`; its VA trace then
 showed repeated `vaBeginPicture`/`vaEndPicture` and `stateful capture complete`
 events. The Fedora Chromium 151 run is a separate native-V4L2 baseline and
