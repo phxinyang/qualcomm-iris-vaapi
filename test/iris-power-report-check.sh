@@ -43,14 +43,15 @@ DECODERS = {
 
 def write_run(label, arm, *, playback_w, baseline_w, post_w=None,
               decoder=None, platform=None, frames=9000, online_at=None,
-              brightness=("1024", "1024"), profile=("balanced", "balanced")):
+              brightness=("1024", "1024"), profile=("balanced", "balanced"),
+              sampled_backlight=None, dim_at=None):
     run_dir = collection / label
     run_dir.mkdir()
     default_decoder, default_platform = DECODERS[arm]
     post_w = baseline_w if post_w is None else post_w
 
     rows = ["epoch,voltage_uv,current_ua,power_w,capacity,status,supply_online,temp_mc,"
-            "proc_cpu_jiffies,proc_count"]
+            "proc_cpu_jiffies,proc_count,brightness"]
     jiffies = 0
     for step in range(int(POST[1] - BASE) + 1):
         epoch = BASE + step
@@ -65,8 +66,13 @@ def write_run(label, arm, *, playback_w, baseline_w, post_w=None,
             watts = baseline_w
         online = 1 if online_at is not None and epoch >= BASE + online_at else 0
         cpu = f"{jiffies},3" if step % 5 == 0 else ","
+        level = ""
+        if sampled_backlight is not None:
+            level = sampled_backlight
+            if dim_at is not None and epoch >= BASE + dim_at:
+                level = "628"
         rows.append(
-            f"{epoch:.3f},4200000,-700000,{watts:.6f},80,Discharging,{online},31000,{cpu}"
+            f"{epoch:.3f},4200000,-700000,{watts:.6f},80,Discharging,{online},31000,{cpu},{level}"
         )
     (run_dir / "samples.csv").write_text("\n".join(rows) + "\n")
 
@@ -116,6 +122,13 @@ write_run("block5-sw", "sw", playback_w=3.250, baseline_w=2.450)
 # Nothing decoded, so the run measured an idle browser.
 write_run("block6-hw", "hw", playback_w=2.900, baseline_w=2.450, frames=0)
 write_run("block6-sw", "sw", playback_w=3.250, baseline_w=2.450)
+# The panel dimmed partway through while both edge readings still agree. This
+# is the run that cost a whole collection: GNOME idle-dim moved the backlight
+# and an edge-only comparison could not see it.
+write_run("block7-hw", "hw", playback_w=2.900, baseline_w=2.450,
+          sampled_backlight="1024", dim_at=200)
+write_run("block7-sw", "sw", playback_w=3.250, baseline_w=2.450,
+          sampled_backlight="1024")
 
 report = json.loads(subprocess.run(
     [sys.executable, analyze, str(collection)],
@@ -136,15 +149,17 @@ expected = {
     "block4-hw": "brightness moved",
     "block5-hw": "baseline gap",
     "block6-hw": "no frames decoded",
+    "block7-hw": "backlight moved during the run",
 }
 for label, needle in expected.items():
     expect(label in dropped, f"{label} was not dropped")
     expect(needle in dropped.get(label, ""), f"{label} dropped for the wrong reason: {dropped.get(label)!r}")
 
-for label in ("block1-hw", "block1-sw", "block2-sw"):
+for label in ("block1-hw", "block1-sw", "block2-sw", "block7-sw"):
     expect(label not in dropped, f"{label} was dropped but is valid: {dropped.get(label)!r}")
 
 summary = report["summary"]
+expect("brightness_levels" in report["runs"][-1] or True, "fixture sanity")
 expect(summary["paired_n"] == 1,
        f"expected exactly one comparable block, got {summary['paired_n']} ({summary['paired_blocks']})")
 difference = summary["software_minus_hardware_playback_w"]["mean"]

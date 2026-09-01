@@ -182,6 +182,12 @@ lock_gsetting org.gnome.desktop.screensaver lock-enabled false
 lock_gsetting org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type nothing
 lock_gsetting org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type nothing
 lock_gsetting org.gnome.settings-daemon.plugins.power power-saver-profile-on-low-battery false
+lock_gsetting org.gnome.settings-daemon.plugins.power ambient-enabled false
+# idle-dim is the one that actually cost a collection. Nobody touches a tablet
+# during an unattended power run, so GNOME dimmed the panel partway through the
+# first block and every later run was measured against a backlight the harness
+# thought it had pinned. Blanking and suspend were locked; dimming was not.
+lock_gsetting org.gnome.settings-daemon.plugins.power idle-dim false
 
 power_profile=''
 command -v powerprofilesctl >/dev/null 2>&1 && power_profile=$(powerprofilesctl get 2>/dev/null || true)
@@ -284,9 +290,13 @@ run_once() {
     # The match string starts with "--", so it has to be passed in the
     # --opt=value form: as a separate argument argparse reads it as the next
     # option and the sampler exits before writing a single row.
+    run_brightness_start=''
+    [ -n "$backlight_dir" ] && run_brightness_start=$(cat "$backlight_dir/brightness")
+
     python3 "$sampler" \
         --battery "$battery" \
         --thermal-zone "$thermal" \
+        --backlight "$backlight_dir" \
         --proc-match="--user-data-dir=$out/profiles" \
         --interval 1 \
         --out "$run_dir/samples.csv" &
@@ -375,8 +385,9 @@ json.dump({
     "cdp_exit": $rc,
     "baseline_pre": [$baseline_pre_start, $baseline_pre_end],
     "baseline_post": [$baseline_post_start, $baseline_post_end],
-    "brightness_start": "$brightness_start",
+    "brightness_start": "$run_brightness_start",
     "brightness_end": "$brightness_end",
+    "brightness_session_start": "$brightness_start",
     "power_profile_start": "$power_profile",
     "power_profile_end": "$power_profile_end",
 }, open(sys.argv[1], "w"), indent=2, sort_keys=True)

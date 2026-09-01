@@ -108,6 +108,11 @@ def main(argv=None):
         help="external supply directory to watch for online=1 (repeatable)",
     )
     parser.add_argument("--thermal-zone", default="")
+    parser.add_argument(
+        "--backlight",
+        default="",
+        help="backlight device directory whose brightness is recorded per sample",
+    )
     parser.add_argument("--interval", type=float, default=1.0)
     parser.add_argument(
         "--proc-match",
@@ -150,7 +155,7 @@ def main(argv=None):
     with open(args.out, "w", encoding="utf-8", buffering=1) as handle:
         handle.write(
             "epoch,voltage_uv,current_ua,power_w,capacity,status,supply_online,temp_mc,"
-            "proc_cpu_jiffies,proc_count\n"
+            "proc_cpu_jiffies,proc_count,brightness\n"
         )
         while not stop["now"]:
             if deadline is not None and time.monotonic() >= deadline:
@@ -164,7 +169,7 @@ def main(argv=None):
             if args.proc_match and args.proc_every > 0 and sample % args.proc_every == 0:
                 jiffies, procs = matching_cpu_jiffies(args.proc_match)
             handle.write(
-                "%.3f,%s,%s,%s,%s,%s,%d,%s,%s,%s\n"
+                "%.3f,%s,%s,%s,%s,%s,%d,%s,%s,%s,%s\n"
                 % (
                     time.time(),
                     "" if voltage is None else voltage,
@@ -176,6 +181,7 @@ def main(argv=None):
                     thermal_millicelsius(args.thermal_zone) or "",
                     jiffies,
                     procs,
+                    read_field(args.backlight, "brightness") if args.backlight else "",
                 )
             )
             sample += 1

@@ -71,6 +71,7 @@ def load_samples(path):
             row["proc_cpu_jiffies"] = (
                 int(row["proc_cpu_jiffies"]) if row.get("proc_cpu_jiffies") else None
             )
+            row["brightness"] = (row.get("brightness") or "").strip()
             rows.append(row)
     return rows
 
@@ -145,11 +146,6 @@ def analyse_run(run_dir, settle, baseline_gap_limit):
         result["valid"] = False
         result["reasons"].append("no frames decoded inside the window")
 
-    if run.get("brightness_start") != run.get("brightness_end"):
-        result["valid"] = False
-        result["reasons"].append(
-            f"brightness moved {run.get('brightness_start')} -> {run.get('brightness_end')}"
-        )
     if run.get("power_profile_start") != run.get("power_profile_end"):
         result["valid"] = False
         result["reasons"].append("power profile switched mid-run")
@@ -165,6 +161,23 @@ def analyse_run(run_dir, settle, baseline_gap_limit):
     if any(r.get("status") not in ("", "Discharging") for r in rows):
         result["valid"] = False
         result["reasons"].append("battery left the discharging state")
+
+    # Panel power dwarfs the decode difference, so a backlight that moves
+    # inside a run makes that run uncomparable. Prefer the per-sample column:
+    # comparing two edge readings cannot distinguish a panel that dimmed and
+    # recovered from one that never moved, and an edge captured before the
+    # first block reports every later run as broken.
+    levels = sorted({r["brightness"] for r in rows if r.get("brightness")})
+    if levels:
+        result["brightness_levels"] = levels
+        if len(levels) > 1:
+            result["valid"] = False
+            result["reasons"].append("backlight moved during the run: " + ", ".join(levels))
+    elif run.get("brightness_start") != run.get("brightness_end"):
+        result["valid"] = False
+        result["reasons"].append(
+            f"brightness moved {run.get('brightness_start')} -> {run.get('brightness_end')}"
+        )
 
     pre_start, pre_end = run["baseline_pre"]
     post_start, post_end = run["baseline_post"]
