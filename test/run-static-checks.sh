@@ -80,6 +80,11 @@ run iris-setup-path-check sh "$test_dir/iris-setup-path-check.sh" "$root"
 run provenance-python-syntax python3 -c \
     'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' \
     "$test_dir/remote/provenance.py"
+for helper in cdp power-sampler power-analyze; do
+    run "$helper-python-syntax" python3 -c \
+        'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' \
+        "$test_dir/remote/$helper.py"
+done
 run provenance-self-test sh "$test_dir/provenance-self-test.sh" "$root"
 run electron-video-report-check sh "$test_dir/electron-video-report-check.sh" "$root"
 

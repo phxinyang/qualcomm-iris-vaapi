@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Iris power comparison playback</title>
+<!--
+  Deliberately inert. The page holds one looping muted video and nothing else:
+  no requestAnimationFrame loop, no counter repainting the DOM, no network
+  request after load. Anything that runs per frame here would land in the
+  measured battery draw and be indistinguishable from decode cost.
+
+  Frame accounting is read once at each window edge over the DevTools
+  protocol, so this page never needs to observe itself.
+-->
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  video { display: block; width: 100vw; height: 100vh; object-fit: contain; background: #000; }
+</style>
+</head>
+<body>
+<video id="clip" autoplay muted loop playsinline disablepictureinpicture></video>
+<script>
+  // The clip path is supplied by the harness so the same page can measure any
+  // codec or resolution without editing markup that has already been used for
+  // a published run.
+  const params = new URLSearchParams(location.search);
+  const src = params.get('src');
+  const video = document.getElementById('clip');
+  if (src) {
+    video.src = src;
+  }
+  video.play().catch(() => {
+    // Autoplay is expected to succeed under --autoplay-policy; a rejection is
+    // surfaced through the element's paused state, which the harness polls
+    // before it opens the measurement window.
+  });
+</script>
+</body>
+</html>
