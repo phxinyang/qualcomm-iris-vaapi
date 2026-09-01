@@ -148,14 +148,19 @@ done
 
 if [ -n "$brightness" ] && [ -n "$backlight_dir" ]; then
     if command -v brightnessctl >/dev/null 2>&1; then
-        brightnessctl -d "$(basename -- "$backlight_dir")" set "$brightness" >/dev/null \
-            || note 'WARN brightnessctl could not set the backlight; continuing with the current value'
+        device=$(basename -- "$backlight_dir")
+        brightnessctl -d "$device" set "$brightness" >/dev/null 2>&1 \
+            || sudo -n brightnessctl -d "$device" set "$brightness" >/dev/null 2>&1 \
+            || note 'WARN could not set the backlight; continuing with the current value'
     else
         note 'WARN brightnessctl is missing; continuing with the current value'
     fi
 fi
 brightness_start=''
 [ -n "$backlight_dir" ] && brightness_start=$(cat "$backlight_dir/brightness")
+# A pinned value is a convenience; a stable value is the requirement. Every run
+# records the backlight at both edges and the analyser drops a run that moved.
+[ -n "$brightness_start" ] && note "backlight $backlight_dir=$brightness_start"
 
 # ------------------------------------------------------------ environment lock
 
@@ -257,13 +262,31 @@ run_once() {
 
     kill_browser
 
+    # The match string starts with "--", so it has to be passed in the
+    # --opt=value form: as a separate argument argparse reads it as the next
+    # option and the sampler exits before writing a single row.
     python3 "$sampler" \
         --battery "$battery" \
         --thermal-zone "$thermal" \
-        --proc-match "--user-data-dir=$out/profiles" \
+        --proc-match="--user-data-dir=$out/profiles" \
         --interval 1 \
         --out "$run_dir/samples.csv" &
     sampler_pid=$!
+
+    # A sampler that dies at startup produced a full run and a PASS line with
+    # no gauge data behind it. Require evidence that it is actually recording
+    # before spending five minutes of battery on the arm.
+    waited=0
+    while [ ! -s "$run_dir/samples.csv" ] || [ "$(wc -l <"$run_dir/samples.csv")" -lt 2 ]; do
+        waited=$((waited + 1))
+        if [ "$waited" -gt 10 ]; then
+            kill "$sampler_pid" 2>/dev/null || true
+            fail "sampler produced no rows for $label; see $run_dir/samples.csv"
+        fi
+        kill -0 "$sampler_pid" 2>/dev/null \
+            || fail "sampler exited immediately for $label"
+        sleep 1
+    done
 
     baseline_pre_start=$(date +%s.%N)
     sleep "$baseline_seconds"
