@@ -273,6 +273,10 @@ def command_run(args):
         # a cold pipeline include GPU process bring-up and page layout.
         connection.drain(args.warmup_seconds)
         report["warmup_seconds"] = args.warmup_seconds
+        # Snapshot the counters before the window opens, not at playback
+        # detection: otherwise the reported frame delta silently covers warmup
+        # too and does not describe the interval the power samples cover.
+        report["window_start_stats"] = connection.evaluate(VIDEO_STATS_JS)
         report["measure_start_epoch"] = time.time()
         connection.drain(args.measure_seconds)
         report["measure_end_epoch"] = time.time()
@@ -291,7 +295,7 @@ def command_run(args):
     finally:
         connection.close()
 
-    start = report.get("start_stats") or {}
+    start = report.get("window_start_stats") or {}
     end = report.get("end_stats") or {}
     for key in ("decoded_frames", "dropped_frames"):
         if isinstance(start.get(key), int) and isinstance(end.get(key), int):
