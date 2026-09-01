@@ -39,6 +39,19 @@ esac
 case "$backup" in ''|/*/backup/v4l2_drv_video.so) ;; *) fail "unexpected backup path: $backup" ;; esac
 [ -f "$driver" ] || fail "installed driver is missing: $driver"
 [ -L "$driver" ] && fail "refusing to remove symlinked driver: $driver"
+
+# The same layout now also ships as an RPM and an Arch package, and those
+# install the manifest too. Deleting the files behind the package manager
+# leaves it convinced they are still there, so the next upgrade or verify
+# reports a corrupt package and reinstalling does not obviously fix it.
+# Whoever owns the file gets to remove it.
+if command -v rpm >/dev/null 2>&1 && rpm -qf "$driver" >/dev/null 2>&1; then
+    fail "$driver belongs to $(rpm -qf "$driver"); remove it with dnf or rpm"
+fi
+if command -v pacman >/dev/null 2>&1 && pacman -Qo "$driver" >/dev/null 2>&1; then
+    fail "$driver belongs to $(pacman -Qoq "$driver"); remove it with pacman"
+fi
+
 actual=$(sha256sum "$driver" | awk '{print $1}')
 [ "$actual" = "$expected" ] || fail "refusing to remove modified driver (expected $expected, got $actual)"
 rm -f "$driver" "$launcher"
