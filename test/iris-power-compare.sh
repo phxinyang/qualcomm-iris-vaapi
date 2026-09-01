@@ -186,12 +186,31 @@ lock_gsetting org.gnome.settings-daemon.plugins.power power-saver-profile-on-low
 power_profile=''
 command -v powerprofilesctl >/dev/null 2>&1 && power_profile=$(powerprofilesctl get 2>/dev/null || true)
 
+# Kill the browser without killing the sampler.
+#
+# The sampler is told which processes to account for, so its own argv contains
+# the profile path too and every pattern that finds Chrome also finds it. Two
+# rounds of pattern anchoring did not fix that; both times the sampler died
+# with the browser and the post-run baseline window came back empty. Match on
+# the pattern, then exclude the sampler by pid.
 kill_browser() {
-    pkill -f -- "--user-data-dir=$out/profiles" 2>/dev/null || true
     waited=0
-    while pgrep -f -- "--user-data-dir=$out/profiles" >/dev/null 2>&1; do
+    while :; do
+        victims=''
+        for pid in $(pgrep -f -- "--user-data-dir=$out/profiles" 2>/dev/null || true); do
+            [ "$pid" = "${sampler_pid:-}" ] && continue
+            [ "$pid" = "$$" ] && continue
+            victims="$victims $pid"
+        done
+        [ -n "$victims" ] || return 0
+        if [ "$waited" -gt 30 ]; then
+            # shellcheck disable=SC2086
+            kill -9 $victims 2>/dev/null || true
+            return 0
+        fi
+        # shellcheck disable=SC2086
+        [ "$waited" -eq 0 ] && { kill $victims 2>/dev/null || true; }
         waited=$((waited + 1))
-        [ "$waited" -gt 30 ] && { pkill -9 -f -- "--user-data-dir=$out/profiles" 2>/dev/null || true; break; }
         sleep 1
     done
 }
@@ -319,6 +338,7 @@ run_once() {
     # be mistaken for /dev/video11.
     : >"$run_dir/iris-node-holders.txt"
     for pid in $(pgrep -f -- "--user-data-dir=$out/profiles" 2>/dev/null || true); do
+        [ "$pid" = "${sampler_pid:-}" ] && continue
         for fd in "/proc/$pid/fd"/*; do
             [ -e "$fd" ] || continue
             [ "$(readlink "$fd" 2>/dev/null || true)" = "$node" ] || continue
