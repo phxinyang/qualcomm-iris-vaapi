@@ -106,6 +106,6 @@ IRIS_SOURCE_DIRTY=%{_source_dirty} \
 %{_datadir}/iris-vaapi/install-manifest.txt
 
 %changelog
-* Tue Sep 02 2026 Iris VA-API maintainers - 0.1.0-1
+* Wed Sep 02 2026 Iris VA-API maintainers - 0.1.0-1
 - First packaged snapshot: driver, launcher, desktop entries and the install
   provenance manifest in one artifact.

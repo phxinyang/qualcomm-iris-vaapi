@@ -13,11 +13,14 @@ fail() { echo "uninstall-system.sh: $*" >&2; exit 1; }
 get() { awk -F= -v key="$1" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$manifest"; }
 schema=$(get schema)
 [ "$schema" = qualcomm-iris-vaapi/system-install-v1 ] || fail "unsupported manifest schema: $schema"
-driver=$(get driver_path)
-launcher=$(get launcher_path)
-desktop_dir=$(get desktop_dir)
+# The manifest records target paths without DESTDIR so a packaged build does
+# not carry its build root; a staged uninstall re-applies its own.
+driver=$destdir$(get driver_path)
+launcher=$destdir$(get launcher_path)
+desktop_dir=$destdir$(get desktop_dir)
 expected=$(get artifact_sha256)
 backup=$(get previous_driver_backup)
+[ -n "$backup" ] && backup=$destdir$backup
 [ -n "$driver" ] || fail 'manifest has no driver path'
 [ -n "$launcher" ] || fail 'manifest has no launcher path'
 [ -n "$desktop_dir" ] || fail 'manifest has no desktop directory'

@@ -129,8 +129,13 @@ manifest_new=$manifest.new.$$
     printf 'installed_at_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'source_commit=%s\nsource_dirty=%s\ntracked_source_sha256=%s\n' "$source_commit" "$source_dirty" "$source_digest"
     printf 'artifact_sha256=%s\nartifact_size=%s\n' "$artifact_sha256" "$artifact_size"
-    printf 'driver_path=%s\nlauncher_path=%s\ndesktop_dir=%s\n' "$destdir$driver_dir/v4l2_drv_video.so" "$destdir$prefix/bin/iris-vaapi-browser" "$destdir$prefix/share/applications"
-    printf 'previous_driver_backup=%s\nprevious_driver_sha256=%s\n' "$backup" "$previous_sha256"
+    # Record where the files will live on the target, not where they were
+    # staged. A DESTDIR build otherwise bakes the build root into the manifest,
+    # which rpmbuild's check-buildroot rejects outright and which would point
+    # uninstall-system.sh at a path that does not exist on the installed
+    # system. Consumers prepend their own DESTDIR.
+    printf 'driver_path=%s\nlauncher_path=%s\ndesktop_dir=%s\n' "$driver_dir/v4l2_drv_video.so" "$prefix/bin/iris-vaapi-browser" "$prefix/share/applications"
+    printf 'previous_driver_backup=%s\nprevious_driver_sha256=%s\n' "${backup#"$destdir"}" "$previous_sha256"
 } >"$manifest_new"
 mv -f "$manifest_new" "$manifest"
 
