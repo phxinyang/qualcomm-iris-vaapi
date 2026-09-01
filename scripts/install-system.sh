@@ -18,6 +18,8 @@ Environment:
   IRIS_SOURCE_COMMIT   Full source object id when .git is unavailable
   IRIS_TRACKED_SOURCE_SHA256
                        SHA-256 over tracked source paths when .git is unavailable
+  IRIS_SOURCE_DIRTY    0 when the caller verified a clean source tree and .git
+                       is unavailable; anything else records a dirty install
 
 The driver directory is read from libva.pc. This script never configures a
 global LIBVA_DRIVERS_PATH and never writes a fixed /dev/video number.
@@ -65,6 +67,15 @@ if command -v git >/dev/null 2>&1 && git -C "$root" rev-parse --git-dir >/dev/nu
 else
     source_commit=${IRIS_SOURCE_COMMIT:-}
     source_digest=${IRIS_TRACKED_SOURCE_SHA256:-}
+    # Without .git this used to record every install as dirty, including a
+    # clean packaged build, which made the field carry no information. The
+    # caller may state the source state it verified; anything but an explicit
+    # 0 stays dirty, so a missing or malformed value never upgrades a claim.
+    case "${IRIS_SOURCE_DIRTY:-}" in
+        0) source_dirty=0 ;;
+        ''|1) source_dirty=1 ;;
+        *) fail 'IRIS_SOURCE_DIRTY must be 0 or 1' ;;
+    esac
 fi
 case "$source_commit" in
     ????????????????????????????????????????|????????????????????????????????????????????????????????????????) ;;
