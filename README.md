@@ -40,6 +40,13 @@ The install helper records the artifact hash and source identity under
 with `sudo ./scripts/uninstall-system.sh`, which restores a previously backed
 up VA driver and refuses to remove a modified artifact.
 
+For a system that should decode in hardware on first boot, build a package
+rather than running the helper by hand. `packaging/fedora/libva-v4l2-iris.spec`
+and `packaging/arch/PKGBUILD` both install through the same helper, so the
+packaged layout cannot drift from the lab one, and both require `v4l-utils`
+because the launcher resolves the decoder node by driver name. See
+[`docs/build-and-deploy.md`](docs/build-and-deploy.md).
+
 The helper also installs `iris-vaapi-browser` and four desktop entries for
 Chromium and Google Chrome. The normal entries are VA-only: they use Wayland,
 leave the packaged browser's video-decoder feature selection at its tested

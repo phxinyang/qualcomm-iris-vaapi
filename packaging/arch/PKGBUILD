@@ -1,0 +1,70 @@
+# Maintainer: Iris VA-API maintainers
+#
+# Arch package for the Qualcomm Iris VA-API backend, shaped to drop into the
+# pkgs/ tree of an arch-xiaomi-sheng style image build. Add it to that repo's
+# package list so the generated rootfs ships the driver in libva's standard
+# directory; a user should never have to set LIBVA_DRIVERS_PATH by hand.
+#
+# Like the Fedora spec, package() installs through scripts/install-system.sh
+# instead of `meson install`, because that helper is the one path that also
+# resolves libva's canonical driverdir and writes the provenance manifest.
+#
+# Building from a checkout:
+#
+#   makepkg -si \
+#       IRIS_SOURCE_COMMIT=$(git -C ../.. rev-parse HEAD) \
+#       IRIS_TRACKED_SOURCE_SHA256=$(git -C ../.. ls-files -z \
+#           | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+#
+# Leaving those unset records the install as dirty, which is the honest answer
+# when the source identity was not supplied.
+
+pkgname=libva-v4l2-iris
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="VA-API backend for the Qualcomm Iris V4L2 stateful decoder"
+arch=('aarch64')
+url="https://github.com/xinyang/qualcomm-iris-vaapi"
+license=('MIT' 'LGPL-2.1-or-later')
+# v4l-utils is not optional: the launcher resolves the decoder node by driver
+# name because the node number moves between boots on this device, and it
+# refuses to fall back to a fixed /dev/video number that may be a camera.
+depends=('libva' 'libdrm' 'systemd-libs' 'v4l-utils')
+makedepends=('meson' 'ninja' 'pkgconf' 'python')
+optdepends=('chromium: Chromium (Iris VA-API) desktop entry'
+            'google-chrome: Google Chrome (Iris VA-API) desktop entry')
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    arch-meson "$pkgname-$pkgver" build
+    meson compile -C build
+}
+
+check() {
+    # The repository's own gate, with scratch directories kept inside the
+    # build tree rather than the builder's home.
+    IRIS_TEST_SCRATCH_ROOT="$PWD/build/scratch" meson test -C build --print-errorlogs
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+
+    local dirty=1
+    if [ -n "${IRIS_SOURCE_COMMIT:-}" ] && [ -n "${IRIS_TRACKED_SOURCE_SHA256:-}" ]; then
+        dirty=${IRIS_SOURCE_DIRTY:-0}
+    fi
+
+    DESTDIR="$pkgdir" \
+    IRIS_INSTALL_PREFIX=/usr \
+    IRIS_VA_DRIVER_DIR=/usr/lib/dri \
+    IRIS_SOURCE_COMMIT="${IRIS_SOURCE_COMMIT:-0000000000000000000000000000000000000000}" \
+    IRIS_TRACKED_SOURCE_SHA256="${IRIS_TRACKED_SOURCE_SHA256:-0000000000000000000000000000000000000000000000000000000000000000}" \
+    IRIS_SOURCE_DIRTY="$dirty" \
+        sh scripts/install-system.sh "$srcdir/build"
+
+    install -Dm644 COPYING "$pkgdir/usr/share/licenses/$pkgname/COPYING"
+    install -Dm644 COPYING.LGPL "$pkgdir/usr/share/licenses/$pkgname/COPYING.LGPL"
+    install -Dm644 COPYING.MIT "$pkgdir/usr/share/licenses/$pkgname/COPYING.MIT"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

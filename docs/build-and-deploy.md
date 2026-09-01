@@ -213,6 +213,51 @@ Validate Chromium and Google Chrome separately; Electron applications such as
 VS Code and Obsidian need their own version, Wayland/X11, sandbox, and actual
 decoder result recorded rather than inheriting the browser result.
 
+## Distribution packaging
+
+`scripts/install-system.sh` is enough for a lab target, but it needs a build
+tree, a checkout and root. For an image that should work on first boot, build
+a package instead. Both manifests live under `packaging/` and both install
+through that same script, so the packaged layout cannot drift from the one the
+lab uses:
+
+| Target | Manifest | libva driver directory |
+| --- | --- | --- |
+| Fedora aarch64 | `packaging/fedora/libva-v4l2-iris.spec` | `%{_libdir}/dri` |
+| Arch aarch64 | `packaging/arch/PKGBUILD` | `/usr/lib/dri` |
+
+```sh
+# Fedora
+git archive --format=tar.gz --prefix=libva-v4l2-iris-0.1.0/ \
+    -o ~/rpmbuild/SOURCES/libva-v4l2-iris-0.1.0.tar.gz HEAD
+rpmbuild -ba packaging/fedora/libva-v4l2-iris.spec \
+    --define "source_commit $(git rev-parse HEAD)" \
+    --define "tracked_sha256 $(git ls-files -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
+```
+
+Both declare `v4l-utils` as a hard runtime dependency. The launcher resolves
+the decoder node by driver name because the number moves between boots on this
+device, and without `v4l2-ctl` it exits instead of falling back to a fixed
+`/dev/videoN` that may be a camera.
+
+Neither browser is a dependency. The driver serves any VA-API client, and each
+desktop entry names the browser it launches in `TryExec` so an entry for an
+absent browser hides itself instead of appearing in the menu and failing on
+click.
+
+`test/iris-packaging-check.sh` runs in CI and fails when a shipped desktop
+entry is missing from the spec's `%files`, when a manifest stops delegating to
+`install-system.sh`, when `TryExec` disagrees with the browser the entry
+launches, or when `v4l-utils` is dropped.
+
+For the Arch image projects, drop `packaging/arch/PKGBUILD` into the image
+repository's `pkgs/libva-v4l2-iris/` directory and add it to the package list.
+The generated rootfs then ships the driver in libva's standard directory and
+no user has to set `LIBVA_DRIVERS_PATH`. That path is not validated here: the
+qualified target in this repository is Fedora, and an Arch image needs its own
+`vainfo`, `media-internals` and battery acceptance before its result may be
+claimed.
+
 ## Dynamic resolution qualification
 
 The production/fallback/rejected codec boundary is machine-readable in
