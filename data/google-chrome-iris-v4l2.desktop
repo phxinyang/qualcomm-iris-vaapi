@@ -4,7 +4,7 @@ Type=Application
 Name=Google Chrome (Iris VA-API)
 Comment=Google Chrome with Qualcomm Iris VA-API video decoding
 Exec=iris-vaapi-browser --browser=chrome -- %U
-TryExec=iris-vaapi-browser
+TryExec=google-chrome-stable
 Terminal=false
 Icon=google-chrome
 Categories=Network;WebBrowser;

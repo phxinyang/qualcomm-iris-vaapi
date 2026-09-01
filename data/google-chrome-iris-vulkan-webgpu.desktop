@@ -4,7 +4,7 @@ Type=Application
 Name=Google Chrome (Iris Vulkan/WebGPU experiment)
 Comment=Experimental Vulkan and ANGLE profile; video may fall back to software decoding
 Exec=iris-vaapi-browser --browser=chrome --vulkan-webgpu -- %U
-TryExec=iris-vaapi-browser
+TryExec=google-chrome-stable
 Terminal=false
 Icon=google-chrome
 Categories=Network;WebBrowser;

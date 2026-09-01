@@ -4,7 +4,7 @@ Type=Application
 Name=Chromium (Iris VA-API)
 Comment=Chromium with Qualcomm Iris VA-API video decoding
 Exec=iris-vaapi-browser --browser=chromium -- %U
-TryExec=iris-vaapi-browser
+TryExec=chromium
 Terminal=false
 Icon=chromium-browser
 Categories=Network;WebBrowser;

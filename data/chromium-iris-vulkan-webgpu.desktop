@@ -4,7 +4,7 @@ Type=Application
 Name=Chromium (Iris Vulkan/WebGPU experiment)
 Comment=Experimental Vulkan and ANGLE profile; video may fall back to software decoding
 Exec=iris-vaapi-browser --browser=chromium --vulkan-webgpu -- %U
-TryExec=iris-vaapi-browser
+TryExec=chromium
 Terminal=false
 Icon=chromium-browser
 Categories=Network;WebBrowser;

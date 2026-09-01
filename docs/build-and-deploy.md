@@ -129,20 +129,40 @@ env -u LIBVA_DRIVERS_PATH \
 ```
 
 The two normal desktop entries, `Chromium (Iris VA-API)` and
-`Google Chrome (Iris VA-API)`, use Wayland and leave the packaged browser's
-Linux video-decoder feature selection at its default:
+`Google Chrome (Iris VA-API)`, use Wayland and pass no video-decoder feature
+override at all:
 
 ```text
 --ozone-platform=wayland
---disable-features=AcceleratedVideoDecodeLinuxZeroCopyGL
 ```
 
 They do not add `--enable-features=Vulkan`, `--use-angle=vulkan`, or
-`--enable-unsafe-webgpu`. On Google Chrome 151.0.7922.173, explicitly adding
-`AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL` caused
-`PickDecoderOutputFormat()` to tear down the VA context before the first
-picture, so those feature flags are not part of the default launcher. The
-separately named Vulkan/WebGPU experiment adds its own graphics switches and
+`--enable-unsafe-webgpu`.
+
+The launcher used to add `--disable-features=AcceleratedVideoDecodeLinuxZeroCopyGL`
+here while this document claimed the selection was left at its default. On
+Google Chrome 151.0.7922.173 that switch is what loses hardware decode: the
+pipeline logs `VaapiVideoDecoder()`, then
+`PickDecoderOutputFormat(): Initializing ImageProcessor`, then
+`~VaapiVideoDecoder()`, and playback continues on `FFmpegVideoDecoder`. A
+five-configuration comparison on the qualified target with one 1920x1080 H.264
+clip measured:
+
+| Launch configuration | Decoder |
+| --- | --- |
+| no feature override | `VaapiVideoDecoder`, `kIsPlatformVideoDecoder=true` |
+| `--enable-features=AcceleratedVideoDecodeLinuxGL` | `VaapiVideoDecoder`, `kIsPlatformVideoDecoder=true` |
+| `--enable-features=AcceleratedVideoDecodeLinuxZeroCopyGL` | `VaapiVideoDecoder`, `kIsPlatformVideoDecoder=true` |
+| `--disable-features=AcceleratedVideoDecodeLinuxZeroCopyGL` | `FFmpegVideoDecoder` |
+| `--disable-features=AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL` | `FFmpegVideoDecoder` |
+
+The earlier note that `AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL`
+tore the VA context down describes a different, explicitly forced pair and is
+not contradicted by the table above; neither combination is used now.
+`test/run-static-checks.sh` fails if any `AcceleratedVideoDecode` switch
+returns to the VA-only path.
+
+The separately named Vulkan/WebGPU experiment adds its own graphics switches and
 uses a different browser profile. All four entries use
 profiles below `${XDG_CONFIG_HOME:-$HOME/.config}/iris-vaapi-browser`; this
 isolation ensures a pre-existing ordinary browser process cannot absorb a new

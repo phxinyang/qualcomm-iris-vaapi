@@ -180,8 +180,23 @@ if [ "$graphics_mode" = vulkan-webgpu ]; then
         "$@"
 fi
 
+# The VA-only default passes no video-decoder feature override at all.
+#
+# It used to force --disable-features=AcceleratedVideoDecodeLinuxZeroCopyGL.
+# On Chrome 151.0.7922.173 that switch is what breaks hardware decode: the
+# pipeline constructs VaapiVideoDecoder, reaches
+# PickDecoderOutputFormat(): Initializing ImageProcessor, destroys the decoder
+# and falls back to FFmpegVideoDecoder. Measured on the qualified target with
+# one 1920x1080 H.264 clip and five launch configurations: the packaged
+# default, --enable-features=AcceleratedVideoDecodeLinuxGL and
+# --enable-features=AcceleratedVideoDecodeLinuxZeroCopyGL each reached
+# VaapiVideoDecoder with kIsPlatformVideoDecoder=true, while disabling either
+# feature fell back to software.
+#
+# Leave the selection alone. Chromium's packaged default is the configuration
+# this project qualifies, and overriding it here is how the desktop entries
+# silently shipped software decode.
 exec "$browser" \
     "$common_args" \
     "--user-data-dir=$profile_dir" \
-    --disable-features=AcceleratedVideoDecodeLinuxZeroCopyGL \
     "$@"

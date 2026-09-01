@@ -41,12 +41,32 @@ run browser-launcher-unsets-build-path grep -Fq 'unset LIBVA_DRIVERS_PATH' "$lau
 run browser-launcher-dynamic-node grep -Fq 'iris_driver' "$launcher"
 run browser-launcher-no-fixed-node sh -c '! grep -Eq "/dev/video[0-9]+" "$1"' sh "$launcher"
 
-# Keep the known-good Chrome path free of the Linux GL decode feature. That
-# feature selects ImageProcessor output negotiation on Chrome 151 and causes
-# an immediate VA context teardown before the first picture. It remains valid
-# as a separately documented experiment only when explicitly requested.
-default_launcher=$(sed -n '/common_args=/,/if \[ "\$graphics_mode" = vulkan-webgpu \]/p' "$launcher")
-run browser-launcher-default-no-linux-gl-feature sh -c '! printf "%s\\n" "$1" | grep -Fq AcceleratedVideoDecodeLinuxGL' sh "$default_launcher"
+# Keep the VA-only Chrome path free of video-decoder feature overrides.
+#
+# The previous guard only read the block between `common_args=` and the
+# Vulkan branch, which never contained the exec it was meant to protect. The
+# VA-only exec below that branch carried
+# --disable-features=AcceleratedVideoDecodeLinuxZeroCopyGL, and on Chrome
+# 151.0.7922.173 that switch makes the pipeline build VaapiVideoDecoder, hit
+# the ImageProcessor output path, tear the decoder down and fall back to
+# FFmpegVideoDecoder. Every installed desktop entry shipped software decode
+# while the check reported a pass, so both sections are inspected now.
+# The guard reads code, not prose: the launcher documents the feature names it
+# must never pass, so comment lines are stripped before matching. The default
+# exec is everything after the LAST top-level `fi`, which is the only way to
+# skip both the --print-node early exit and the Vulkan/WebGPU branch; anchoring
+# on the first `fi` pulled the experiment's flags in and made the guard
+# unfalsifiable.
+common_section=$(sed -n '/common_args=/,/if \[ "\$graphics_mode" = vulkan-webgpu \]/p' "$launcher" \
+    | grep -v '^[[:space:]]*#')
+default_exec=$(awk '/^fi$/ { buf = ""; next } { buf = buf $0 "\n" } END { printf "%s", buf }' \
+    "$launcher" | grep -v '^[[:space:]]*#')
+run browser-launcher-common-no-video-feature-override sh -c \
+    '! printf "%s\n" "$1" | grep -Fq AcceleratedVideoDecode' sh "$common_section"
+run browser-launcher-default-no-video-feature-override sh -c \
+    '! printf "%s\n" "$1" | grep -Fq AcceleratedVideoDecode' sh "$default_exec"
+run browser-launcher-default-execs-browser sh -c \
+    'printf "%s\n" "$1" | grep -Fq "exec \"\$browser\""' sh "$default_exec"
 
 echo "== source invariants"
 run iris-source-invariants sh "$test_dir/iris-source-invariants.sh" "$root"
