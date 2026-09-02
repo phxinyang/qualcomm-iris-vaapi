@@ -24,7 +24,7 @@ scratch=$(mktemp -d "$scratch_base/iris-power-report-check.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
 
 python3 - "$scratch" "$analyze" <<'PY'
-import json, pathlib, subprocess, sys
+import importlib.util, json, pathlib, subprocess, sys
 
 collection = pathlib.Path(sys.argv[1]) / "collection"
 analyze = sys.argv[2]
@@ -135,6 +135,16 @@ write_run("block7-sw", "sw", playback_w=3.250, baseline_w=2.450,
 report = json.loads(subprocess.run(
     [sys.executable, analyze, str(collection)],
     check=True, capture_output=True, text=True).stdout)
+
+module_spec = importlib.util.spec_from_file_location("power_analyze", analyze)
+power_analyze = importlib.util.module_from_spec(module_spec)
+module_spec.loader.exec_module(power_analyze)
+assert power_analyze.arm_expectation({"browser": "chromium"}, "hw") == {
+    "decoder": "V4L2VideoDecoder", "platform": True, "node": True
+}
+assert power_analyze.arm_expectation({"browser": "chrome"}, "sw") == {
+    "decoder": "FFmpegVideoDecoder", "platform": False, "node": False
+}
 
 failures = []
 

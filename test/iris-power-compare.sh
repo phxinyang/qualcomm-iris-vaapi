@@ -193,14 +193,21 @@ done
 [ -n "$backlight_dir" ] || note 'WARN no backlight device found; brightness will not be pinned'
 
 if [ -n "$brightness" ] && [ -n "$backlight_dir" ]; then
+    brightness_set=0
     if command -v brightnessctl >/dev/null 2>&1; then
         device=$(basename -- "$backlight_dir")
-        brightnessctl -d "$device" set "$brightness" >/dev/null 2>&1 \
-            || sudo -n brightnessctl -d "$device" set "$brightness" >/dev/null 2>&1 \
-            || note 'WARN could not set the backlight; continuing with the current value'
+        if brightnessctl -d "$device" set "$brightness" >/dev/null 2>&1 \
+            || sudo -n brightnessctl -d "$device" set "$brightness" >/dev/null 2>&1; then
+            brightness_set=1
+        fi
     else
-        note 'WARN brightnessctl is missing; continuing with the current value'
+        fail 'brightnessctl is required when --brightness is supplied'
     fi
+    [ "$brightness_set" -eq 1 ] \
+        || fail "could not set requested backlight value: $brightness"
+    actual_brightness=$(cat "$backlight_dir/brightness" 2>/dev/null || true)
+    [ "$actual_brightness" = "$brightness" ] \
+        || fail "backlight rejected requested value $brightness (actual $actual_brightness)"
 fi
 brightness_start=''
 [ -n "$backlight_dir" ] && brightness_start=$(cat "$backlight_dir/brightness")
@@ -219,7 +226,9 @@ lock_gsetting() {
     command -v gsettings >/dev/null 2>&1 || return 0
     current=$(gsettings get "$schema" "$key" 2>/dev/null) || return 0
     printf "gsettings set %s %s %s\n" "$schema" "$key" "'$current'" >>"$saved_settings"
-    gsettings set "$schema" "$key" "$want" 2>/dev/null || true
+    if ! gsettings set "$schema" "$key" "$want" 2>/dev/null; then
+        fail "could not lock gsettings $schema $key"
+    fi
 }
 
 lock_gsetting org.gnome.desktop.session idle-delay 0
