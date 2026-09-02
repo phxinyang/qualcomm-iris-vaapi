@@ -106,6 +106,9 @@ mapping.
 If the ownership contract is absent or does not match exactly, the request
 falls back to the stable path. This prevents an arbitrary VA client from
 silently enabling zero-copy for a B-frame or dynamic stream.
+The qualification entry point is `test/iris-zero-copy-suite.sh`; run it through
+`scripts/iris-experiment-guard.sh` and keep its direct path opt-in until the
+multi-slot ownership contract is independently proven.
 
 Surface size attributes are read from the selected V4L2 capture format with
 `VIDIOC_ENUM_FRAMESIZES`; the VA limits therefore follow each decoder's real

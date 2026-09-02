@@ -42,6 +42,11 @@ Options:
   --baseline-seconds N    Idle baseline before and after each run (default 60).
   --cooldown-seconds N    Idle gap between runs (default 30).
   --brightness N          Raw backlight value to pin (default: keep current).
+  --browser chrome|chromium
+                           Browser family to launch (default chrome).
+  --hardware-mode copy|zero-copy|native
+                           Hardware arm: VA copy, qualified zero-copy, or
+                           Chromium's native V4L2 path (default copy).
   --port N                DevTools port (default 9333).
   -h, --help              Show this help.
 
@@ -70,6 +75,8 @@ warmup_seconds=20
 baseline_seconds=60
 cooldown_seconds=30
 brightness=''
+browser_family=chrome
+hardware_mode=copy
 port=9333
 
 while [ "$#" -gt 0 ]; do
@@ -82,6 +89,8 @@ while [ "$#" -gt 0 ]; do
         --baseline-seconds) baseline_seconds=${2:?}; shift 2 ;;
         --cooldown-seconds) cooldown_seconds=${2:?}; shift 2 ;;
         --brightness) brightness=${2:?}; shift 2 ;;
+        --browser) browser_family=${2:?--browser needs a value}; shift 2 ;;
+        --hardware-mode) hardware_mode=${2:?--hardware-mode needs a value}; shift 2 ;;
         --port) port=${2:?}; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) usage >&2; fail "unknown argument: $1" ;;
@@ -97,13 +106,50 @@ done
 [ "$blocks" -ge 1 ] || fail 'at least one block is required'
 [ -n "$clip" ] || { usage >&2; fail '--clip is required'; }
 [ -f "$clip" ] || fail "clip not found: $clip"
+case "$browser_family" in
+    chrome|chromium) ;;
+    *) fail "unsupported browser family: $browser_family" ;;
+esac
+case "$browser_family:$hardware_mode" in
+    chrome:copy|chrome:zero-copy|chromium:native) ;;
+    *) fail "unsupported browser/hardware-mode combination: $browser_family:$hardware_mode" ;;
+esac
 clip=$(CDPATH='' cd -- "$(dirname -- "$clip")" && pwd)/$(basename -- "$clip")
 
 battery=${IRIS_POWER_BATTERY:-/sys/class/power_supply/qcom-battmgr-bat}
 [ -d "$battery" ] || fail "battery gauge not found: $battery"
 thermal=${IRIS_POWER_THERMAL_ZONE:-/sys/class/thermal/thermal_zone0}
-launcher=${IRIS_BROWSER_LAUNCHER:-/usr/local/bin/iris-vaapi-browser}
-[ -x "$launcher" ] || fail "browser launcher not executable: $launcher"
+launcher=${IRIS_BROWSER_LAUNCHER:-}
+if [ -z "$launcher" ]; then
+    for candidate in /usr/bin/iris-vaapi-browser /usr/local/bin/iris-vaapi-browser; do
+        if [ -x "$candidate" ]; then
+            launcher=$candidate
+            break
+        fi
+    done
+fi
+[ -x "$launcher" ] || fail 'browser launcher not executable under /usr/bin or /usr/local/bin'
+
+browser_binary=''
+case "$browser_family" in
+    chrome)
+        for candidate in google-chrome-stable google-chrome; do
+            if command -v "$candidate" >/dev/null 2>&1; then
+                browser_binary=$(command -v "$candidate")
+                break
+            fi
+        done
+        ;;
+    chromium)
+        for candidate in chromium chromium-browser; do
+            if command -v "$candidate" >/dev/null 2>&1; then
+                browser_binary=$(command -v "$candidate")
+                break
+            fi
+        done
+        ;;
+esac
+[ -n "$browser_binary" ] || fail "no $browser_family browser executable found"
 
 [ -n "$out" ] || out=$(iris_artifact_dir "power-browser-$(date -u +%Y%m%dT%H%M%SZ)")
 mkdir -p "$out"
@@ -232,11 +278,17 @@ trap cleanup EXIT HUP INT TERM
 
 driver_path=$(pkg-config --variable=driverdir libva 2>/dev/null || echo /usr/lib64/dri)/v4l2_drv_video.so
 driver_sha256=$(sha256sum "$driver_path" 2>/dev/null | awk '{print $1}')
-manifest=/usr/local/share/iris-vaapi/install-manifest.txt
+manifest=''
+for candidate in /usr/share/iris-vaapi/install-manifest.txt /usr/local/share/iris-vaapi/install-manifest.txt; do
+    if [ -f "$candidate" ]; then
+        manifest=$candidate
+        break
+    fi
+done
 source_commit=$(sed -n 's/^source_commit=//p' "$manifest" 2>/dev/null | head -1)
 source_dirty=$(sed -n 's/^source_dirty=//p' "$manifest" 2>/dev/null | head -1)
 boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown)
-chrome_version=$(google-chrome --version 2>/dev/null || echo unknown)
+chrome_version=$($browser_binary --version 2>/dev/null || echo unknown)
 
 clip_probe=$out/clip-probe.txt
 if command -v ffprobe >/dev/null 2>&1; then
@@ -254,6 +306,9 @@ json.dump({
     "kernel": "$(uname -r)",
     "boot_id": "$boot_id",
     "chrome_version": "$chrome_version",
+    "browser": "$browser_family",
+    "hardware_mode": "$hardware_mode",
+    "expected_hardware_decoder": "$( [ "$browser_family" = chromium ] && printf V4L2VideoDecoder || printf VaapiVideoDecoder )",
     "iris_node": "$node",
     "driver_path": "$driver_path",
     "driver_sha256": "$driver_sha256",
@@ -329,9 +384,19 @@ run_once() {
 
     # chrome_args is a deliberate word list, not one argument.
     # shellcheck disable=SC2086
-    IRIS_BROWSER_PROFILE_ROOT=$out/profiles/$arm \
-        "$launcher" --browser=chrome -- $chrome_args about:blank \
-        >"$run_dir/browser.log" 2>&1 &
+    if [ "$arm" = hw ] && [ "$hardware_mode" = zero-copy ]; then
+        V4L2_VA_ZERO_COPY=1 \
+        V4L2_VA_ZERO_COPY_CONTRACT=h264-no-b-v1 \
+        V4L2_VA_BATCH_SIZE=1 \
+        IRIS_BROWSER_PROFILE_ROOT=$out/profiles/$arm \
+            "$launcher" --browser="$browser_family" -- $chrome_args about:blank \
+            >"$run_dir/browser.log" 2>&1 &
+    else
+        env -u V4L2_VA_ZERO_COPY -u V4L2_VA_ZERO_COPY_CONTRACT -u V4L2_VA_BATCH_SIZE \
+        IRIS_BROWSER_PROFILE_ROOT=$out/profiles/$arm \
+            "$launcher" --browser="$browser_family" -- $chrome_args about:blank \
+            >"$run_dir/browser.log" 2>&1 &
+    fi
     browser_pid=$!
 
     url="file://$page?src=file://$clip"

@@ -35,10 +35,13 @@ T_95 = {
 
 CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
 
-ARM_EXPECTATION = {
-    "hw": {"decoder": "VaapiVideoDecoder", "platform": True},
-    "sw": {"decoder": None, "platform": False},
-}
+def arm_expectation(manifest, arm):
+    """Return the decoder and device-ownership contract for this collection."""
+    if arm == "sw":
+        return {"decoder": "FFmpegVideoDecoder", "platform": False, "node": False}
+    if manifest.get("browser", "chrome") == "chromium":
+        return {"decoder": "V4L2VideoDecoder", "platform": True, "node": True}
+    return {"decoder": "VaapiVideoDecoder", "platform": True, "node": True}
 
 
 def mean(values):
@@ -92,7 +95,7 @@ def cpu_cores(rows):
     return delta / CLK_TCK / span
 
 
-def analyse_run(run_dir, settle, baseline_gap_limit):
+def analyse_run(run_dir, settle, baseline_gap_limit, manifest):
     run_path = os.path.join(run_dir, "run.json")
     cdp_path = os.path.join(run_dir, "cdp.json")
     samples_path = os.path.join(run_dir, "samples.csv")
@@ -127,7 +130,7 @@ def analyse_run(run_dir, settle, baseline_gap_limit):
     result["decoded_frames"] = cdp.get("window_decoded_frames")
     result["dropped_frames"] = cdp.get("window_dropped_frames")
 
-    expectation = ARM_EXPECTATION.get(run["arm"], {})
+    expectation = arm_expectation(manifest, run["arm"])
     if not result["decoder_name"]:
         result["valid"] = False
         result["reasons"].append("decoder name missing")
@@ -225,9 +228,17 @@ def analyse_run(run_dir, settle, baseline_gap_limit):
         result["capacity_end"] = capacities[-1]
 
     holders = os.path.join(run_dir, "iris-node-holders.txt")
+    holder_lines = []
     if os.path.exists(holders):
         with open(holders, encoding="utf-8") as handle:
-            result["iris_node_holders"] = [line.strip() for line in handle if line.strip()]
+            holder_lines = [line.strip() for line in handle if line.strip()]
+        result["iris_node_holders"] = holder_lines
+    if expectation.get("node") and not holder_lines:
+        result["valid"] = False
+        result["reasons"].append("hardware arm held no resolved Iris node")
+    if not expectation.get("node") and holder_lines:
+        result["valid"] = False
+        result["reasons"].append("software arm held the resolved Iris node")
     return result
 
 
@@ -296,7 +307,7 @@ def main(argv=None):
         run_dir = os.path.join(args.collection, name)
         if not os.path.isdir(run_dir) or not name.startswith("block"):
             continue
-        analysed = analyse_run(run_dir, args.settle, args.baseline_gap_limit)
+        analysed = analyse_run(run_dir, args.settle, args.baseline_gap_limit, manifest)
         if analysed:
             runs.append(analysed)
     runs.sort(key=lambda r: (r["block"], r["arm"]))

@@ -99,6 +99,8 @@ def write_run(label, arm, *, playback_w, baseline_w, post_w=None,
         "window_decoded_frames": frames,
         "window_dropped_frames": 0,
     }))
+    if arm == "hw":
+        (run_dir / "iris-node-holders.txt").write_text("123 --type=gpu-process\\n")
 
 
 # Block 1 is the only comparable pair: 3.250 - 2.900 = 0.350 W.

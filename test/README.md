@@ -277,6 +277,20 @@ firmware may not implement. The raw JSON and log are the review artifacts.
 classification; set
 `IRIS_ALLOW_KNOWN_COMPLIANCE_LIMIT=0` to make that result fail the suite.
 
+For the opt-in DMA-BUF CAPTURE contract, run the qualification through the
+experiment guard:
+
+```sh
+IRIS_EXPERIMENT_DIR=$HOME/Lab/Bridge/tmp/trash/zero-copy-guard \
+IRIS_ZERO_COPY_DIR=$HOME/Lab/Bridge/tmp/trash/zero-copy-suite \
+IRIS_EXPERIMENT_TIMEOUT_SECONDS=600 \
+./scripts/iris-experiment-guard.sh -- ./test/iris-zero-copy-suite.sh
+```
+
+The suite requires exact framemd5 and strict EOS for direct no-B H.264, proves
+that no `copy_surface_frame` ran, and verifies that B-frame H.264 and HEVC use
+the stable-copy fallback when the explicit ownership contract is absent.
+
 ## Open-source test corpora
 
 There is no single corpus that covers both codec conformance and browser
