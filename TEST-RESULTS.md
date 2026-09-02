@@ -528,6 +528,11 @@ stable-copy records plus the expected `codec_reorder_contract` fallback.
 
 ## Battery power comparison (2026-08-30, replacement target)
 
+This section measures paced GStreamer/FFmpeg pipelines into fakesink, not a
+browser, and ends by requiring an actual Chrome playback run before any
+battery-life claim. That run is now recorded below under
+[Browser battery comparison](#browser-battery-comparison-2026-09-02-chrome-151).
+
 The comparison used the battery gauge exposed at
 `/sys/class/power_supply/qcom-battmgr-bat`: `voltage_now` multiplied by the
 absolute value of `current_now`, sampled once per second. Each run used the
@@ -626,3 +631,113 @@ decoder can consume several additional watts. For a real browser estimate,
 the decisive variables are codec, resolution, frame complexity, refresh rate,
 panel brightness, and Wi-Fi; an actual Chrome playback run is required before
 turning this table into a battery-life guarantee.
+
+## Browser battery comparison (2026-09-02, Chrome 151)
+
+The run the section above asks for. Google Chrome 151.0.7922.173 played one
+1920x1080, 30 fps, High profile, level 4.0 H.264 file with no B frames, looped
+from `file://` in kiosk mode on the tablet's own panel, with hardware VA-API
+decode measured against Chrome's software decoder.
+
+`test/iris-power-compare.sh` produced the collection and
+`test/remote/power-analyze.py` aggregated it. Five interleaved ABBA blocks, ten
+runs; each run is a 300-second measurement window after 20 seconds of warmup,
+bracketed by 60-second idle baselines with a 30-second gap between runs. The
+arms differ by one switch: the software arm adds
+`--disable-accelerated-video-decode`. Everything else, including the launcher,
+the LIBVA environment, the profile layout and the page, is identical.
+
+### What the runs show
+
+| Arm | Playback | Baseline | Increment | CPU | Decoder |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Hardware, n=5 | 2.745 +/- 0.040 W | 2.458 W | +0.287 +/- 0.058 W | 0.205 cores | `VaapiVideoDecoder`, `kIsPlatformVideoDecoder=true` |
+| Software, n=5 | 2.844 +/- 0.013 W | 2.443 W | +0.401 +/- 0.039 W | 0.490 cores | `FFmpegVideoDecoder`, `kIsPlatformVideoDecoder=false` |
+
+The statistic is the per-block paired difference, not two pooled means:
+
+```text
+software - hardware, playback power:  +0.0988 +/- 0.0448 W   (n=5 blocks)
+software - hardware, increment:       +0.1145 +/- 0.0861 W
+```
+
+Both intervals are two-sided 95% t intervals and both exclude zero. Hardware
+decode costs about 99 mW less whole-device power, roughly 3.5% of the 2.8 W the
+tablet draws while playing, and it halves the browser's CPU.
+
+All ten runs were valid and none was dropped. The two arms' idle baselines
+landed 15 mW apart (2.458 W against 2.443 W), which is the control that makes
+the 99 mW separation readable at all.
+
+### Provenance per run
+
+Playback alone proves nothing here, because both arms play the video. Each run
+required the Media domain to name the decoder and the frame counters to advance
+inside the window. Independently of Chrome's self-report, every hardware run
+had exactly one process holding the resolved Iris node and it was the GPU
+process; every software run had none.
+
+Frame accounting was 8991-8997 decoded per 300-second window against a 9000
+frame ideal, with one dropped frame across all ten runs. The backlight was
+pinned at 1024/2047 and recorded per sample: every run reported a single level
+for its whole duration. Thermals stayed between 36.9 C and 37.7 C mean, 39.4 C
+peak. Capacity fell from 63% to 52% across the collection; no external supply
+came online in any sample.
+
+Driver `f879e5ea417c770a`, source commit `0ced73ee3f3b`, clean tree, kernel
+`7.2.2-sm8550-gad75da3`, decoder node `/dev/video0`. The artifacts are under
+`~/Lab/iris-vaapi-lab/artifacts/power-browser-20260902b/` on the tablet, with
+`report.json` holding the full per-run record.
+
+### Runtime translation
+
+`charge_full` reads 8931000 uAh. At a conservative 3.85 V average that is about
+34.4 Wh, or 32.7 Wh from full down to a 5% reserve.
+
+| Mode | Playback time from 100% to 5% |
+| --- | ---: |
+| Hardware VA-API | 11.9 h |
+| Software | 11.5 h |
+
+About 25 extra minutes of 1080p30 playback per charge. That is the honest size
+of this effect for this clip, at this brightness, with no network traffic and a
+page that does nothing but hold a video element.
+
+### What this does not say
+
+The earlier fakesink section measured several watts of difference under an
+unrestricted decode loop. Both results are real and they answer different
+questions: a browser playing 30 fps is a paced workload that lets the CPU idle
+between frames, so the software decoder never runs flat out. Content at a
+higher resolution or frame rate, a heavier page, or a device with a dimmer
+panel would all widen the gap; this run does not measure any of them.
+
+The comparison is also whole-device. The panel at 1024/2047 accounts for most
+of the 2.4 W baseline, which is why a 99 mW decode difference is 3.5% of the
+total rather than 3.5% of the decoder.
+
+Only H.264 was measured. HEVC is a qualified VA path but was not part of this
+collection, and VA VP9 remains withdrawn on this target.
+
+Only Google Chrome was measured, and that is not an arbitrary choice. Fedora's
+Chromium 151.0.7922.169, launched through the same `iris-vaapi-browser` with
+the same environment, reports `V4L2VideoDecoder` with
+`kIsPlatformVideoDecoder=true` and its GPU process holds the Iris node
+directly. It decodes in hardware through Chromium's own native V4L2 stack and
+never loads this driver, so a Chromium arm would measure that stack rather than
+this project. A Chromium hardware-versus-software comparison is still worth
+running; it just answers a different question and needs its own section.
+
+### First collection, discarded
+
+An earlier collection the same night lost all ten runs. GNOME's `idle-dim` was
+not among the locked settings, so the panel dimmed partway through the first
+block, and `brightness_start` was captured once before the first block rather
+than per run, which then reported every later run as broken against a value it
+never had. The runs were internally consistent, with hardware increments in
+0.349-0.403 W and software in 0.468-0.658 W, but by the harness's own rules
+they were not comparable and they are not used here.
+
+`idle-dim` is now locked, and the backlight is a sampled column rather than two
+edge readings, so a panel that dims and recovers inside a run cannot pass.
+`test/iris-power-report-check.sh` holds the analyser to that rule.

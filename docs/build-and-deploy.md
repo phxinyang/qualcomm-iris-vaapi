@@ -243,7 +243,17 @@ device, and without `v4l2-ctl` it exits instead of falling back to a fixed
 Neither browser is a dependency. The driver serves any VA-API client, and each
 desktop entry names the browser it launches in `TryExec` so an entry for an
 absent browser hides itself instead of appearing in the menu and failing on
-click.
+click. `TryExec` names a binary, not a package: Fedora and Debian install
+`/usr/bin/chromium-browser` and have no `/usr/bin/chromium`, while Arch ships
+the opposite, so the source entries carry `chromium-browser` and the Arch
+package rewrites them. Naming the wrong one hides the entry on a system where
+Chromium is installed, which is indistinguishable from the entry working.
+
+Which browser benefits differs by distribution. On Fedora 44, Chromium
+151.0.7922.169 already decodes in hardware through Chromium's own native V4L2
+stack and reports `V4L2VideoDecoder` without loading this driver at all.
+Google Chrome has no such path and is the client this driver exists for; it is
+the one that moves from `FFmpegVideoDecoder` to `VaapiVideoDecoder`.
 
 `test/iris-packaging-check.sh` runs in CI and fails when a shipped desktop
 entry is missing from the spec's `%files`, when a manifest stops delegating to

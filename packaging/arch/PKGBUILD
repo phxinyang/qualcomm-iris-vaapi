@@ -63,6 +63,14 @@ package() {
     IRIS_SOURCE_DIRTY="$dirty" \
         sh scripts/install-system.sh "$srcdir/build"
 
+    # Arch ships /usr/bin/chromium; Fedora and Debian ship
+    # /usr/bin/chromium-browser, which is the name in the source entries. An
+    # entry whose TryExec names an absent binary hides itself, so the browser
+    # is installed and its launcher never appears in the menu.
+    sed -i 's/^TryExec=chromium-browser$/TryExec=chromium/' \
+        "$pkgdir/usr/share/applications/chromium-iris-v4l2.desktop" \
+        "$pkgdir/usr/share/applications/chromium-iris-vulkan-webgpu.desktop"
+
     install -Dm644 COPYING "$pkgdir/usr/share/licenses/$pkgname/COPYING"
     install -Dm644 COPYING.LGPL "$pkgdir/usr/share/licenses/$pkgname/COPYING.LGPL"
     install -Dm644 COPYING.MIT "$pkgdir/usr/share/licenses/$pkgname/COPYING.MIT"

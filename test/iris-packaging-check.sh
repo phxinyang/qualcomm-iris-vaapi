@@ -68,8 +68,12 @@ for desktop in "$root"/data/*.desktop; do
         || fail "$name has no TryExec, so it stays in the menu without its browser"
     exec_line=$(sed -n 's/^Exec=iris-vaapi-browser --browser=\([a-z]*\).*/\1/p' "$desktop" | head -1)
     tryexec=$(sed -n 's/^TryExec=//p' "$desktop" | head -1)
+    # TryExec must name a binary the target actually ships. Fedora and Debian
+    # install /usr/bin/chromium-browser and have no /usr/bin/chromium, so
+    # TryExec=chromium hides the entry on a system where Chromium is present.
+    # The Arch package rewrites it, because Arch ships the other name.
     case "$exec_line:$tryexec" in
-        chromium:chromium|chrome:google-chrome-stable) ;;
+        chromium:chromium-browser|chrome:google-chrome-stable) ;;
         :*) ;;
         *) fail "$name launches --browser=$exec_line but TryExec=$tryexec" ;;
     esac
@@ -93,6 +97,9 @@ grep -Eq '^Requires:[[:space:]]+v4l-utils' "$spec" \
     || fail 'spec does not require v4l-utils'
 grep -Fq 'v4l-utils' "$pkgbuild" \
     || fail 'PKGBUILD does not depend on v4l-utils'
+
+grep -Fq 'TryExec=chromium-browser' "$pkgbuild" \
+    || fail 'PKGBUILD does not rewrite TryExec for the Arch chromium binary name'
 
 if command -v bash >/dev/null 2>&1; then
     bash -n "$pkgbuild" || fail 'PKGBUILD does not parse as bash'
