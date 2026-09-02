@@ -84,7 +84,8 @@ that explicitly manage rotating V4L2 CAPTURE buffer lifetime themselves.
 The complete CAPTURE pool is queued by default so firmware reorder and EOS
 drain cannot run out of free slots.
 
-For a power/throughput experiment, `V4L2_VA_ZERO_COPY=1` imports each stable
+For a power/throughput experiment, `V4L2_VA_ZERO_COPY=1` together with
+`V4L2_VA_ZERO_COPY_CONTRACT=h264-no-b-v1` imports each stable
 surface DMA-BUF directly into the stateful Iris CAPTURE queue. A completed
 surface remains pinned until VA reuses it, so the CAPTURE-to-stable-buffer
 memcpy is removed while the exported fd and CPU mapping stay unchanged. The
@@ -102,6 +103,9 @@ The experiment also requires one AU per OUTPUT buffer: when
 `V4L2_VA_BATCH_SIZE` is greater than one, the backend keeps the stable
 MMAP/copy path instead of risking an ambiguous multi-frame CAPTURE ownership
 mapping.
+If the ownership contract is absent or does not match exactly, the request
+falls back to the stable path. This prevents an arbitrary VA client from
+silently enabling zero-copy for a B-frame or dynamic stream.
 
 Surface size attributes are read from the selected V4L2 capture format with
 `VIDIOC_ENUM_FRAMESIZES`; the VA limits therefore follow each decoder's real
@@ -167,6 +171,7 @@ supported configurations:
 | `V4L2_VA_RESET_OUTPUT_STREAM` | off | Use a STREAMOFF/STREAMON pair on both queues when restarting a stateful sequence, instead of requeueing in place. |
 | `V4L2_VA_RESET_ON_IDR` | off | Reset the queues on every detected IDR. Measured to fire on ordinary mid-stream scene-change IDRs and cascade into timeouts; do not enable by default. |
 | `V4L2_VA_ZERO_COPY` | off | Experimental no-B H.264 single-plane NV12 DMA-BUF CAPTURE path with one-AU batching. Keeps a surface's buffer pinned until reuse; setup or batch-contract failures fall back to MMAP. |
+| `V4L2_VA_ZERO_COPY_CONTRACT` | off | Required exact value `h264-no-b-v1` for the validated zero-copy ownership contract; any other value selects stable MMAP/copy. |
 
 ## Status
 The project currently supports these codecs: MPEG2, H264, VP8, and Qualcomm

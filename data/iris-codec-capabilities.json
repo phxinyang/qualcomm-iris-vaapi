@@ -15,7 +15,7 @@
       "capture_formats": ["NV12", "NV12M"],
       "fallback": "software",
       "rejected": ["MVC/multiview", "non-8-bit-4:2:0 surfaces"],
-      "experimental": ["zero-copy only for one-AU, no-B streams"]
+      "experimental": ["zero-copy requires V4L2_VA_ZERO_COPY_CONTRACT=h264-no-b-v1 and is limited to one-AU, no-B streams"]
     },
     {
       "codec": "hevc",

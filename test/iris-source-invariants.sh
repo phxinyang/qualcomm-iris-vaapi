@@ -137,6 +137,12 @@ if ! grep -q 'stateful_batch_limit() == 1' "$surface" \
     echo "FAIL zero-copy batch ownership guard is missing" >&2
     exit 1
 fi
+if ! grep -q 'zero_copy_contract_enabled()' "$surface" \
+    || ! grep -q 'fallback reason=ownership_contract' "$surface" \
+    || ! grep -q 'h264-no-b-v1' "$surface"; then
+    echo "FAIL zero-copy ownership contract guard is missing" >&2
+    exit 1
+fi
 if ! grep -q 'export_buffer_mapping' "$surface" || ! grep -q 'copy_surface_frame' "$surface"; then
     echo "FAIL stable surface snapshots have no copy path" >&2
     exit 1

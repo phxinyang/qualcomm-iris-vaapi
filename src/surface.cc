@@ -366,6 +366,16 @@ bool zero_copy_requested()
     return value && std::strcmp(value, "1") == 0;
 }
 
+bool zero_copy_contract_enabled()
+{
+    // A DMA-BUF CAPTURE slot is a decoded surface, not a generic scratch
+    // buffer. Until the driver can prove multi-slot ownership, callers must
+    // explicitly identify the only contract we have qualified: H.264, one AU
+    // per OUTPUT, no B-frame reordering, single-plane NV12.
+    const char* value = std::getenv("V4L2_VA_ZERO_COPY_CONTRACT");
+    return value && std::strcmp(value, "h264-no-b-v1") == 0;
+}
+
 void copy_surface_frame(Surface& surface, const V4L2M2MDevice::Buffer& capture)
 {
     if (!copy_surfaces_enabled()) {
@@ -528,6 +538,7 @@ void createSurfacesDeferred(
     // formats keep the proven MMAP path until all plane FDs can be validated.
     bool zero_copy = zero_copy_requested() && context.uses_stateful_streaming()
         && context.zero_copy_capture_allowed() && context.zero_copy_codec_supported()
+        && zero_copy_contract_enabled()
         && stateful_batch_limit() == 1
         && driver_format->num_planes == 1;
     if (zero_copy_requested() && context.uses_stateful_streaming() && !context.zero_copy_codec_supported()
@@ -536,6 +547,9 @@ void createSurfacesDeferred(
     if (zero_copy_requested() && context.uses_stateful_streaming() && stateful_batch_limit() != 1
         && trace_enabled())
         std::fprintf(stderr, "stateful zero-copy fallback reason=batch_contract limit=%zu\n", stateful_batch_limit());
+    if (zero_copy_requested() && context.uses_stateful_streaming() && !zero_copy_contract_enabled()
+        && trace_enabled())
+        std::fprintf(stderr, "stateful zero-copy fallback reason=ownership_contract\n");
     std::vector<int> zero_copy_fds;
     std::vector<size_t> zero_copy_lengths;
     std::vector<int> temporary_zero_copy_fds;
