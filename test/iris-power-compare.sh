@@ -276,8 +276,20 @@ kill_browser() {
     done
 }
 
+remove_browser_profile() {
+    profile_arm=$1
+    profile_dir=$out/profiles/$profile_arm
+    # The profile is created solely by this collection. Remove it after the
+    # browser has exited so a multi-hour ABBA run cannot consume the target's
+    # small root filesystem with Chromium caches and crash reports.
+    [ -d "$profile_dir" ] || return 0
+    find "$profile_dir" -depth -delete
+}
+
 cleanup() {
     kill_browser
+    remove_browser_profile hw || true
+    remove_browser_profile sw || true
     [ -n "${sampler_pid:-}" ] && kill "$sampler_pid" 2>/dev/null || true
     [ -s "$saved_settings" ] && sh "$saved_settings" 2>/dev/null || true
 }
@@ -438,6 +450,7 @@ run_once() {
 
     kill_browser
     wait "$browser_pid" 2>/dev/null || true
+    remove_browser_profile "$arm"
 
     baseline_post_start=$(date +%s.%N)
     sleep "$baseline_seconds"
