@@ -741,3 +741,50 @@ they were not comparable and they are not used here.
 `idle-dim` is now locked, and the backlight is a sampled column rather than two
 edge readings, so a panel that dims and recovers inside a run cannot pass.
 `test/iris-power-report-check.sh` holds the analyser to that rule.
+
+## Zero-copy/package follow-up (2026-09-03)
+
+The package provenance issue found after the previous handoff is fixed. The
+Fedora spec now runs the complete ELF post-processing chain before refreshing
+the staged install manifest, and the Arch PKGBUILD disables a later implicit
+strip, strips explicitly, and refreshes the same fields. A real Fedora
+`rpmbuild` from the phase-4 source completed with all 17 repository tests
+passing; extracting the resulting RPM showed that the manifest hash and size
+matched the final stripped `/usr/lib64/dri/v4l2_drv_video.so`. The installed
+tablet package was then replaced from that RPM and `rpm -V` passed.
+
+The bounded zero-copy contract was exercised on the installed package under a
+boot/temperature guard. The target was Fedora 44 ARM64 on SM8550, kernel
+`7.2.2-sm8550-gad75da3`, boot ID
+`ee2f8dbc-95e9-4dbb-81fc-6f288ba64c99`, with `/dev/video0` resolved by the
+`iris_driver` name as `Iris Decoder` (the sibling `/dev/video1` is `Iris
+Encoder`). The installed artifact at the time of this run was source commit
+`c7b251dcbb452d6dda9450f39cc2b8e94adbb5ee`, clean tree, SHA-256
+`a980b76e274d004128071f4e2ce9b865cfdfe4030bc4abc370b62685baa07ed3`.
+
+The short qualification results were:
+
+| Check | Result |
+| --- | --- |
+| Default installed VA H.264/HEVC | 12/12 exact framemd5 each; strict `13 CAPTURE / 12 OUTPUT / 1 LAST`; zero timeout/miss |
+| Direct zero-copy H.264 all-I and IP/GOP12 | 24/24 exact framemd5 each; zero `copy_surface_frame`; strict EOS |
+| H.264 B=2 without ownership contract | 24/24 exact framemd5 through stable-copy fallback |
+| HEVC with zero-copy requested | 24/24 exact framemd5 through `codec_reorder_contract` stable-copy fallback |
+| Two concurrent zero-copy H.264 contexts | 30-second shortened soak; 720 frames per context, zero timeout/miss, strict EOS, boot unchanged |
+| Qualcomm `v4l-video-test-app` | 90-frame H.264 NV12 output byte-identical to its reference |
+| `v4l2-compliance` | 47/48; the one known stateful `Min Number of Capture Buffers` classification failure |
+| Chrome surface acceptance | 1920x1080 real surface, frames advanced with zero drops in the zero-copy launch; decoder evidence was independently `VaapiVideoDecoder`, platform=true |
+| Chromium surface acceptance | `V4L2VideoDecoder`, platform=true, 151 frames, zero drops; native V4L2 path, not this VA driver |
+
+The new power harness supports Chrome stable-copy, Chrome zero-copy, and
+Chromium native-V4L2 collections. The phase-4 Chrome zero-copy pilot was
+correctly rejected because an external charger came online during the window;
+the short Chrome-copy pilot was rejected once for an unstable pre/post baseline.
+Those samples are not results. The only statistically qualified browser power
+claim remains the earlier five-block Chrome stable-copy comparison above; no
+zero-copy-versus-copy or Chromium power claim is made until a complete
+discharging ABBA collection is run.
+
+Accordingly, zero-copy remains an explicit `h264-no-b-v1` experiment and is
+not enabled by the default launcher or package. The current evidence does not
+qualify a multi-slot, B-frame, HEVC, AV1, or dynamic-resolution zero-copy path.

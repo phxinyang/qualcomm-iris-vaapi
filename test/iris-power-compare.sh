@@ -294,10 +294,13 @@ for candidate in /usr/share/iris-vaapi/install-manifest.txt /usr/local/share/iri
         break
     fi
 done
+[ -n "$manifest" ] || fail 'installed provenance manifest not found'
 source_commit=$(sed -n 's/^source_commit=//p' "$manifest" 2>/dev/null | head -1)
 source_dirty=$(sed -n 's/^source_dirty=//p' "$manifest" 2>/dev/null | head -1)
 boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown)
 chrome_version=$($browser_binary --version 2>/dev/null || echo unknown)
+[ -n "$driver_sha256" ] || fail "installed driver hash unavailable: $driver_path"
+[ -n "$source_commit" ] || fail "source commit missing from provenance manifest: $manifest"
 
 clip_probe=$out/clip-probe.txt
 if command -v ffprobe >/dev/null 2>&1; then

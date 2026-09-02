@@ -255,6 +255,21 @@ the opposite, so the source entries carry `chromium-browser` and the Arch
 package rewrites them. Naming the wrong one hides the entry on a system where
 Chromium is installed, which is indistinguishable from the entry working.
 
+The zero-copy experiment is qualified separately from the package default. Run
+`test/iris-zero-copy-suite.sh` through `scripts/iris-experiment-guard.sh` with
+`V4L2_VA_ZERO_COPY=1`, `V4L2_VA_ZERO_COPY_CONTRACT=h264-no-b-v1`, and
+`V4L2_VA_BATCH_SIZE=1`. The direct path is currently limited to single-plane
+NV12 H.264 without B-frame reordering; B-frame H.264, HEVC, dynamic geometry,
+and any missing or unknown ownership contract stay on stable MMAP/copy. Do not
+promote the experiment by setting an environment variable globally or by adding
+it to a desktop entry.
+
+The industrial target gate combines the exact framemd5/EOS matrices with
+Qualcomm's `v4l-video-test-app`, `v4l2-compliance`, native V4L2 baselines,
+context isolation/concurrency, and a real Chrome media-surface check. A
+successful GPU-process start or a `DMABUF` QBUF alone is not a zero-copy
+qualification.
+
 Which browser benefits differs by distribution. On Fedora 44, Chromium
 151.0.7922.169 already decodes in hardware through Chromium's own native V4L2
 stack and reports `V4L2VideoDecoder` without loading this driver at all.

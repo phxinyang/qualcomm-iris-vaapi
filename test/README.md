@@ -291,6 +291,22 @@ The suite requires exact framemd5 and strict EOS for direct no-B H.264, proves
 that no `copy_surface_frame` ran, and verifies that B-frame H.264 and HEVC use
 the stable-copy fallback when the explicit ownership contract is absent.
 
+The browser power harness has three separate, non-poolable modes:
+
+```sh
+sh ./test/iris-power-compare.sh --clip /path/to/h264.mp4 \
+  --browser chrome --hardware-mode copy
+sh ./test/iris-power-compare.sh --clip /path/to/h264.mp4 \
+  --browser chrome --hardware-mode zero-copy
+sh ./test/iris-power-compare.sh --clip /path/to/h264.mp4 \
+  --browser chromium --hardware-mode native
+```
+
+The analyser checks the expected decoder name and whether the resolved Iris
+node is actually held by the hardware arm. Chrome VA-API, Chrome zero-copy,
+and Chromium native V4L2 answer different questions and require separate
+collections.
+
 ## Open-source test corpora
 
 There is no single corpus that covers both codec conformance and browser
