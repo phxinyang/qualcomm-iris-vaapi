@@ -93,6 +93,17 @@ IRIS_TRACKED_SOURCE_SHA256=%{_tracked_sha256} \
 IRIS_SOURCE_DIRTY=%{_source_dirty} \
     sh scripts/install-system.sh %{_vpath_builddir}
 
+# Fedora's brp hooks run after %install and strip the shared object. Run the
+# same hooks before refreshing the staged manifest so artifact_sha256 and
+# artifact_size describe the payload that enters the RPM rather than the
+# unstripped build-tree file. The hooks are idempotent when rpmbuild runs them
+# again during normal build-root post-processing.
+RPM_BUILD_ROOT=%{buildroot} %{__brp_strip} %{__strip}
+RPM_BUILD_ROOT=%{buildroot} %{__brp_strip_comment_note} %{__strip} %{__objdump}
+sh scripts/refresh-install-manifest.sh \
+    %{buildroot}%{_datadir}/iris-vaapi/install-manifest.txt \
+    %{buildroot}%{_libdir}/dri/v4l2_drv_video.so
+
 %files
 %license COPYING COPYING.LGPL COPYING.MIT
 %doc README.md AUTHORS CREDITS

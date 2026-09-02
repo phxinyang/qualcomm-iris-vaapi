@@ -21,6 +21,7 @@ root=${1:-$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)}
 spec=$root/packaging/fedora/libva-v4l2-iris.spec
 pkgbuild=$root/packaging/arch/PKGBUILD
 installer=$root/scripts/install-system.sh
+refresh_manifest=$root/scripts/refresh-install-manifest.sh
 failures=0
 
 fail() {
@@ -28,7 +29,7 @@ fail() {
     printf 'FAIL packaging: %s\n' "$*" >&2
 }
 
-for path in "$spec" "$pkgbuild" "$installer"; do
+for path in "$spec" "$pkgbuild" "$installer" "$refresh_manifest"; do
     [ -f "$path" ] || { fail "missing $path"; exit 1; }
 done
 
@@ -85,6 +86,16 @@ grep -Fq 'scripts/install-system.sh' "$spec" \
     || fail 'spec does not install through scripts/install-system.sh'
 grep -Fq 'scripts/install-system.sh' "$pkgbuild" \
     || fail 'PKGBUILD does not install through scripts/install-system.sh'
+grep -Fq 'scripts/refresh-install-manifest.sh' "$spec" \
+    || fail 'spec does not refresh the manifest after ELF post-processing'
+grep -Fq 'scripts/refresh-install-manifest.sh' "$pkgbuild" \
+    || fail 'PKGBUILD does not refresh the manifest after ELF post-processing'
+grep -Fq '%{__brp_strip}' "$spec" \
+    || fail 'spec does not model Fedora ELF stripping before manifest refresh'
+grep -Fq "options=('!strip')" "$pkgbuild" \
+    || fail 'PKGBUILD allows makepkg to strip after manifest refresh'
+grep -Fq 'strip -g' "$pkgbuild" \
+    || fail 'PKGBUILD does not explicitly strip before manifest refresh'
 grep -Fq 'IRIS_VA_DRIVER_DIR' "$spec" \
     || fail 'spec does not pin the libva driver directory'
 grep -Fq 'IRIS_VA_DRIVER_DIR' "$pkgbuild" \

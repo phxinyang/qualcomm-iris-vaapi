@@ -35,6 +35,9 @@ optdepends=('chromium: Chromium (Iris VA-API) desktop entry'
             'google-chrome: Google Chrome (Iris VA-API) desktop entry')
 source=("$pkgname-$pkgver.tar.gz")
 sha256sums=('SKIP')
+# makepkg normally strips payloads after package(); do it explicitly before the
+# manifest refresh so the recorded identity remains the final package bytes.
+options=('!strip')
 
 build() {
     arch-meson "$pkgname-$pkgver" build
@@ -70,6 +73,12 @@ package() {
     sed -i 's/^TryExec=chromium-browser$/TryExec=chromium/' \
         "$pkgdir/usr/share/applications/chromium-iris-v4l2.desktop" \
         "$pkgdir/usr/share/applications/chromium-iris-vulkan-webgpu.desktop"
+
+    strip -g "$pkgdir/usr/lib/dri/v4l2_drv_video.so"
+    strip -R .comment "$pkgdir/usr/lib/dri/v4l2_drv_video.so" 2>/dev/null || true
+    sh scripts/refresh-install-manifest.sh \
+        "$pkgdir/usr/share/iris-vaapi/install-manifest.txt" \
+        "$pkgdir/usr/lib/dri/v4l2_drv_video.so"
 
     install -Dm644 COPYING "$pkgdir/usr/share/licenses/$pkgname/COPYING"
     install -Dm644 COPYING.LGPL "$pkgdir/usr/share/licenses/$pkgname/COPYING.LGPL"

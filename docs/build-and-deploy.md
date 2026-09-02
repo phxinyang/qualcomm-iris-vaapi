@@ -111,6 +111,12 @@ installation and restore the previous driver, run
 installed artifact was modified after installation. A `DESTDIR` staging run
 is packaging evidence only and must not be described as a live system install.
 
+Package builders must refresh the manifest after any ELF post-processing. The
+Fedora spec runs the distribution brp strip hooks before
+`scripts/refresh-install-manifest.sh`; the Arch PKGBUILD disables makepkg's
+later implicit strip, strips explicitly, and runs the same refresh. This keeps
+the recorded artifact hash and size equal to the installed package payload.
+
 The launcher resolves `/dev/video*` on every start. It requires an exact
 `iris_driver` match and prefers the node whose card or sysfs name identifies it
 as the decoder, so the sibling Iris encoder cannot be selected merely because

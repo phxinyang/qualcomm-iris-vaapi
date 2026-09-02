@@ -47,6 +47,8 @@ test('iris-setup-path-check', find_program('iris-setup-path-check.sh'),
      args: [meson.project_source_root()])
 test('iris-packaging-check', find_program('iris-packaging-check.sh'),
      args: [meson.project_source_root()])
+test('iris-install-manifest-check', find_program('iris-install-manifest-check.sh'),
+     args: [meson.project_source_root()])
 test('iris-power-report-check', find_program('iris-power-report-check.sh'),
      args: [meson.project_source_root()])
 test('provenance-self-test', find_program('provenance-self-test.sh'),
