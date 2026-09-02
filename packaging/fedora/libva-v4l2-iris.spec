@@ -19,6 +19,10 @@
 # the honest answer when the source identity was not supplied.
 
 %global forgename libva-v4l2-iris
+# The shipped artifact is a small runtime-only VA module. Keep debug symbols in
+# the build/debug workflow rather than generating an empty automatic debugsource
+# subpackage after the staged runtime ELF has been deliberately post-processed.
+%global debug_package %{nil}
 %global _source_commit %{?source_commit}%{!?source_commit:0000000000000000000000000000000000000000}
 %global _tracked_sha256 %{?tracked_sha256}%{!?tracked_sha256:0000000000000000000000000000000000000000000000000000000000000000}
 %global _source_dirty %{?source_commit:%{?tracked_sha256:0}}%{!?source_commit:1}
@@ -100,6 +104,7 @@ IRIS_SOURCE_DIRTY=%{_source_dirty} \
 # again during normal build-root post-processing.
 RPM_BUILD_ROOT=%{buildroot} %{__brp_strip} %{__strip}
 RPM_BUILD_ROOT=%{buildroot} %{__brp_strip_comment_note} %{__strip} %{__objdump}
+RPM_BUILD_ROOT=%{buildroot} %{__brp_strip_lto} %{__strip}
 sh scripts/refresh-install-manifest.sh \
     %{buildroot}%{_datadir}/iris-vaapi/install-manifest.txt \
     %{buildroot}%{_libdir}/dri/v4l2_drv_video.so

@@ -92,6 +92,10 @@ grep -Fq 'scripts/refresh-install-manifest.sh' "$pkgbuild" \
     || fail 'PKGBUILD does not refresh the manifest after ELF post-processing'
 grep -Fq '%{__brp_strip}' "$spec" \
     || fail 'spec does not model Fedora ELF stripping before manifest refresh'
+grep -Fq '%{__brp_strip_lto}' "$spec" \
+    || fail 'spec does not model Fedora LTO stripping before manifest refresh'
+grep -Fq '%global debug_package %{nil}' "$spec" \
+    || fail 'spec can generate an empty debugsource package after staged stripping'
 grep -Fq "options=('!strip')" "$pkgbuild" \
     || fail 'PKGBUILD allows makepkg to strip after manifest refresh'
 grep -Fq 'strip -g' "$pkgbuild" \
