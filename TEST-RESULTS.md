@@ -758,9 +758,13 @@ boot/temperature guard. The target was Fedora 44 ARM64 on SM8550, kernel
 `7.2.2-sm8550-gad75da3`, boot ID
 `ee2f8dbc-95e9-4dbb-81fc-6f288ba64c99`, with `/dev/video0` resolved by the
 `iris_driver` name as `Iris Decoder` (the sibling `/dev/video1` is `Iris
-Encoder`). The installed artifact at the time of this run was source commit
-`c7b251dcbb452d6dda9450f39cc2b8e94adbb5ee`, clean tree, SHA-256
-`a980b76e274d004128071f4e2ce9b865cfdfe4030bc4abc370b62685baa07ed3`.
+The first installed artifact for this follow-up was source commit
+`c7b251dcbb452d6dda9450f39cc2b8e94adbb5ee`. A final Fedora RPM was then
+rebuilt from source commit `42190a4628f97a2dd10f259de35fe6bdda125b5e` and
+installed in its place; its final stripped driver SHA-256 is
+`3816b5714ce4053aa4398daf9e93802f17d97c2884a5743e6cbc437310267252` and its
+size is `301632` bytes. The RPM payload manifest matches those bytes and
+`rpm -V` passes.
 
 The short qualification results were:
 
