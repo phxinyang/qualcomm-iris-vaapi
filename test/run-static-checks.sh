@@ -67,6 +67,7 @@ run browser-launcher-default-no-video-feature-override sh -c \
     '! printf "%s\n" "$1" | grep -Fq AcceleratedVideoDecode' sh "$default_exec"
 run browser-launcher-default-execs-browser sh -c \
     'printf "%s\n" "$1" | grep -Fq "exec \"\$browser\""' sh "$default_exec"
+run iris-browser-launcher-check sh "$test_dir/iris-browser-launcher-check.sh" "$root"
 
 echo "== source invariants"
 run iris-source-invariants sh "$test_dir/iris-source-invariants.sh" "$root"

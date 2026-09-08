@@ -49,6 +49,7 @@ extern "C" {
 #include "v4l2.h"
 
 struct DriverData;
+struct Surface;
 
 // Stateful capture normally keeps the complete CAPTURE pool queued. The
 // optional scheduled mode is deliberately opt-in because it can starve
@@ -78,6 +79,11 @@ public:
     bool capture_slots_scheduled() const;
     bool zero_copy_codec_supported() const;
     bool zero_copy_capture_allowed() const { return !zero_copy_disabled_; }
+    // Chrome may export VA surfaces before the first beginPicture(). Probe the
+    // stateful CAPTURE format on an independent fd using the same
+    // CAPTURE-then-OUTPUT ordering as initialize(), so the exported DMA-BUF
+    // describes the driver's padded layout rather than a compact guess.
+    std::optional<v4l2_format> probe_stateful_capture_format(fourcc capture_pixelformat);
     void queue_zero_copy_capture();
     void queue_zero_copy_drain_capture();
     VAStatus append_stateful_picture(VASurfaceID surface_id);
@@ -207,11 +213,17 @@ private:
     unsigned stateful_submitted_count = 0;
     unsigned stateful_completed_count = 0;
     bool zero_copy_disabled_ = false;
+    bool stateful_capture_probe_attempted_ = false;
+    fourcc stateful_capture_probe_pixelformat_ = 0;
+    unsigned stateful_capture_probe_width_ = 0;
+    unsigned stateful_capture_probe_height_ = 0;
+    std::optional<v4l2_format> stateful_capture_probe_result_;
     timeval stateful_last_timestamp = {};
     mutable std::recursive_mutex synchronization_mutex_;
 
     void stateful_watchdog_loop();
     void stop_stateful_watchdog();
+    void queue_capture_surface(Surface& surface);
     void note_stateful_new_sequence();
     std::thread stateful_watchdog_;
     std::mutex stateful_watchdog_mutex_;

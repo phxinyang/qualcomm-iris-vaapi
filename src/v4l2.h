@@ -62,6 +62,13 @@ public:
     class Buffer {
     public:
         void queue(int request_fd = -1, timeval* timestamp = nullptr, unsigned size = 0) const;
+        // V4L2_MEMORY_DMABUF binds the fd at QBUF time. Stateful zero-copy
+        // keeps spare queue slots available for surfaces Chrome allocates
+        // after context initialization, so allow a validated surface fd to
+        // replace the slot's bootstrap scratch fd for this QBUF only. The
+        // caller retains ownership of dmabuf_fd.
+        void queue_with_dmabuf(int dmabuf_fd, size_t dmabuf_size, int request_fd = -1,
+            timeval* timestamp = nullptr, unsigned size = 0) const;
         unsigned dequeue() const;
         std::vector<int> export_(unsigned flags) const;
         std::vector<std::span<uint8_t>> mapping() const { return mapping_; }
@@ -77,6 +84,8 @@ public:
         ~Buffer();
 
     private:
+        void queue_internal(int dmabuf_fd, size_t dmabuf_size, int request_fd, timeval* timestamp,
+            unsigned size) const;
         V4L2M2MDevice& owner_;
         v4l2_buf_type type_;
         unsigned index_;

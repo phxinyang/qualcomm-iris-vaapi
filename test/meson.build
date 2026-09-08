@@ -16,6 +16,24 @@ stateful_session_test = executable(
 	cpp_args: ['-Wall', '-Wextra', '-Werror', '-std=c++20'])
 test('stateful-session', stateful_session_test)
 
+hevc_parameter_sets_test = executable(
+  'hevc-parameter-sets-test',
+  'hevc-parameter-sets-test.cc',
+  dependencies: [libva_dep, libdrm_dep, libgstcodecparsers_dep, libgstcodecs_dep,
+                 libudev_dep, kernel_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20', '-ffunction-sections', '-fdata-sections'],
+  link_args: ['-Wl,--gc-sections'])
+test('hevc-parameter-sets', hevc_parameter_sets_test)
+
+surface_export_layout_test = executable(
+  'surface-export-layout-test',
+  ['surface-export-layout-test.cc', '../src/format.cc'],
+  dependencies: [libva_dep, libdrm_dep, libgstcodecparsers_dep, libgstcodecs_dep,
+                 libudev_dep, kernel_dep],
+  cpp_args: ['-Wall', '-std=c++20', '-ffunction-sections', '-fdata-sections'],
+  link_args: ['-Wl,--gc-sections'])
+test('surface-export-layout', surface_export_layout_test)
+
 # Hardware-independent regression guards for the browser-facing queue and
 # stable-export invariants. The integration probe above remains opt-in because
 # hosts without /dev/video nodes cannot execute it.
@@ -54,4 +72,6 @@ test('iris-power-report-check', find_program('iris-power-report-check.sh'),
 test('provenance-self-test', find_program('provenance-self-test.sh'),
      args: [meson.project_source_root()])
 test('electron-video-report-check', find_program('electron-video-report-check.sh'),
+     args: [meson.project_source_root()])
+test('iris-browser-launcher-check', find_program('iris-browser-launcher-check.sh'),
      args: [meson.project_source_root()])

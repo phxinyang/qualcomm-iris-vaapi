@@ -160,4 +160,21 @@ if ! printf '%s\n' "$service_block" | grep -q 'handle_capture_completion' \
     exit 1
 fi
 
+# A surface that never completed still exports a zero-filled buffer, which
+# renders as the exact green frame from the stream-switch reports. A sync
+# timeout alone must stay patient (B-frame reordering completes late), so only
+# terminally error-released fresh surfaces may fail instead of returning
+# success for the client to present.
+sync_block=$(sed -n '/VAStatus syncSurface(VADriverContextP context, VASurfaceID surface_id)/,/^}/p' "$surface")
+if ! printf '%s\n' "$sync_block" | grep -q 'surface.release_error && !surface.has_completed_frame' \
+    || ! printf '%s\n' "$sync_block" | grep -q 'no completed frame; failing'; then
+    echo "FAIL error-released fresh surfaces can be presented as success" >&2
+    exit 1
+fi
+if ! grep -q 'surface.has_completed_frame = true' "$surface" \
+    || ! grep -q 'surface.has_completed_frame = true' "$context"; then
+    echo "FAIL completed-frame tracking is missing from the copy and completion paths" >&2
+    exit 1
+fi
+
 echo "PASS source invariants"

@@ -180,6 +180,14 @@ bool same_layout(const BufferLayout& left, const BufferLayout& right)
     return true;
 }
 
+size_t buffer_layout_size(const BufferLayout& layout)
+{
+    size_t total = 0;
+    for (const auto& plane : layout)
+        total = std::max(total, static_cast<size_t>(plane.offset) + plane.size);
+    return total;
+}
+
 size_t install_stable_export_layout(Surface& surface, BufferLayout layout, size_t physical_plane_count)
 {
     // A released allocation no longer has a public pitch/offset contract, so
@@ -220,7 +228,20 @@ size_t prepare_compact_nv12_export_layout(Surface& surface)
     const auto derive_layout = lookup_format(V4L2_PIX_FMT_NV12).v4l2.derive_layout;
     if (!derive_layout)
         return 0;
-    return install_stable_export_layout(surface, derive_layout(surface.width, surface.height), 1);
+    // The stable copy has visible-height planes, but its row pitch is also a
+    // GPU import contract. Freedreno rejects linear R8/GR88 DMA-BUF imports
+    // whose pitch is not a multiple of 64 (e.g. 720/1080-wide web videos),
+    // returning EGL_BAD_ALLOC even though decoding and vaGetImage succeed.
+    // Keep visible dimensions on Surface and copy only width bytes per row.
+    constexpr unsigned export_pitch_alignment = 64;
+    if (surface.width == 0 || surface.height == 0
+        || surface.width > std::numeric_limits<unsigned>::max() - (export_pitch_alignment - 1))
+        return 0;
+    const unsigned pitch = (surface.width + export_pitch_alignment - 1)
+        & ~(export_pitch_alignment - 1);
+    if (static_cast<uint64_t>(pitch) * surface.height * 3 / 2 > std::numeric_limits<unsigned>::max())
+        return 0;
+    return install_stable_export_layout(surface, derive_layout(pitch, surface.height), 1);
 }
 
 size_t prepare_capture_export_layout(Surface& surface, size_t physical_plane_count)
@@ -264,6 +285,55 @@ decltype(formats)::const_iterator matching_format(const V4L2M2MDevice& device, u
     return std::ranges::find_if(formats, [&](auto&& f) {
         return f.va.rt_format == format && device.format_supported(device.capture_buf_type, f.v4l2.format);
     });
+}
+
+bool prepare_stateful_zero_copy_export_layout(Context& context, Surface& surface, VASurfaceID surface_id)
+{
+    const auto format_match = matching_format(context.device, surface.format);
+    if (format_match == formats.end())
+        return false;
+
+    std::optional<v4l2_format> probed;
+    const v4l2_pix_format_mplane* driver_format = nullptr;
+    if (context.initialized()) {
+        const auto& live_format = context.device.capture_format.fmt.pix_mp;
+        if (live_format.pixelformat == format_match->v4l2.format && live_format.width != 0
+            && live_format.height != 0 && live_format.num_planes != 0
+            && live_format.plane_fmt[0].bytesperline != 0 && live_format.plane_fmt[0].sizeimage != 0)
+            driver_format = &live_format;
+    }
+    if (!driver_format) {
+        probed = context.probe_stateful_capture_format(format_match->v4l2.format);
+        if (!probed)
+            return false;
+        driver_format = &probed->fmt.pix_mp;
+    }
+    // The qualified contract is deliberately limited to one physical NV12
+    // plane. More exotic layouts must remain on the stable-copy path until
+    // their plane ownership and modifier contracts are independently proven.
+    if (driver_format->pixelformat != format_match->v4l2.format || driver_format->num_planes != 1
+        || driver_format->plane_fmt[0].bytesperline == 0 || driver_format->plane_fmt[0].sizeimage == 0)
+        return false;
+
+    BufferLayout layout;
+    if (format_match->v4l2.derive_layout) {
+        layout = format_match->v4l2.derive_layout(driver_format->width, driver_format->height);
+        adjust_capture_layout(layout, *driver_format);
+    } else {
+        for (unsigned plane = 0; plane < driver_format->num_planes; plane++)
+            layout.push_back({ plane, driver_format->plane_fmt[plane].sizeimage,
+                driver_format->plane_fmt[plane].bytesperline, 0 });
+    }
+
+    const size_t required = install_stable_export_layout(surface, std::move(layout), driver_format->num_planes);
+    if (required == 0)
+        return false;
+    surface.logical_destination_layout = surface.stable_export_layout;
+    surface.capture_source_layout.clear();
+    if (trace_enabled())
+        std::fprintf(stderr, "stateful zero-copy export layout installed surface=%u size=%zu\n", surface_id,
+            required);
+    return true;
 }
 
 std::optional<V4L2FrameSizeLimits> surface_size_limits(
@@ -388,7 +458,14 @@ void copy_surface_frame(Surface& surface, const V4L2M2MDevice::Buffer& capture)
     if (source.empty())
         return;
 
-    const size_t total = prepare_compact_nv12_export_layout(surface);
+    // A surface exported before context initialization may already carry the
+    // padded layout returned by the stateful zero-copy probe. If importing the
+    // DMA-BUF later fails, retain that public contract and copy into it; trying
+    // to replace it with a compact layout would either fail the layout check or
+    // make the client and V4L2 disagree about the chroma offset.
+    const size_t total = surface.stable_export_layout.empty()
+        ? prepare_compact_nv12_export_layout(surface)
+        : buffer_layout_size(surface.stable_export_layout);
     if (total == 0)
         return;
     // Allocate lazily as well as from exportSurfaceHandle(). FFmpeg commonly
@@ -419,9 +496,9 @@ void copy_surface_frame(Surface& surface, const V4L2M2MDevice::Buffer& capture)
         const auto source_mapping = source[source_plane.physical_plane_index];
         const size_t source_offset = source.size() == 1 ? source_plane.offset : 0;
         const size_t source_pitch = source_plane.pitch ? source_plane.pitch : destination_plane.pitch;
-        const size_t rows = destination_plane.size / destination_plane.pitch;
-        const size_t row_bytes = destination_plane.pitch;
-        if (source_pitch < row_bytes || rows == 0)
+        const size_t rows = i == 0 ? surface.height : surface.height / 2;
+        const size_t row_bytes = surface.width;
+        if (source_pitch < row_bytes || destination_plane.pitch < row_bytes || rows == 0)
             return;
         const size_t source_end = source_offset + (rows - 1) * source_pitch + row_bytes;
         const size_t destination_end = static_cast<size_t>(destination_plane.offset)
@@ -437,14 +514,15 @@ void copy_surface_frame(Surface& surface, const V4L2M2MDevice::Buffer& capture)
         const auto source_mapping = source[source_plane.physical_plane_index];
         const size_t source_offset = source.size() == 1 ? source_plane.offset : 0;
         const size_t source_pitch = source_plane.pitch ? source_plane.pitch : destination_plane.pitch;
-        const size_t rows = destination_plane.size / destination_plane.pitch;
+        const size_t rows = i == 0 ? surface.height : surface.height / 2;
         auto* destination = static_cast<uint8_t*>(surface.export_buffer_mapping) + destination_plane.offset;
         for (size_t row = 0; row < rows; ++row)
             std::memcpy(destination + row * destination_plane.pitch,
-                source_mapping.data() + source_offset + row * source_pitch, destination_plane.pitch);
+                source_mapping.data() + source_offset + row * source_pitch, surface.width);
     }
     dma_buf_sync_cpu(surface.export_buffer_fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW);
     surface.logical_destination_layout = surface.stable_export_layout;
+    surface.has_completed_frame = true;
     if (trace_enabled())
         std::fprintf(stderr, "copy_surface_frame copied compact planes=%zu to mapping=%p\n",
             surface.stable_export_layout.size(), surface.export_buffer_mapping);
@@ -560,6 +638,7 @@ void createSurfacesDeferred(
     for (unsigned i = 0; i < surface_ids.size(); i++) {
         auto& surface = driver_data->surfaces.at(surface_ids[i]);
         surface.logical_destination_layout.clear();
+        surface.capture_source_layout.clear();
         if (derive_layout) { // (logical) single plane
             surface.logical_destination_layout = derive_layout(driver_format->width, driver_format->height);
             adjust_capture_layout(surface.logical_destination_layout, *driver_format);
@@ -870,14 +949,24 @@ VAStatus syncSurface(VADriverContextP context, VASurfaceID surface_id)
             }
             if (decode_context->stateful_timeout_drain()
                 && decode_context->stateful_submitted_frames() < 8) {
-                error_log(context, "Decoder startup backpressure surface %u; releasing provisional frame\n", surface_id);
+                error_log(context,
+                    "Decoder startup backpressure surface %u completed_frame=%d; releasing provisional frame\n",
+                    surface_id, surface.has_completed_frame ? 1 : 0);
             } else {
-                error_log(context, "Timed out waiting for surface %u; dropping incomplete frame\n", surface_id);
+                error_log(context, "Timed out waiting for surface %u completed_frame=%d; dropping incomplete frame\n",
+                    surface_id, surface.has_completed_frame ? 1 : 0);
             }
             // Preserve the last stable export. Clearing it here produces a
             // visible black flash when the compositor samples a surface after
             // a bounded EOS/DPB timeout; the incomplete frame is represented
             // by the status transition below instead.
+            //
+            // A timeout alone must stay patient: B-frame reordering means the
+            // first pictures legitimately complete after this wait (the
+            // h264-b2 fallback oracle proves it), so failing here would turn
+            // a slow-but-decodable stream into a hard error. Terminal frames
+            // are handled by the release_error guard at the end of this
+            // function instead.
             surface.status = VASurfaceDisplaying;
             surface.source_size_used = 0;
             return VA_STATUS_SUCCESS;
@@ -887,8 +976,18 @@ VAStatus syncSurface(VADriverContextP context, VASurfaceID surface_id)
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
 
+    // An error-discard release (or an ERROR CAPTURE completion) is terminal:
+    // the firmware will never produce this frame, so a fresh surface still
+    // holding its zero-filled export must fail instead of presenting green.
+    // A surface with a previously completed frame keeps the preserved-export
+    // SUCCESS path above. Timeout releases without an error stay patient
+    // (B-frame reorder) and are unaffected by this guard.
+    if (surface.release_error && !surface.has_completed_frame) {
+        error_log(context, "Surface %u released by decoder error with no completed frame; failing\n", surface_id);
+        surface.status = VASurfaceDisplaying;
+        return VA_STATUS_ERROR_DECODING_ERROR;
+    }
     surface.status = VASurfaceDisplaying;
-
     return VA_STATUS_SUCCESS;
 }
 
@@ -1040,25 +1139,42 @@ VAStatus exportSurfaceHandle(
         std::fprintf(stderr, "va export_surface binding id=%u capture_index=%u\n", surface_id,
             surface.destination_buffer_index);
 
+    Context* owner_context = nullptr;
+    if (surface.owner_context != VA_INVALID_ID) {
+        const auto owner = driver_data->contexts.find(surface.owner_context);
+        if (owner != driver_data->contexts.end())
+            owner_context = owner->second.get();
+    }
+
     std::vector<int> export_fds;
     bool stable_export = false;
     const auto mapping = capture_bound ? surface.destination_buffer->get().mapping()
                                        : std::vector<std::span<uint8_t>> {};
     try {
+        if (owner_context && !surface.destination_buffer
+            && zero_copy_requested() && owner_context->uses_stateful_streaming()
+            && owner_context->zero_copy_capture_allowed() && owner_context->zero_copy_codec_supported()
+            && zero_copy_contract_enabled() && stateful_batch_limit() == 1
+            && surface.stable_export_layout.empty()) {
+            if (!prepare_stateful_zero_copy_export_layout(*owner_context, surface, surface_id) && trace_enabled())
+                std::fprintf(stderr, "stateful zero-copy fallback reason=export_layout_probe surface=%u\n",
+                    surface_id);
+        }
         // Chromium exports a new pool before its first vaBeginPicture. Give an
-        // unbound surface an independent compact NV12 buffer; exporting must
-        // never bind it to (or reconfigure) an already-running decoder.
+        // unbound surface an independent stable NV12 buffer; exporting must
+        // never bind it to (or reconfigure) an already-running decoder. The
+        // zero-copy contract may have installed a padded layout above.
         if (surface.export_buffer_fd < 0 || !surface.export_buffer_mapping) {
             if (!capture_bound || copy_surfaces_enabled()) {
-                const size_t required = prepare_compact_nv12_export_layout(surface);
+                const size_t required = surface.stable_export_layout.empty()
+                    ? prepare_compact_nv12_export_layout(surface)
+                    : buffer_layout_size(surface.stable_export_layout);
                 if (required == 0 || !allocate_surface_dma_buf(surface, required))
                     return VA_STATUS_ERROR_ALLOCATION_FAILED;
             }
         }
         if (surface.export_buffer_fd >= 0 && surface.export_buffer_mapping) {
-            size_t required = 0;
-            for (const auto& plane : surface.stable_export_layout)
-                required = std::max(required, static_cast<size_t>(plane.offset) + plane.size);
+            const size_t required = buffer_layout_size(surface.stable_export_layout);
             if (required == 0 || required > surface.export_buffer_size)
                 return VA_STATUS_ERROR_OPERATION_FAILED;
             const int exported = dup(surface.export_buffer_fd);

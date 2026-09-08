@@ -3,10 +3,12 @@
 #pragma once
 
 #include <set>
+#include <optional>
 
 extern "C" {
 #include "linux/videodev2.h"
 #include <va/va.h>
+#include <va/va_dec_hevc.h>
 }
 
 #include "context.h"
@@ -37,5 +39,7 @@ public:
 
 private:
     bool prepend_parameter_sets(Surface& surface) const;
+    // Own the effective tables: VA buffers may be destroyed after submission.
+    mutable std::optional<VAIQMatrixBufferHEVC> scaling_matrix_;
     VAProfile profile;
 };

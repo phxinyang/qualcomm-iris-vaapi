@@ -208,6 +208,19 @@ bool Context::capture_slots_scheduled() const
     return stateful_capture_scheduled() || capture_uses_dmabuf();
 }
 
+void Context::queue_capture_surface(Surface& surface)
+{
+    if (!surface.destination_buffer)
+        throw std::system_error(EINVAL, std::generic_category(), "surface has no CAPTURE buffer");
+    if (!capture_uses_dmabuf()) {
+        surface.destination_buffer->get().queue();
+        return;
+    }
+    if (surface.export_buffer_fd < 0 || !surface.export_buffer_mapping || surface.export_buffer_size == 0)
+        throw std::system_error(EINVAL, std::generic_category(), "surface has no zero-copy DMA-BUF");
+    surface.destination_buffer->get().queue_with_dmabuf(surface.export_buffer_fd, surface.export_buffer_size);
+}
+
 bool Context::zero_copy_codec_supported() const
 {
     // The current one-slot CAPTURE ownership model is validated on Iris H.264.
@@ -216,6 +229,49 @@ bool Context::zero_copy_codec_supported() const
     // require a multi-slot ownership protocol that is deliberately left on
     // the stable-copy path until it can be proven without fd aliasing.
     return pixelformat == V4L2_PIX_FMT_H264;
+}
+
+std::optional<v4l2_format> Context::probe_stateful_capture_format(fourcc capture_pixelformat)
+{
+    if (!uses_stateful_streaming() || picture_width <= 0 || picture_height <= 0)
+        return std::nullopt;
+
+    const auto width = static_cast<unsigned>(picture_width);
+    const auto height = static_cast<unsigned>(picture_height);
+    const bool same_probe = stateful_capture_probe_attempted_
+        && stateful_capture_probe_pixelformat_ == capture_pixelformat
+        && stateful_capture_probe_width_ == width
+        && stateful_capture_probe_height_ == height;
+    if (same_probe)
+        return stateful_capture_probe_result_;
+
+    stateful_capture_probe_attempted_ = true;
+    stateful_capture_probe_pixelformat_ = capture_pixelformat;
+    stateful_capture_probe_width_ = width;
+    stateful_capture_probe_height_ = height;
+    stateful_capture_probe_result_.reset();
+
+    try {
+        // Do not touch the live decoder session. A format probe can happen
+        // while Chrome is still constructing its VA surface pool, and an
+        // in-place S_FMT would invalidate any queue state established by a
+        // sibling context. The order is intentional: Iris pads CAPTURE only
+        // after the compressed OUTPUT format has been negotiated.
+        auto probe = device.clone_for_context();
+        probe.set_format(probe.capture_buf_type, capture_pixelformat, width, height);
+        probe.set_format(probe.output_buf_type, pixelformat, width, height);
+        stateful_capture_probe_result_ = probe.capture_format;
+        const auto& format = probe.capture_format.fmt.pix_mp;
+        if (trace_enabled())
+            std::fprintf(stderr,
+                "stateful zero-copy export probe requested=%ux%u capture=%ux%u planes=%u stride=%u size=%u\n",
+                width, height, format.width, format.height, format.num_planes,
+                format.plane_fmt[0].bytesperline, format.plane_fmt[0].sizeimage);
+    } catch (const std::exception& error) {
+        if (trace_enabled())
+            std::fprintf(stderr, "stateful zero-copy export probe failed: %s\n", error.what());
+    }
+    return stateful_capture_probe_result_;
 }
 
 void Context::queue_zero_copy_capture()
@@ -244,7 +300,7 @@ void Context::queue_zero_copy_capture()
             if (surface.status != VASurfaceRendering || surface.destination_buffer_queued
                 || !surface.destination_buffer)
                 continue;
-            surface.destination_buffer->get().queue();
+            queue_capture_surface(surface);
             surface.destination_buffer_queued = true;
             if (trace_enabled())
                 std::fprintf(stderr, "stateful zero-copy queue surface=%u index=%u\n", surface_id,
@@ -410,13 +466,12 @@ bool Context::start_capture()
         for (const auto index : scheduled) {
             if (index >= device.buffer_count(device.capture_buf_type))
                 continue;
-            auto& buffer = device.buffer(device.capture_buf_type, index);
             auto owner = surface_for_buffer(device.capture_buf_type, index);
             if (!owner || !driver_data->surfaces.contains(*owner))
                 continue;
             auto& surface = driver_data->surfaces.at(*owner);
             if (!surface.destination_buffer_queued) {
-                buffer.queue();
+                queue_capture_surface(surface);
                 surface.destination_buffer_queued = true;
                 if (capture_uses_dmabuf())
                     break;
@@ -642,13 +697,26 @@ bool Context::handle_capture_completion(unsigned capture_index, bool force_reque
         auto& surface = driver_data->surfaces.at(*completed);
         if (!capture_error && !capture_uses_dmabuf())
             copy_surface_frame(surface, device.buffer(device.capture_buf_type, capture_index));
+        if (!capture_error && (capture_uses_dmabuf() || !copy_surfaces_enabled())) {
+            // Direct binding: the exported handle reads the CAPTURE slot
+            // itself, so a clean completion means displayable content even
+            // without a stable copy. The copy path records its own flag
+            // inside copy_surface_frame() only when bytes really moved.
+            surface.has_completed_frame = true;
+        }
 
         const auto expected = surface_for_buffer(device.capture_buf_type, capture_index);
         const bool stable_snapshot = !capture_uses_dmabuf() && copy_surfaces_enabled()
             && surface.export_buffer_fd >= 0 && surface.export_buffer_mapping;
         const bool scheduled_mismatch = capture_slots_scheduled() && (!expected || *expected != *completed);
         if (stable_snapshot || scheduled_mismatch || force_requeue || capture_error) {
-            device.buffer(device.capture_buf_type, capture_index).queue();
+            if (capture_uses_dmabuf() && surface.export_buffer_fd >= 0 && surface.export_buffer_mapping
+                && surface.export_buffer_size != 0) {
+                device.buffer(device.capture_buf_type, capture_index).queue_with_dmabuf(
+                    surface.export_buffer_fd, surface.export_buffer_size);
+            } else {
+                device.buffer(device.capture_buf_type, capture_index).queue();
+            }
             capture_requeued = true;
         } else if (!capture_slots_scheduled()) {
             surface.destination_buffer = std::cref(device.buffer(device.capture_buf_type, capture_index));
@@ -658,6 +726,11 @@ bool Context::handle_capture_completion(unsigned capture_index, bool force_reque
         surface.destination_buffer_queued = capture_requeued;
         surface.status = VASurfaceDisplaying;
         surface.source_size_used = 0;
+        if (capture_error)
+            surface.release_error = true;
+        if (trace_enabled() && capture_error && !surface.has_completed_frame)
+            std::fprintf(stderr, "stateful error completion on fresh surface=%u index=%u\n", *completed,
+                capture_index);
         if (uses_stateful_streaming() && !capture_error) {
             stateful_completed_count++;
             stateful_session_.on_capture_completed(stateful_timestamp_value(capture_timestamp));
@@ -725,6 +798,14 @@ void Context::discard_stateful_error_frame()
             // An ERROR CAPTURE completion is terminal for every AU in this
             // batch. Release even Rendering targets; otherwise their next
             // beginPicture() waits for a completion that can never arrive.
+            // A released target that never completed still exports a
+            // zero-filled buffer, which renders as the switch-time green
+            // frame; count those releases separately for soak correlation,
+            // and mark them so syncSurface() fails instead of presenting.
+            if (trace_enabled() && surface->second.status == VASurfaceRendering && !surface->second.has_completed_frame)
+                std::fprintf(stderr, "stateful error release without completed frame surface=%u\n", surface_id);
+            if (surface->second.status == VASurfaceRendering)
+                surface->second.release_error = true;
             surface->second.status = VASurfaceDisplaying;
             surface->second.source_size_used = 0;
         }
@@ -923,7 +1004,8 @@ bool Context::reset_stateful_decoder()
             continue;
         auto& surface = driver_data->surfaces.at(surface_id);
         surface.source_buffer_queued = false;
-        if (!restart_queues && surface.destination_buffer && !surface.destination_buffer_queued) {
+        if (!restart_queues && !capture_uses_dmabuf() && surface.destination_buffer
+            && !surface.destination_buffer_queued) {
             surface.destination_buffer->get().queue();
             surface.destination_buffer_queued = true;
         }
@@ -1314,6 +1396,7 @@ bool Context::bind_surface(VASurfaceID surface_id){
             // leaves the firmware with fewer capture slots than the VA pool.
             surface.destination_buffer_queued = device.capture_streaming && !capture_slots_scheduled();
             surface.logical_destination_layout.clear();
+            surface.capture_source_layout.clear();
             if (v4l2_format.derive_layout) {
                 surface.logical_destination_layout = v4l2_format.derive_layout(driver_format.width, driver_format.height);
                 adjust_capture_layout(surface.logical_destination_layout, driver_format);
@@ -1349,6 +1432,7 @@ bool Context::bind_surface(VASurfaceID surface_id){
     surface.destination_buffer_index = index;
     surface.destination_buffer_queued = capture_initialized;
     surface.logical_destination_layout.clear();
+    surface.capture_source_layout.clear();
     if (v4l2_format.derive_layout) {
         surface.logical_destination_layout = v4l2_format.derive_layout(driver_format.width, driver_format.height);
         adjust_capture_layout(surface.logical_destination_layout, driver_format);
@@ -1442,6 +1526,7 @@ bool Context::reconfigure_stateful_dimensions(VASurfaceID surface_id)
         surface.source_buffer_queued = false;
         surface.destination_buffer_queued = false;
         surface.logical_destination_layout.clear();
+        surface.capture_source_layout.clear();
         if (surface.status == VASurfaceRendering)
             surface.status = VASurfaceDisplaying;
         surface.source_size_used = 0;
@@ -1471,6 +1556,11 @@ bool Context::reconfigure_stateful_dimensions(VASurfaceID surface_id)
     stateful_batch_order.clear();
     stateful_sequence_starts.clear();
     stateful_last_timestamp = {};
+    stateful_capture_probe_attempted_ = false;
+    stateful_capture_probe_pixelformat_ = 0;
+    stateful_capture_probe_width_ = 0;
+    stateful_capture_probe_height_ = 0;
+    stateful_capture_probe_result_.reset();
     surface_buffer_indices.clear();
     surface_ids.clear();
     queues_initialized = false;

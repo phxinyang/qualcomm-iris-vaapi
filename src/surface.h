@@ -100,6 +100,18 @@ struct Surface : SurfaceStableExport {
     std::optional<std::reference_wrapper<const V4L2M2MDevice::Buffer>> destination_buffer;
     unsigned destination_buffer_index;
     bool destination_buffer_queued;
+    // True once a decoded frame has actually landed in this surface's stable
+    // export (copy_surface_frame() completed) or its directly bound CAPTURE
+    // slot completed without error. A surface that never reached this state
+    // still exports a zero-filled buffer; displaying it renders the exact
+    // green frame the canvas probes catch on stream switches, so error paths
+    // must be able to tell the two cases apart.
+    bool has_completed_frame = false;
+    // Set when the decoder reported this surface's frame as terminally failed
+    // (ERROR CAPTURE completion or error-discard release). Unlike a timeout,
+    // which a reordered frame can outlive, such a frame will never complete.
+    // Cleared when the surface starts a new picture.
+    bool release_error = false;
     // Optional stable DMA-BUF backing for an exported VA surface. The
     // stateful V4L2 decoder may return any CAPTURE index for a timestamp, so
     // copy_surface_frame() updates this fixed buffer before it is displayed.

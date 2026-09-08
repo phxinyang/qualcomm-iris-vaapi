@@ -386,6 +386,23 @@ V4L2M2MDevice::Buffer::~Buffer()
 
 void V4L2M2MDevice::Buffer::queue(int request_fd, timeval* timestamp, unsigned size) const
 {
+    queue_internal(-1, 0, request_fd, timestamp, size);
+}
+
+void V4L2M2MDevice::Buffer::queue_with_dmabuf(int dmabuf_fd, size_t dmabuf_size, int request_fd,
+    timeval* timestamp, unsigned size) const
+{
+    if (!uses_dmabuf() || dmabuf_fd < 0 || dmabuf_size == 0 || dmabuf_fds_.size() != 1)
+        throw std::system_error(EINVAL, std::generic_category(), "invalid DMA-BUF queue override");
+    if (dmabuf_size < plane_lengths_.front())
+        throw std::system_error(EINVAL, std::generic_category(), "DMA-BUF queue override is too small");
+    queue_internal(dmabuf_fd, dmabuf_size, request_fd, timestamp, size);
+}
+
+void V4L2M2MDevice::Buffer::queue_internal(int dmabuf_fd, size_t dmabuf_size, int request_fd,
+    timeval* timestamp, unsigned size) const
+{
+    const bool dmabuf_override = dmabuf_fd >= 0;
     struct v4l2_plane planes[VIDEO_MAX_PLANES] = {};
     struct v4l2_buffer buffer = {
         .index = index_,
@@ -405,8 +422,8 @@ void V4L2M2MDevice::Buffer::queue(int request_fd, timeval* timestamp, unsigned s
             // MMAP QBUF carries the mapped plane length. DMA-BUF QBUF carries
             // the imported fd and its allocation length instead.
             if (uses_dmabuf()) {
-                buffer.m.planes[i].m.fd = dmabuf_fds_[i];
-                buffer.m.planes[i].length = plane_lengths_[i];
+                buffer.m.planes[i].m.fd = dmabuf_override ? dmabuf_fd : dmabuf_fds_[i];
+                buffer.m.planes[i].length = dmabuf_override ? dmabuf_size : plane_lengths_[i];
             } else {
                 buffer.m.planes[i].length = mapping_[i].size();
             }
@@ -414,8 +431,8 @@ void V4L2M2MDevice::Buffer::queue(int request_fd, timeval* timestamp, unsigned s
         }
     } else {
         if (uses_dmabuf()) {
-            buffer.m.fd = dmabuf_fds_[0];
-            buffer.length = plane_lengths_[0];
+            buffer.m.fd = dmabuf_override ? dmabuf_fd : dmabuf_fds_[0];
+            buffer.length = dmabuf_override ? dmabuf_size : plane_lengths_[0];
         }
         buffer.bytesused = size;
     }
@@ -438,6 +455,8 @@ void V4L2M2MDevice::Buffer::queue(int request_fd, timeval* timestamp, unsigned s
     if (trace_enabled())
         std::fprintf(stderr, "v4l2 q type=%u index=%u size=%u planes=%u len=%u field=%u\\n", type_, index_, size,
             buffer.length, buffer.m.planes ? buffer.m.planes[0].length : buffer.length, buffer.field);
+    if (trace_enabled() && dmabuf_override)
+        std::fprintf(stderr, "v4l2 q dmabuf override index=%u fd=%d len=%zu\\n", index_, dmabuf_fd, dmabuf_size);
 
     errno_wrapper(ioctl, owner_.video_fd, VIDIOC_QBUF, &buffer);
 }

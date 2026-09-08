@@ -157,6 +157,7 @@ VAStatus beginPicture(VADriverContextP va_context, VAContextID context_id, VASur
         }
     }
     surface.status = VASurfaceRendering;
+    surface.release_error = false;
     context.begin_surface(surface_id);
 
     return VA_STATUS_SUCCESS;

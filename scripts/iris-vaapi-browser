@@ -160,6 +160,34 @@ profile_root=${IRIS_BROWSER_PROFILE_ROOT:-${XDG_CONFIG_HOME:-$HOME/.config}/iris
 profile_dir=$profile_root/$profile_browser-$graphics_mode
 mkdir -p "$profile_dir"
 
+# Fedora's Chromium 152 arm64 package injects AcceleratedVideoDecodeLinuxGL
+# and AcceleratedVideoDecodeLinuxZeroCopyGL from /etc/chromium/chromium.conf.
+# On the qualified SM8550 kernel that combination can take the Adreno GPU
+# through a GMU vote timeout and GPU fault before media playback recovers.
+# Keep that unqualified Fedora native path on explicit software fallback.
+# Google Chrome uses the separate VA-API path and is unchanged.
+# Scope this to the Fedora build fingerprint, not every Chromium >= 152:
+# the separately built upstream 154 binary can use our VA-API backend, and
+# disabling its GL selectors silently changes it to software decoding.
+browser_version=$($browser --version 2>/dev/null || true)
+browser_major=$(printf '%s\n' "$browser_version" \
+    | sed -n 's/.* \([0-9][0-9]*\)\..*/\1/p' | head -1)
+chromium_compat_args=''
+case "$profile_browser:$browser_major" in
+    chromium:) ;;
+    chromium:*[!0-9]*) ;;
+    chromium:*)
+        if [ "$browser_major" -ge 152 ]; then
+            case "$browser_version" in
+                *'Built from source for Fedora '*)
+                    chromium_compat_args='--enable-features=AcceleratedVideoDecoder --disable-features=AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL'
+                    echo 'iris-vaapi-browser: unqualified Fedora Chromium native path; using software fallback. Use --browser=chrome for the validated Iris VA-API path.' >&2
+                    ;;
+            esac
+        fi
+        ;;
+esac
+
 # The installed driver must be discoverable from libva's standard driver
 # directory. Do not let a stale build-tree override leak into desktop starts.
 unset LIBVA_DRIVERS_PATH
@@ -199,4 +227,5 @@ fi
 exec "$browser" \
     "$common_args" \
     "--user-data-dir=$profile_dir" \
+    $chromium_compat_args \
     "$@"

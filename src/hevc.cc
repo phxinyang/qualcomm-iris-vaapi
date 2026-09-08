@@ -71,7 +71,42 @@ std::vector<uint8_t> make_hevc_vps(const VAPictureParameterBufferHEVC& picture)
     return result;
 }
 
-std::vector<uint8_t> make_hevc_sps(const VAPictureParameterBufferHEVC& picture)
+void write_hevc_scaling_lists(BitWriter& writer, const VAIQMatrixBufferHEVC& matrix)
+{
+    for (unsigned size_id = 0; size_id < 4; ++size_id) {
+        const unsigned count = size_id == 3 ? 2 : 6;
+        const unsigned side = size_id == 0 ? 4 : 8;
+        for (unsigned id = 0; id < count; ++id) {
+            const uint8_t* values = size_id == 0 ? matrix.ScalingList4x4[id]
+                : size_id == 1 ? matrix.ScalingList8x8[id]
+                : size_id == 2 ? matrix.ScalingList16x16[id]
+                               : matrix.ScalingList32x32[id];
+            writer.bit(1); // scaling_list_pred_mode_flag: explicit coefficients
+            int previous = 8;
+            if (size_id > 1) {
+                previous = size_id == 2 ? matrix.ScalingListDC16x16[id]
+                                        : matrix.ScalingListDC32x32[id];
+                writer.se(previous - 8);
+            }
+            // VA matrices are raster ordered; HEVC scaling_list_data() uses
+            // an up-right diagonal scan (4x4 for size 0, 8x8 otherwise).
+            for (unsigned diagonal = 0; diagonal < 2 * side - 1; ++diagonal) {
+                for (int y = std::min(diagonal, side - 1), x = diagonal - y;
+                     y >= 0 && x < static_cast<int>(side); --y, ++x) {
+                    const int value = values[y * side + x];
+                    int delta = (value - previous + 256) % 256;
+                    if (delta > 127)
+                        delta -= 256;
+                    writer.se(delta);
+                    previous = value;
+                }
+            }
+        }
+    }
+}
+
+std::vector<uint8_t> make_hevc_sps(const VAPictureParameterBufferHEVC& picture,
+    const VAIQMatrixBufferHEVC* scaling_matrix = nullptr)
 {
     BitWriter writer;
     writer.bits(0, 4); // sps_video_parameter_set_id
@@ -102,11 +137,16 @@ std::vector<uint8_t> make_hevc_sps(const VAPictureParameterBufferHEVC& picture)
     writer.ue(picture.log2_diff_max_min_luma_coding_block_size);
     writer.ue(picture.log2_min_transform_block_size_minus2);
     writer.ue(picture.log2_diff_max_min_transform_block_size);
-    writer.ue(picture.max_transform_hierarchy_depth_intra);
+    // HEVC SPS syntax is inter, then intra. VAPictureParameterBufferHEVC
+    // stores them in the opposite order; equal-depth smoke clips hide a swap.
     writer.ue(picture.max_transform_hierarchy_depth_inter);
+    writer.ue(picture.max_transform_hierarchy_depth_intra);
     writer.bit(picture.pic_fields.bits.scaling_list_enabled_flag);
-    if (picture.pic_fields.bits.scaling_list_enabled_flag)
-        writer.bit(0); // sps_scaling_list_data_present_flag
+    if (picture.pic_fields.bits.scaling_list_enabled_flag) {
+        writer.bit(scaling_matrix != nullptr); // sps_scaling_list_data_present_flag
+        if (scaling_matrix)
+            write_hevc_scaling_lists(writer, *scaling_matrix);
+    }
     writer.bit(picture.pic_fields.bits.amp_enabled_flag);
     writer.bit(picture.slice_parsing_fields.bits.sample_adaptive_offset_enabled_flag);
     writer.bit(picture.pic_fields.bits.pcm_enabled_flag);
@@ -247,7 +287,8 @@ bool HEVCContext::prepend_parameter_sets(Surface& surface) const
         return true;
 
     const auto vps = make_hevc_vps(*surface.params.hevc.picture);
-    const auto sps = make_hevc_sps(*surface.params.hevc.picture);
+    const auto sps = make_hevc_sps(*surface.params.hevc.picture,
+        scaling_matrix_ ? &*scaling_matrix_ : nullptr);
     const auto pps = make_hevc_pps(*surface.params.hevc.picture);
     const size_t required = vps.size() + sps.size() + pps.size();
     if (!ensure_stateful_bitstream_capacity(surface, required))
@@ -269,6 +310,12 @@ VAStatus HEVCContext::store_buffer(const Buffer& buffer) const
 {
     auto& surface = driver_data->surfaces.at(current_surface());
     switch (buffer.type) {
+    case VAIQMatrixBufferType:
+        if (buffer.count != 1 || buffer.size < sizeof(VAIQMatrixBufferHEVC))
+            return VA_STATUS_ERROR_INVALID_PARAMETER;
+        scaling_matrix_ = *reinterpret_cast<const VAIQMatrixBufferHEVC*>(buffer.data.get());
+        return VA_STATUS_SUCCESS;
+
     case VAPictureParameterBufferType:
         surface.params.hevc.picture = reinterpret_cast<VAPictureParameterBufferHEVC*>(buffer.data.get());
         if (trace_enabled()) {
