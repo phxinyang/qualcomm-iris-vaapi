@@ -821,3 +821,37 @@ geometry, so the fallback never fired (0 occurrences in 90 s of Chrome DRC).
 The code path is reviewed and logged, but no client exercised it yet.
 Accordingly zero-copy stays an explicit `h264-no-b-v1` opt-in; the default
 launcher and package are unchanged.
+
+## Full Fluster driver-path runs (2026-09-08, current build)
+
+Same target and boot ID as the zero-copy requalification above; every run
+guarded (boot/temperature), no reset. Driver path is `FFmpeg-*-VAAPI`
+through this driver; firmware baseline is `GStreamer-*-V4L2` on the same
+firmware and resources, bypassing the driver.
+
+| Suite | Driver path (FFmpeg-VAAPI) | Firmware (GStreamer-V4L2) |
+| --- | --- | --- |
+| JVT-AVC_V1 H.264 (135) | 7 pass / 8 fail / 120 error | 40 pass (matches 2026-08-30) |
+| JCT-VC-HEVC_V1 HEVC (147) | 20 pass / 18 fail / 108 error / 1 timeout | 112 pass (matches 2026-08-30) |
+
+The firmware numbers reproduce 2026-08-30 exactly, including the hard
+`gst-launch` rejects on SVC (H.264) and WPP (HEVC) vectors. VA-pass is a
+strict subset of firmware-pass: the driver never passes what the firmware
+cannot do.
+
+Gap analysis on sampled vectors (native `h264_v4l2m2m` / manual VAAPI
+controls): CABA1_Sony_D, CVFC1_Sony_C, CAQP1_Sony_B fail at the firmware
+too (pixel mismatch or abort), and CANL1_Sony_E aborts natively. These are
+firmware capability boundaries, not driver regressions. Two vectors show the
+gap is partly methodology: BA1_Sony_D is VAAPI-exact and stable across 3/3
+manual runs (the fluster Fail is the known nondeterministic wrapper
+verdict from 2026-08-30), and AMP_A_Samsung_7 (Main 8-bit) is VAAPI-exact
+while fluster reports Error. The Fluster FFmpeg wrapper turns software
+fallback ("Failed setup for format") into Error, so unadvertised profiles
+(Main10 and friends, deliberately outside the production matrix) inflate
+the Error column by design.
+
+No evidence was found of the driver aborting decodable content: matrices,
+browser runs, soaks and the manual VAAPI controls are all green and stable.
+Per the standing classification, `iris-matrix.sh` remains the authoritative
+VA pixel oracle; these corpus runs are diagnostics.
