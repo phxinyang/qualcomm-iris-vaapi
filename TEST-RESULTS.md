@@ -792,3 +792,32 @@ discharging ABBA collection is run.
 Accordingly, zero-copy remains an explicit `h264-no-b-v1` experiment and is
 not enabled by the default launcher or package. The current evidence does not
 qualify a multi-slot, B-frame, HEVC, AV1, or dynamic-resolution zero-copy path.
+
+## Zero-copy requalification (2026-09-08, current build)
+
+Target: Fedora 44 ARM64 on SM8550, boot ID
+`36da96d7-8a95-4abe-b041-949b7c9f8590` (unchanged through every run below),
+Chrome `152.0.7977.82`, decoder resolved by the `iris_driver` name. All
+firmware-risky runs went through `scripts/iris-experiment-guard.sh` (or the
+soak's own boot/temperature guard); no reset, no thermal breach. The build
+under test includes the stream-switch green-flash work (completed-frame
+tracking with fail-closed error release; sync timeouts stay patient for
+B-frame reorder, proven by the B=2 fallback case below).
+
+| Check | Result |
+| --- | --- |
+| Zero-copy suite, H.264 all-I and IP/GOP12 direct | 24/24 exact framemd5 each; zero `copy_surface_frame`; strict EOS |
+| Zero-copy suite, H.264 B=2 without contract | 24/24 exact framemd5 through stable-copy fallback |
+| Zero-copy suite, HEVC with zero-copy requested | 24/24 exact framemd5 through `codec_reorder_contract` fallback |
+| Dynamic resolution, default path, 100 switches | native 202/100 exact pixels; VA single-process 202/100 exact md5; 101 fresh contexts exact md5 |
+| Chrome DRC stream under zero-copy env, ~1000 switches | `VaapiVideoDecoder`, platform=true, 2134 decoded / 2 dropped in 90 s; zero-copy engaged, zero `copy_surface_frame`, zero errors/timeouts, boot unchanged |
+| Concurrent dual-H.264 soak, default path, SHORTENED 300 s | 7200 frames per context, zero timeout/miss, strict EOS |
+| Concurrent dual-H.264 soak, zero-copy, SHORTENED 300 s | 7200 frames per context, zero timeout/miss, both traces show `zero-copy enabled` with zero copies |
+
+Same-VA-context dynamic-resolution under zero-copy (the
+`dynamic_resolution` fallback arm in `reconfigure_stateful_dimensions`)
+remains runtime-unproven: both FFmpeg and Chrome open fresh VA contexts per
+geometry, so the fallback never fired (0 occurrences in 90 s of Chrome DRC).
+The code path is reviewed and logged, but no client exercised it yet.
+Accordingly zero-copy stays an explicit `h264-no-b-v1` opt-in; the default
+launcher and package are unchanged.
