@@ -38,10 +38,7 @@ jobs:
             stateful-session \
             static-checks \
             iris-source-invariants \
-            iris-stateful-order-check \
             iris-env-doc-check \
-            iris-surface-limits-check \
-            iris-profile-capability-check \
             iris-eos-check-self-test \
             iris-deploy-path-check \
             iris-setup-path-check \

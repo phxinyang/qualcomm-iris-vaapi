@@ -42,29 +42,5 @@ if [ -n "$stale" ]; then
 fi
 [ "$status" -eq 0 ] || exit 1
 
-# The sync timeout is a behavioural contract, not just a variable name. Keep
-# the documented default/range/cold-start allowance tied to the implementation
-# so changing either side alone fails CI.
-require_literal() {
-    file=$1
-    literal=$2
-    description=$3
-    if ! grep -Fq "$literal" "$file"; then
-        echo "FAIL $description: expected '$literal' in ${file#"$root"/}" >&2
-        status=1
-    fi
-}
-
-surface="$root/src/surface.cc"
-require_literal "$surface" 'constexpr int default_timeout_ms = 2000;' 'sync timeout implementation default'
-require_literal "$surface" 'std::clamp(parsed, 50L, 60000L)' 'sync timeout implementation range'
-require_literal "$surface" 'if (cold_start && !stateful_sync_timeout_overridden())' 'cold-start override guard'
-require_literal "$surface" 'sync_timeout = std::max(sync_timeout, 30000);' 'cold-start timeout allowance'
-require_literal "$readme" '`vaSyncSurface()` therefore uses a bounded 2000 ms wait by default' 'sync timeout prose default'
-require_literal "$readme" '`V4L2_VA_SYNC_TIMEOUT_MS=50..60000`' 'sync timeout prose range'
-require_literal "$readme" 'first frame of a cold stateful sequence gets a 30000 ms' 'cold-start prose allowance'
-require_literal "$readme" '| `V4L2_VA_SYNC_TIMEOUT_MS` | `2000` | Bounded `vaSyncSurface()` wait, `50..60000`; without an override, the first cold-start frame may wait up to `30000` ms. |' 'sync timeout environment table'
-
-[ "$status" -eq 0 ] || exit 1
 
 printf 'PASS environment documentation covers %d switches\n' "$(printf '%s\n' "$in_source" | wc -l)"

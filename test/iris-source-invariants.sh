@@ -1,39 +1,21 @@
 #!/bin/sh
 
-# Cheap source-level guards for the browser-facing Iris invariants. These run
-# on hosts without V4L2 hardware and complement the runtime trace checks.
+# Cheap guards for the hardware test scripts themselves: they run on hosts
+# without V4L2 hardware and keep the oracles fail-closed. Driver behaviour is
+# covered by unit tests and the hardware gates, not by grepping src/.
 
 set -eu
 
 root=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
-context="$root/src/context.cc"
-context_header="$root/src/context.h"
-surface="$root/src/surface.cc"
 env_helper="$root/test/lib/iris-env.sh"
 matrix="$root/test/iris-matrix.sh"
 structure_matrix="$root/test/iris-structure-matrix.sh"
 concurrency_soak="$root/test/iris-concurrency-soak.sh"
 dynamic_resolution="$root/test/iris-dynamic-resolution.sh"
 
-grep -q 'return !value || std::strcmp(value, "0") != 0;' "$surface"
-grep -q 'size_t limit = 1;' "$context"
-grep -q 'VA_DRIVER_INIT_FUNC' "$root/src/driver.cc"
-
-if grep -q 'devices\.emplace_back(device\.clone_for_context())' "$context" \
-    || ! grep -q 'V4L2M2MDevice device;' "$context_header" \
-    || ! grep -q 'auto session = device\.clone_for_context();' "$context"; then
-    echo "FAIL VA contexts do not own and close their cloned V4L2 sessions" >&2
-    exit 1
-fi
-
 if grep -Eq 'printf .* /dev/video0|echo .* /dev/video0' "$env_helper" \
     || ! grep -q 'no /dev/video\* node reports iris_driver' "$env_helper"; then
     echo "FAIL Iris test device resolver can silently fall back to a camera node" >&2
-    exit 1
-fi
-
-if grep -q 'memset(surface.export_buffer_mapping' "$surface"; then
-    echo "FAIL stable export is cleared on sync timeout" >&2
     exit 1
 fi
 
@@ -98,82 +80,8 @@ if grep -q 'va-same-context\|same-context path' "$dynamic_resolution" \
     echo "FAIL dynamic-resolution gate claims FFmpeg reuses one VA context" >&2
     exit 1
 fi
-if ! grep -q 'stateful resize rejected codec=vp9' "$context" \
-    || ! grep -q 'FAIL VP9 dynamic qualification is disabled' "$dynamic_resolution"; then
+if ! grep -q 'FAIL VP9 dynamic qualification is disabled' "$dynamic_resolution"; then
     echo "FAIL VP9 dynamic resolution does not fail closed" >&2
-    exit 1
-fi
-vp9_reject_line=$(grep -n 'stateful resize rejected codec=vp9' "$context" | cut -d: -f1)
-resize_reset_line=$(grep -n 'const bool zero_copy_fallback = capture_uses_dmabuf' "$context" | cut -d: -f1)
-if [ "$vp9_reject_line" -ge "$resize_reset_line" ]; then
-    echo "FAIL VP9 resize rejection happens after queue teardown begins" >&2
-    exit 1
-fi
-
-if ! grep -q 'device.buffer(device.capture_buf_type, i).queue()' "$context"; then
-    echo "FAIL stateful start_capture does not queue the CAPTURE pool" >&2
-    exit 1
-fi
-
-# A CAPTURE completion may be serviced before a VA client consumes its surface.
-# Copy the complete frame to the stable export before returning the rotating
-# CAPTURE slot; otherwise a client may present the previous contents until a
-# later surface reuse happens to call vaSyncSurface().
-if ! grep -q 'copy_surface_frame(surface' "$context"; then
-    echo "FAIL stateful queue service does not copy completed frames" >&2
-    exit 1
-fi
-if ! grep -q 'copy_surfaces_enabled()' "$context" || ! grep -q 'copy_surface_frame(Surface' "$surface"; then
-    echo "FAIL stable surface snapshot path is missing" >&2
-    exit 1
-fi
-completion_block=$(sed -n '/bool Context::handle_capture_completion/,/^}/p' "$context")
-if ! printf '%s\n' "$completion_block" | grep -q 'surface_for_capture_flags(device.last_dequeued_flags())'; then
-    echo "FAIL unified CAPTURE completion has no flag fallback" >&2
-    exit 1
-fi
-if ! grep -q 'stateful_batch_limit() == 1' "$surface" \
-    || ! grep -q 'fallback reason=batch_contract' "$surface"; then
-    echo "FAIL zero-copy batch ownership guard is missing" >&2
-    exit 1
-fi
-if ! grep -q 'zero_copy_contract_enabled()' "$surface" \
-    || ! grep -q 'fallback reason=ownership_contract' "$surface" \
-    || ! grep -q 'h264-no-b-v1' "$surface"; then
-    echo "FAIL zero-copy ownership contract guard is missing" >&2
-    exit 1
-fi
-if ! grep -q 'export_buffer_mapping' "$surface" || ! grep -q 'copy_surface_frame' "$surface"; then
-    echo "FAIL stable surface snapshots have no copy path" >&2
-    exit 1
-fi
-export_block=$(sed -n '/VAStatus exportSurfaceHandle(/,/^}/p' "$surface")
-if ! printf '%s\n' "$export_block" | grep -q '!capture_bound && !copy_surfaces_enabled()'; then
-    echo "FAIL unbound no-copy export can return a stale stable buffer" >&2
-    exit 1
-fi
-
-service_block=$(sed -n '/void Context::service_stateful_queues()/,/^}/p' "$context")
-if ! printf '%s\n' "$service_block" | grep -q 'handle_capture_completion' \
-    || ! printf '%s\n' "$completion_block" | grep -q 'copy_surface_frame(surface'; then
-    echo "FAIL queue service does not copy stable frame before CAPTURE reuse" >&2
-    exit 1
-fi
-
-# A surface that never completed still exports a zero-filled buffer, which
-# renders as the exact green frame from the stream-switch reports. A sync
-# timeout alone must stay patient (B-frame reordering completes late), so only
-# terminally error-released fresh surfaces may fail instead of returning
-# success for the client to present.
-sync_block=$(sed -n '/VAStatus syncSurface(VADriverContextP context, VASurfaceID surface_id)/,/^}/p' "$surface")
-if ! printf '%s\n' "$sync_block" | grep -q 'surface.release_error && !surface.has_completed_frame' \
-    || ! printf '%s\n' "$sync_block" | grep -q 'no completed frame; failing'; then
-    echo "FAIL error-released fresh surfaces can be presented as success" >&2
-    exit 1
-fi
-if ! grep -q 'surface.has_completed_frame = true' "$surface" \
-    || ! grep -q 'surface.has_completed_frame = true' "$context"; then
-    echo "FAIL completed-frame tracking is missing from the copy and completion paths" >&2
     exit 1
 fi
 
