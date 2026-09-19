@@ -894,3 +894,33 @@ lived only in an untracked log.
 
 Artifacts: `~/Lab/iris-vaapi-lab/artifacts/browser-acceptance/baseline-*`
 on the target (cdp.json, summary.json, browser.log, iris-node-holders.txt).
+
+## Phase 1: decode-order Iris kernel module (2026-09-20)
+
+The two decoder-side kernel changes from `strongtz/libva-v4l2` (decode-order
+output through `V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY{,_ENABLE}`, and a
+64-buffer CAPTURE `max_num_buffers` for HFI gen2) were applied to the
+tablet's kernel source (`ianchb/sm8550-mainline`, branch `sheng-7.2.2-pr4`,
+HEAD `ad75da348a02`) with fuzz. One hunk of `iris_platform_common.h`
+landed the two new capability IDs in `enum platform_inst_fw_cap_flags`
+instead of `enum platform_inst_fw_cap_type`; they were moved by hand to the
+end of the type enum. Only the `qcom-iris` module was rebuilt (`make LLVM=1
+M=drivers/media/platform/qcom/iris modules`, zero warnings) and installed in
+place; the previous module, the full local kernel diff and a `ROLLBACK.sh`
+are kept under `~/Lab/iris-vaapi-lab/kernel-rollback-20260920/`.
+
+| | before | after |
+| --- | --- | --- |
+| module SHA-256 | `4b3087803c4b…` | `1c1a4ef99a5f…` |
+| `display_delay` / `display_delay_enable` controls | absent | present (`max=0`, `default=0`) |
+| `min_number_of_capture_buffers` | `max=32` | `max=32` (this control reports the firmware minimum's range; the vb2 pool limit is a separate REQBUFS bound and is verified in Phase 2's unit and hardware tests) |
+
+The module was reloaded without a reboot (boot ID
+`5b9707b3-22ad-4b32-ac5e-da3ff7cb6077` unchanged). With the control left at
+its default, the unchanged installed driver passes the browser gate exactly as
+in the pre-rebuild baseline:
+
+| Run | Decoder | Platform | Frames / dropped (30 s) | Node holder |
+| --- | --- | --- | --- | --- |
+| patched module, installed driver, H.264 | `VaapiVideoDecoder` | true | 671 / 0 | `--type=gpu-process` |
+| patched module, installed driver, HEVC | `VaapiVideoDecoder` | true | 672 / 0 | `--type=gpu-process` |
