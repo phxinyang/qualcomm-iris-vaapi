@@ -855,3 +855,42 @@ No evidence was found of the driver aborting decodable content: matrices,
 browser runs, soaks and the manual VAAPI controls are all green and stable.
 Per the standing classification, `iris-matrix.sh` remains the authoritative
 VA pixel oracle; these corpus runs are diagnostics.
+
+## Pre-rebuild baseline (2026-09-20, tag `pre-rebuild-20260920`)
+
+This is the tracked reference every rebuild phase is diffed against. It was
+produced by the new `test/iris-browser-acceptance.sh`, which reports the
+decoder Chrome itself selected, the platform flag, the frame/drop delta over
+the window, the Chrome process type holding the Iris node, and the SHA-256 of
+the driver the GPU process mapped. All four runs use the packaged default
+environment: no `V4L2_VA_*` switch is set.
+
+Target: Fedora 44 ARM64 on SM8550, kernel `7.2.2-sm8550-gad75da3-pr4+`
+(self-built from ianchb/sm8550-mainline, Iris as a module, no decode-order
+patch), boot ID `5b9707b3-22ad-4b32-ac5e-da3ff7cb6077` (unchanged through
+all runs), Google Chrome `152.0.7977.82`, decoder resolved by the
+`iris_driver` name. Source commit `05964d5af21f8a9e60ef6956cd2472fe749a3036`.
+
+Clips are 30 s Sintel trailer re-encodes at 1920x1080, 24 fps, 720 frames,
+two B-frames of reordering each:
+
+| Clip | Codec / profile | SHA-256 |
+| --- | --- | --- |
+| `sintel-1080p30-h264-b3.mp4` | H.264 High | `dc3a29432e05af2462f39ec195de863af7df3f9e232a6be2f840d5f252f5612a` |
+| `sintel-1080p30-hevc-b3.mp4` | HEVC Main | `2c5ab2a10b74d41433669d00c4224f7eb3a9e8dc0554bdeb79537d3893dbc7b7` |
+
+| Run | Driver | Decoder | Platform | Frames / dropped (30 s) | Iris node holder |
+| --- | --- | --- | --- | --- | --- |
+| installed H.264 | package `libva-v4l2-iris-0.1.0-1.fc44`, `a86ecd41b7ad…` | `VaapiVideoDecoder` | true | 670 / 0 | `--type=gpu-process` |
+| installed HEVC | same | `VaapiVideoDecoder` | true | 671 / 0 | `--type=gpu-process` |
+| HEAD H.264 | clean build of `05964d5`, `dd6e9323eb62…` | `VaapiVideoDecoder` | true | 671 / 0 | `--type=gpu-process` |
+| HEAD HEVC | same | `VaapiVideoDecoder` | true | 672 / 0 | `--type=gpu-process` |
+
+The installed package was built from `fc680d6` with a dirty tree; the HEAD
+build is the same tree at `05964d5`. Both pass identically, so the
+zero-copy refresh in `05964d5` did not change the default path. This is the
+first tracked HEVC-in-Chrome frame evidence; earlier HEVC browser results
+lived only in an untracked log.
+
+Artifacts: `~/Lab/iris-vaapi-lab/artifacts/browser-acceptance/baseline-*`
+on the target (cdp.json, summary.json, browser.log, iris-node-holders.txt).
