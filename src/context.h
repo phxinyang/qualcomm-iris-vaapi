@@ -79,6 +79,10 @@ public:
     bool capture_slots_scheduled() const;
     bool zero_copy_codec_supported() const;
     bool zero_copy_capture_allowed() const { return !zero_copy_disabled_; }
+    // Pooled direct-export zero-copy: MMAP CAPTURE pool, timestamp owner
+    // adopts the completed slot and holds it for display. Same opt-in gates
+    // as the retired single-flight DMA-BUF import experiment.
+    bool zero_copy_direct_enabled() const;
     // Chrome may export VA surfaces before the first beginPicture(). Probe the
     // stateful CAPTURE format on an independent fd using the same
     // CAPTURE-then-OUTPUT ordering as initialize(), so the exported DMA-BUF

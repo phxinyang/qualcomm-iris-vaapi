@@ -85,17 +85,23 @@ The complete CAPTURE pool is queued by default so firmware reorder and EOS
 drain cannot run out of free slots.
 
 For a power/throughput experiment, `V4L2_VA_ZERO_COPY=1` together with
-`V4L2_VA_ZERO_COPY_CONTRACT=h264-no-b-v1` imports each stable
-surface DMA-BUF directly into the stateful Iris CAPTURE queue. A completed
-surface remains pinned until VA reuses it, so the CAPTURE-to-stable-buffer
-memcpy is removed while the exported fd and CPU mapping stay unchanged. The
-experiment is restricted to single-plane NV12 and automatically falls back to
-MMAP plus the stable copy if allocation, plane validation, or QBUF fails. It is
-disabled by default and is not required for Chrome or other clients.
-The current ownership contract is validated for no-B H.264 streams. H.264
-streams with B-frame reordering must leave this switch off, while HEVC
-and AV1 are automatically kept on the stable-copy path until a multi-slot
-DMA-BUF ownership protocol is validated.
+`V4L2_VA_ZERO_COPY_CONTRACT=h264-no-b-v1` keeps the driver-allocated
+MMAP CAPTURE pool deep and hands each completed slot to its timestamp owner
+for direct display: no per-surface DMA-BUF import. A completed slot stays
+held until VA reuses the surface (beginPicture requeues it), and
+`vaExportSurfaceHandle` exports the held slot itself. Surfaces exported
+before their first decode (Chromium pre-exports its pool) keep displaying
+that original handle, so the driver also refreshes the pre-exported stable
+snapshot from the adopted slot; surfaces with no stable export stay fully
+zero-copy with no CAPTURE-to-stable memcpy. The experiment is restricted to single-plane NV12 no-B H.264
+(one AU per OUTPUT) and automatically falls back to MMAP plus the stable
+copy outside that contract. It is disabled by default and is not required
+for Chrome or other clients.
+H.264 streams with B-frame reordering must leave this switch off, while
+HEVC and AV1 stay on the stable-copy path. The trace records
+`stateful zero-copy direct`, per-frame `zero-copy direct hold`, and direct
+`va export_surface` exports; any timestamp miss or error recycles the slot
+instead of showing another surface's pixels.
 If a stateful stream requests a dynamic-resolution reconfiguration while the
 experiment is active, the context drops that DMA-BUF queue and rebuilds on
 MMAP/copy for the new geometry.

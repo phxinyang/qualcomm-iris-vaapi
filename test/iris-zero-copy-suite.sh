@@ -141,10 +141,10 @@ run_case() {
     fi
 
     if [ "$expected_path" = direct ]; then
-        grep -q 'stateful zero-copy enabled' "$trace" \
-            || fail "$name did not enter zero-copy"
-        grep -q 'stateful zero-copy queue' "$trace" \
-            || fail "$name queued no imported surface"
+        grep -q 'stateful zero-copy direct' "$trace" \
+            || fail "$name did not enter direct zero-copy"
+        grep -q 'zero-copy direct hold' "$trace" \
+            || fail "$name held no direct-export frame"
         if grep -q 'copy_surface_frame copied' "$trace"; then
             fail "$name copied a decoded frame"
         fi
@@ -153,7 +153,8 @@ run_case() {
             || fail "$name did not record fallback=$expected_fallback"
         grep -q 'copy_surface_frame copied' "$trace" \
             || fail "$name fallback did not publish stable copies"
-        if grep -q 'stateful zero-copy enabled' "$trace"; then
+        if grep -q 'stateful zero-copy enabled' "$trace" \
+            || grep -q 'stateful zero-copy direct' "$trace"; then
             fail "$name entered zero-copy outside the ownership contract"
         fi
     fi

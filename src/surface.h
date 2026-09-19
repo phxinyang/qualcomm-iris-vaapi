@@ -176,6 +176,9 @@ VAStatus querySurfaceStatus(VADriverContextP context, VASurfaceID surface_id, VA
 void copy_surface_frame(Surface& surface, const V4L2M2MDevice::Buffer& capture);
 bool import_surface_dma_buf(Surface& surface, const V4L2M2MDevice::Buffer& capture, size_t size);
 bool copy_surfaces_enabled();
+bool zero_copy_requested();
+bool zero_copy_contract_enabled();
+void sync_zero_copy_display(Surface& surface) noexcept;
 VAStatus putSurface(VADriverContextP context, VASurfaceID surface_id, void* draw, short src_x, short src_y,
     unsigned short src_width, unsigned short src_height, short dst_x, short dst_y, unsigned short dst_width,
     unsigned short dst_height, VARectangle* cliprects, unsigned int cliprects_count, unsigned int flags);

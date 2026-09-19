@@ -145,9 +145,16 @@ VAStatus beginPicture(VADriverContextP va_context, VAContextID context_id, VASur
         return VA_STATUS_ERROR_MAX_NUM_EXCEEDED;
     }
 
+    // Pooled direct-export zero-copy holds the completed MMAP slot until
+    // the VA surface is reused. Return it here so decode never stalls with
+    // the whole pool held for display; the next completion adopts a free
+    // slot. This is the same requeue-on-reuse discipline as the reference
+    // MMAP pool, and compositor-held frames stay valid because EXPBUF hands
+    // out dup'd fds, not the queue slot itself.
     if ((!context.uses_stateful_streaming() || context.capture_started()) && !context.capture_draining()
-        && !context.capture_uses_dmabuf()
-        && !surface.destination_buffer_queued) {
+        && (!context.capture_uses_dmabuf() || context.zero_copy_direct_enabled())
+        && !surface.destination_buffer_queued && surface.destination_buffer
+        && (surface.has_completed_frame || !context.zero_copy_direct_enabled())) {
         try {
             surface.destination_buffer->get().queue();
             surface.destination_buffer_queued = true;

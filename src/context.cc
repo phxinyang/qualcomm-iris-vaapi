@@ -221,9 +221,25 @@ void Context::queue_capture_surface(Surface& surface)
     surface.destination_buffer->get().queue_with_dmabuf(surface.export_buffer_fd, surface.export_buffer_size);
 }
 
+bool Context::zero_copy_direct_enabled() const
+{
+    // Pooled direct-export zero-copy shares the import experiment's gates:
+    // H.264 no-B, one AU per OUTPUT, single-plane NV12 (checked at REQBUFS).
+    // Unlike the retired single-flight import model, any queued MMAP slot
+    // may complete for any timestamp; the timestamp owner adopts the slot at
+    // dequeue time, so no per-frame fd move is needed and the pool stays
+    // deep. This matches the FFmpeg/Chromium/GStreamer CAPTURE discipline
+    // (driver-allocated pool, export on dequeue, requeue on surface reuse).
+    return uses_stateful_streaming() && zero_copy_capture_allowed() && zero_copy_codec_supported()
+        && zero_copy_requested() && zero_copy_contract_enabled() && stateful_batch_limit() == 1;
+}
+
 bool Context::zero_copy_codec_supported() const
 {
-    // The current one-slot CAPTURE ownership model is validated on Iris H.264.
+    // The zero-copy ownership contract is validated on Iris H.264 (no-B, one
+    // AU per OUTPUT). Completions are associated by timestamp, so a deep
+    // CAPTURE pool stays valid: each frame is adopted by its timestamp owner
+    // at dequeue time instead of being pre-bound to a per-surface DMA-BUF.
     // VP9 is withdrawn from VA advertisement because session/source-change
     // churn reboots the target; HEVC/AV1 can hold several pictures and
     // require a multi-slot ownership protocol that is deliberately left on
@@ -279,10 +295,11 @@ void Context::queue_zero_copy_capture()
     if (!capture_uses_dmabuf() || !capture_initialized)
         return;
 
-    // Iris assigns a decoded frame to any currently queued CAPTURE slot. Keep
-    // exactly one imported DMA-BUF in flight so the timestamp -> VA surface
-    // association remains valid; a second queued slot could belong to another
-    // surface and would overwrite the fd the client is displaying.
+    // Single-flight zero-copy: keep exactly one imported DMA-BUF queued so
+    // the completed CAPTURE slot always belongs to the oldest timestamp.
+    // Iris decodes 720p no-B well under a 24fps budget, so the serial bubble
+    // stays invisible; a second queued slot could complete for another
+    // surface's timestamp and overwrite the fd the client is displaying.
     for (const auto& [surface_id, buffer_index] : surface_buffer_indices) {
         if (driver_data->surfaces.contains(surface_id)
             && driver_data->surfaces.at(surface_id).destination_buffer_queued)
@@ -300,7 +317,14 @@ void Context::queue_zero_copy_capture()
             if (surface.status != VASurfaceRendering || surface.destination_buffer_queued
                 || !surface.destination_buffer)
                 continue;
-            queue_capture_surface(surface);
+            try {
+                queue_capture_surface(surface);
+            } catch (const std::exception& error) {
+                if (trace_enabled())
+                    std::fprintf(stderr, "stateful zero-copy queue failed surface=%u index=%u: %s\n",
+                        surface_id, surface.destination_buffer_index, error.what());
+                continue;
+            }
             surface.destination_buffer_queued = true;
             if (trace_enabled())
                 std::fprintf(stderr, "stateful zero-copy queue surface=%u index=%u\n", surface_id,
@@ -314,19 +338,30 @@ void Context::queue_zero_copy_drain_capture()
 {
     if (!capture_uses_dmabuf() || !capture_initialized)
         return;
-    for (const auto& [surface_id, buffer_index] : surface_buffer_indices) {
-        if (driver_data->surfaces.contains(surface_id)
-            && driver_data->surfaces.at(surface_id).destination_buffer_queued)
-            return;
-    }
+    // The terminal CAPTURE LAST marker needs a queued slot after STOP. The
+    // last decoded frame consumes its own slot (held for display, not
+    // requeued), so always reserve one spare scratch slot before STOP even
+    // when other frame slots are still queued. Spare indices have no VA
+    // surface binding; their bootstrap DMA-BUF (stored at REQBUFS time) is
+    // sufficient for the zero-length LAST marker.
     for (unsigned index = 0; index < device.buffer_count(device.capture_buf_type); index++) {
         if (surface_for_buffer(device.capture_buf_type, index))
             continue;
-        device.buffer(device.capture_buf_type, index).queue();
+        try {
+            device.buffer(device.capture_buf_type, index).queue();
+        } catch (const std::system_error& error) {
+            // Scratch already queued (EBUSY): one reservation is enough.
+            if (trace_enabled())
+                std::fprintf(stderr, "stateful zero-copy drain scratch busy index=%u: %s\n",
+                    index, error.what());
+            return;
+        }
         if (trace_enabled())
             std::fprintf(stderr, "stateful zero-copy drain scratch index=%u\n", index);
         return;
     }
+    if (trace_enabled())
+        std::fprintf(stderr, "stateful zero-copy drain scratch none available\n");
 }
 
 Context::~Context()
@@ -451,10 +486,10 @@ bool Context::start_capture()
     for (auto& [surface_id, buffer_index] : surface_buffer_indices)
         bind_surface(surface_id);
     if (capture_slots_scheduled()) {
-        // Stateful V4L2 has no VA render-target argument. Queue only the
-        // capture buffers belonging to surfaces already submitted in OUTPUT,
-        // so Iris writes each decoded frame into the DMA-BUF the VA client
-        // exported for that surface instead of choosing an unrelated slot.
+        // Stateful V4L2 has no VA render-target argument. Queue the oldest
+        // submitted surface's capture buffer only; the single-flight queue
+        // feeds the next one as each completion lands, so the completed slot
+        // always belongs to the timestamp it carries.
         std::set<unsigned> scheduled;
         for (const auto& [batch_index, batch_surfaces] : stateful_batches) {
             for (const auto surface_id : batch_surfaces) {
@@ -471,10 +506,16 @@ bool Context::start_capture()
                 continue;
             auto& surface = driver_data->surfaces.at(*owner);
             if (!surface.destination_buffer_queued) {
-                queue_capture_surface(surface);
+                try {
+                    queue_capture_surface(surface);
+                } catch (const std::exception& error) {
+                    if (trace_enabled())
+                        std::fprintf(stderr, "stateful scheduled queue failed surface=%u index=%u: %s\n",
+                            *owner, index, error.what());
+                    continue;
+                }
                 surface.destination_buffer_queued = true;
-                if (capture_uses_dmabuf())
-                    break;
+                break;
             }
         }
         if (trace_enabled())
@@ -695,35 +736,131 @@ bool Context::handle_capture_completion(unsigned capture_index, bool force_reque
     bool capture_requeued = false;
     if (completed && driver_data->surfaces.contains(*completed)) {
         auto& surface = driver_data->surfaces.at(*completed);
-        if (!capture_error && !capture_uses_dmabuf())
+        // Pooled direct-export zero-copy holds the completed MMAP slot for
+        // display instead of copying it: the timestamp owner adopts whatever
+        // slot the firmware completed, exports it on demand, and returns it
+        // on surface reuse. The pool stays deep, so decode never stalls
+        // behind a serial queue bubble.
+        const bool direct = !capture_error && zero_copy_direct_enabled();
+        if (!capture_error && !capture_uses_dmabuf() && !direct)
             copy_surface_frame(surface, device.buffer(device.capture_buf_type, capture_index));
-        if (!capture_error && (capture_uses_dmabuf() || !copy_surfaces_enabled())) {
-            // Direct binding: the exported handle reads the CAPTURE slot
-            // itself, so a clean completion means displayable content even
-            // without a stable copy. The copy path records its own flag
-            // inside copy_surface_frame() only when bytes really moved.
-            surface.has_completed_frame = true;
-        }
-
-        const auto expected = surface_for_buffer(device.capture_buf_type, capture_index);
-        const bool stable_snapshot = !capture_uses_dmabuf() && copy_surfaces_enabled()
-            && surface.export_buffer_fd >= 0 && surface.export_buffer_mapping;
-        const bool scheduled_mismatch = capture_slots_scheduled() && (!expected || *expected != *completed);
-        if (stable_snapshot || scheduled_mismatch || force_requeue || capture_error) {
-            if (capture_uses_dmabuf() && surface.export_buffer_fd >= 0 && surface.export_buffer_mapping
-                && surface.export_buffer_size != 0) {
-                device.buffer(device.capture_buf_type, capture_index).queue_with_dmabuf(
-                    surface.export_buffer_fd, surface.export_buffer_size);
-            } else {
-                device.buffer(device.capture_buf_type, capture_index).queue();
+        // Single-flight zero-copy completion. Only the oldest timestamp's
+        // slot is queued, so the completed index must belong to `completed`
+        // and its pixels already sit in this surface's own exported DMA-BUF:
+        // hold it for display, never requeue a clean frame. Any owner drift
+        // (retired surface, stale binding) fails closed: requeue the slot and
+        // mark this frame terminal so the client drops one frame instead of
+        // showing another surface's pixels.
+        const bool zero_copy = capture_uses_dmabuf();
+        std::optional<VASurfaceID> queued_owner;
+        // Drain paths pass force_requeue=true for real frames as well. For
+        // zero-copy a clean frame must still be held for display, never
+        // requeued, so the force flag only matters for the error path here.
+        if (zero_copy && !capture_error) {
+            for (const auto& [candidate_id, candidate] : driver_data->surfaces) {
+                if (candidate.destination_buffer
+                    && candidate.destination_buffer_index == capture_index
+                    && candidate.destination_buffer_queued) {
+                    queued_owner = candidate_id;
+                    break;
+                }
             }
-            capture_requeued = true;
-        } else if (!capture_slots_scheduled()) {
-            surface.destination_buffer = std::cref(device.buffer(device.capture_buf_type, capture_index));
-            surface.destination_buffer_index = capture_index;
         }
+        if (zero_copy && !capture_error && queued_owner
+            && *queued_owner != *completed
+            && driver_data->surfaces.contains(*queued_owner)) {
+            auto& queued_surface = driver_data->surfaces.at(*queued_owner);
+            if (trace_enabled())
+                std::fprintf(stderr,
+                    "zero-copy owner drift index=%u queued_owner=%u timestamp_owner=%u\n",
+                    capture_index, *queued_owner, *completed);
+            device.buffer(device.capture_buf_type, capture_index).queue_with_dmabuf(
+                queued_surface.export_buffer_fd, queued_surface.export_buffer_size);
+            capture_requeued = true;
+            surface.destination_buffer_queued = false;
+            surface.release_error = true;
+        } else {
+            if (!capture_error && zero_copy) {
+                // Single-flight match: the completed slot is this surface's
+                // own, so its pixels already sit in the exported DMA-BUF.
+                // Hold it for display. A foreign slot here (retired owner)
+                // must never be rebound over a live binding: recycle it under
+                // its own REQBUFS fd and drop this frame instead.
+                if (!surface.destination_buffer
+                    || surface.destination_buffer_index != capture_index) {
+                    if (trace_enabled())
+                        std::fprintf(stderr,
+                            "zero-copy desync index=%u surface=%u\n",
+                            capture_index, *completed);
+                    device.buffer(device.capture_buf_type, capture_index).queue();
+                    capture_requeued = true;
+                    surface.release_error = true;
+                } else {
+                    sync_zero_copy_display(surface);
+                    surface.has_completed_frame = true;
+                    if (trace_enabled() && queued_owner)
+                        std::fprintf(stderr, "zero-copy match index=%u surface=%u\n",
+                            capture_index, *completed);
+                }
+            } else if (!capture_error && !copy_surfaces_enabled()) {
+                surface.has_completed_frame = true;
+            }
 
-        surface.destination_buffer_queued = capture_requeued;
+            const auto expected = surface_for_buffer(device.capture_buf_type, capture_index);
+            const bool stable_snapshot = !zero_copy && copy_surfaces_enabled()
+                && surface.export_buffer_fd >= 0 && surface.export_buffer_mapping;
+            // Zero-copy drift is handled above by fail-closed requeue, never by
+            // requeueing a matched display slot (which would lose the frame).
+            const bool scheduled_mismatch = !zero_copy && capture_slots_scheduled()
+                && (!expected || *expected != *completed);
+            if (trace_enabled() && zero_copy && !capture_error && expected
+                && *expected != *completed)
+                std::fprintf(stderr,
+                    "zero-copy fixed-map mismatch index=%u fixed_owner=%u timestamp_owner=%u\n",
+                    capture_index, *expected, *completed);
+            // For zero-copy (import or direct pool), a clean frame
+            // (including drain force) is held for display; only terminal
+            // errors recycle the slot here.
+            const bool recycle_slot = (zero_copy || direct) ? capture_error
+                : (stable_snapshot || scheduled_mismatch || force_requeue || capture_error);
+            if (recycle_slot) {
+                if (zero_copy && surface.export_buffer_fd >= 0 && surface.export_buffer_mapping
+                    && surface.export_buffer_size != 0) {
+                    device.buffer(device.capture_buf_type, capture_index).queue_with_dmabuf(
+                        surface.export_buffer_fd, surface.export_buffer_size);
+                } else {
+                    device.buffer(device.capture_buf_type, capture_index).queue();
+                }
+                capture_requeued = true;
+            } else if (!capture_slots_scheduled()) {
+                surface.destination_buffer = std::cref(device.buffer(device.capture_buf_type, capture_index));
+                surface.destination_buffer_index = capture_index;
+                if (direct) {
+                    // The timestamp owner adopts this slot; beginPicture()
+                    // returns it when the surface is reused, exactly like
+                    // the reference MMAP pool discipline.
+                    surface.has_completed_frame = true;
+                    if (trace_enabled())
+                        std::fprintf(stderr, "zero-copy direct hold index=%u surface=%u\n",
+                            capture_index, *completed);
+                    // Clients that exported before the first decode (Chromium
+                    // pools its surfaces up front) keep displaying that
+                    // original fd, so refresh the pre-exported stable
+                    // snapshot with the adopted pixels. Surfaces with no
+                    // stable buffer (per-frame exporters) stay zero-copy:
+                    // no allocation happens here, the refresh only runs when
+                    // the client already holds a stable export.
+                    if (surface.export_buffer_fd >= 0 && surface.export_buffer_mapping
+                        && copy_surfaces_enabled())
+                        copy_surface_frame(surface, device.buffer(device.capture_buf_type, capture_index));
+                }
+            }
+
+            if ((zero_copy || direct) && !capture_error && !surface.release_error)
+                surface.destination_buffer_queued = false;
+            else if ((!zero_copy && !direct) || capture_error)
+                surface.destination_buffer_queued = capture_requeued;
+        }
         surface.status = VASurfaceDisplaying;
         surface.source_size_used = 0;
         if (capture_error)
@@ -1479,7 +1616,8 @@ bool Context::reconfigure_stateful_dimensions(VASurfaceID surface_id)
 
     // A DMA-BUF CAPTURE slot is tied to the old geometry. Iris also needs
     // several slots while it reports a dynamic-resolution change, which is
-    // incompatible with the one-slot experimental ownership contract. Drop
+    // incompatible with the single-flight zero-copy ownership (exports are
+    // tied to the old padded layout). Drop
     // the in-flight experimental queue immediately and rebuild this context
     // on the stable MMAP/copy path instead of attempting a long drain.
     const bool zero_copy_fallback = capture_uses_dmabuf();

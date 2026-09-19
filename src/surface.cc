@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -120,12 +121,12 @@ long current_tid()
     return static_cast<long>(syscall(SYS_gettid));
 }
 
-void dma_buf_sync_cpu(int fd, uint64_t flags)
+int dma_buf_sync_cpu(int fd, uint64_t flags)
 {
     struct dma_buf_sync sync = { .flags = flags };
     // Some kernels do not implement explicit sync for system-heap buffers;
     // the mapping remains usable in that case.
-    ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
+    return ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
 }
 
 int allocate_dma_buf_fd(size_t size)
@@ -161,7 +162,14 @@ bool allocate_surface_dma_buf(Surface& surface, size_t size)
         return false;
     }
     surface.adopt_export_buffer(fd, mapping, size);
+    // System-heap DMA-BUFs are CPU-cached. A fresh mapping may carry stale
+    // cache lines and memset() dirties the cache without reaching RAM. Flush
+    // the zeros so the first display and the first firmware write start from
+    // a coherent black frame; later firmware completions invalidate instead
+    // of flushing to avoid writing stale cache over decoded pixels.
+    dma_buf_sync_cpu(fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW);
     std::memset(mapping, 0, size);
+    dma_buf_sync_cpu(fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW);
     if (trace_enabled())
         std::fprintf(stderr, "va stable surface dma-buf fd=%d size=%zu\n", surface.export_buffer_fd, size);
     return true;
@@ -406,6 +414,26 @@ bool copy_surfaces_enabled()
     return !value || std::strcmp(value, "0") != 0;
 }
 
+void sync_zero_copy_display(Surface& surface) noexcept
+{
+    // Firmware just finished writing this DMA-BUF. The CPU mapping still
+    // holds stale (often zero) cache lines from allocation or the previous
+    // frame. A snooping GPU/compositor would then show green/flash even
+    // though RAM is correct. Invalidate first to discard stale cache without
+    // writing it back over the decoded frame, then end the CPU access so the
+    // buffer is released for GPU display. START+END back-to-back leaves the
+    // cache clean; a lone END would flush stale zeros over the new frame.
+    if (surface.export_buffer_fd < 0)
+        return;
+    const int start_rc = dma_buf_sync_cpu(surface.export_buffer_fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW);
+    const int start_errno = errno;
+    const int end_rc = dma_buf_sync_cpu(surface.export_buffer_fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW);
+    const int end_errno = errno;
+    if (trace_enabled())
+        std::fprintf(stderr, "zero-copy display sync fd=%d start=%d(%d) end=%d(%d)\n",
+            surface.export_buffer_fd, start_rc, start_errno, end_rc, end_errno);
+}
+
 bool import_surface_dma_buf(Surface& surface, const V4L2M2MDevice::Buffer& capture, size_t size)
 {
     if (!capture.uses_dmabuf() || size == 0)
@@ -614,7 +642,18 @@ void createSurfacesDeferred(
     // stable buffers directly into V4L2, eliminating that memcpy. It is limited
     // to the single physical-plane NV12 layout used by Iris; multi-plane
     // formats keep the proven MMAP path until all plane FDs can be validated.
-    bool zero_copy = zero_copy_requested() && context.uses_stateful_streaming()
+    // Pooled direct-export zero-copy uses the same opt-in gates as the
+    // retired single-flight DMA-BUF import experiment, but keeps the MMAP
+    // CAPTURE pool deep: completions are adopted by timestamp at dequeue
+    // time and exported on demand, so decode pipelines instead of stalling
+    // one frame at a time. The per-surface import path below stays only for
+    // builds that predate this contract.
+    const bool direct = zero_copy_requested() && context.uses_stateful_streaming()
+        && context.zero_copy_capture_allowed() && context.zero_copy_codec_supported()
+        && zero_copy_contract_enabled()
+        && stateful_batch_limit() == 1
+        && driver_format->num_planes == 1;
+    bool zero_copy = !direct && zero_copy_requested() && context.uses_stateful_streaming()
         && context.zero_copy_capture_allowed() && context.zero_copy_codec_supported()
         && zero_copy_contract_enabled()
         && stateful_batch_limit() == 1
@@ -720,7 +759,8 @@ void createSurfacesDeferred(
         surface.destination_buffer_queued = false;
     }
     if (trace_enabled() && context.uses_stateful_streaming())
-        std::fprintf(stderr, "stateful zero-copy %s capture=%u surfaces=%u\n", zero_copy ? "enabled" : "disabled",
+        std::fprintf(stderr, "stateful zero-copy %s capture=%u surfaces=%u\n",
+            zero_copy ? "enabled" : (direct ? "direct" : "disabled"),
             context.device.buffer_count(context.device.capture_buf_type), bound_surfaces);
 }
 
@@ -1160,11 +1200,25 @@ VAStatus exportSurfaceHandle(
                 std::fprintf(stderr, "stateful zero-copy fallback reason=export_layout_probe surface=%u\n",
                     surface_id);
         }
+        // Pooled direct-export zero-copy hands the compositor the held
+        // MMAP CAPTURE slot itself (EXPBUF below), so no stable snapshot is
+        // allocated or duplicated once a decoded frame is bound. Chromium
+        // exports its pool before the first decode, so pre-decode exports
+        // keep the existing stable-buffer behavior; once a real frame is
+        // held the compositor reads the slot directly, matching the
+        // FFmpeg/Chromium/GStreamer export-on-dequeue discipline.
+        const bool direct_export = capture_bound && owner_context
+            && owner_context->zero_copy_direct_enabled() && surface.has_completed_frame
+            && !surface.destination_buffer_queued;
+        if (capture_bound && owner_context && owner_context->zero_copy_direct_enabled() && trace_enabled())
+            std::fprintf(stderr, "va export_surface direct id=%u capture_index=%u held=%d completed=%d\n",
+                surface_id, surface.destination_buffer_index,
+                surface.destination_buffer_queued ? 0 : 1, surface.has_completed_frame ? 1 : 0);
         // Chromium exports a new pool before its first vaBeginPicture. Give an
         // unbound surface an independent stable NV12 buffer; exporting must
         // never bind it to (or reconfigure) an already-running decoder. The
         // zero-copy contract may have installed a padded layout above.
-        if (surface.export_buffer_fd < 0 || !surface.export_buffer_mapping) {
+        if ((surface.export_buffer_fd < 0 || !surface.export_buffer_mapping) && !direct_export) {
             if (!capture_bound || copy_surfaces_enabled()) {
                 const size_t required = surface.stable_export_layout.empty()
                     ? prepare_compact_nv12_export_layout(surface)
@@ -1173,7 +1227,7 @@ VAStatus exportSurfaceHandle(
                     return VA_STATUS_ERROR_ALLOCATION_FAILED;
             }
         }
-        if (surface.export_buffer_fd >= 0 && surface.export_buffer_mapping) {
+        if (surface.export_buffer_fd >= 0 && surface.export_buffer_mapping && !direct_export) {
             const size_t required = buffer_layout_size(surface.stable_export_layout);
             if (required == 0 || required > surface.export_buffer_size)
                 return VA_STATUS_ERROR_OPERATION_FAILED;
