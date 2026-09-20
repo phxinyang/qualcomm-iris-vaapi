@@ -56,7 +56,8 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
         switch (attributes[i].type) {
         case VAConfigAttribRTFormat:
             attributes[i].value = supported ? VA_RT_FORMAT_YUV420 : VA_ATTRIB_NOT_SUPPORTED;
-            if (supported && profile == VAProfileHEVCMain10 && d.capabilities.p010)
+            if (supported && (profile == VAProfileHEVCMain10 || profile == VAProfileVP9Profile2)
+                && d.capabilities.p010)
                 attributes[i].value |= VA_RT_FORMAT_YUV420_10;
             break;
         case VAConfigAttribDecSliceMode:

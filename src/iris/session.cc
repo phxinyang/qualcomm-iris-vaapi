@@ -142,8 +142,13 @@ void Session::configure_capture()
     FormatInfo current = device_->get_format(Queue::Capture);
     current.pixelformat = pixelformat;
     const FormatInfo granted = device_->set_format(Queue::Capture, current);
-    require(granted.pixelformat == pixelformat && granted.num_planes == 1, "decoder CAPTURE layout unsupported",
-        VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+    if (granted.pixelformat != pixelformat || granted.num_planes != 1) {
+        trace_("capture format rejected wanted=%c%c%c%c granted=%c%c%c%c planes=%u %ux%u", pixelformat & 0xff,
+            (pixelformat >> 8) & 0xff, (pixelformat >> 16) & 0xff, (pixelformat >> 24) & 0xff,
+            granted.pixelformat & 0xff, (granted.pixelformat >> 8) & 0xff, (granted.pixelformat >> 16) & 0xff,
+            (granted.pixelformat >> 24) & 0xff, granted.num_planes, granted.width, granted.height);
+        throw Error(VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT, "decoder CAPTURE layout unsupported");
+    }
 
     // The visible rectangle. The kernel reports the firmware's crop through
     // every selection target; when it is empty (this Iris driver returns a
