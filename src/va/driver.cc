@@ -98,8 +98,20 @@ Capabilities probe_capabilities(const iris::Options& options)
         caps.profiles.insert(VAProfileH264Main);
         caps.profiles.insert(VAProfileH264High);
     }
-    if (caps.output_formats.count(V4L2_PIX_FMT_HEVC) && caps.nv12)
+    if (caps.output_formats.count(V4L2_PIX_FMT_HEVC) && caps.nv12) {
         caps.profiles.insert(VAProfileHEVCMain);
+        if (caps.p010)
+            caps.profiles.insert(VAProfileHEVCMain10);
+    }
+    if (options.experimental_profiles) {
+        if (caps.output_formats.count(V4L2_PIX_FMT_VP9) && caps.nv12) {
+            caps.profiles.insert(VAProfileVP9Profile0);
+            if (caps.p010)
+                caps.profiles.insert(VAProfileVP9Profile2);
+        }
+        if (caps.output_formats.count(V4L2_PIX_FMT_AV1) && caps.nv12)
+            caps.profiles.insert(VAProfileAV1Profile0);
+    }
     return caps;
 }
 

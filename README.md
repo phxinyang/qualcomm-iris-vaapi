@@ -163,6 +163,7 @@ table and that file disagree in either direction.
 | `V4L2_VA_COPY` | `gpu` | Engine used to publish a frame into a surface the client exported before its first decode: `gpu` (EGL blit on Adreno) or `cpu`. |
 | `V4L2_VA_PUBLISH` | `auto` | Force `copy` or `direct` publication for every surface. Diagnostics only; `auto` picks per surface from the client's export behaviour. |
 | `V4L2_VA_DUMP` | off | Directory to write every submitted access unit into. |
+| `V4L2_VA_EXPERIMENTAL_PROFILES` | off | Also advertise VP9 and AV1. Qualification only; the launcher never sets it. |
 
 ## Status
 The project currently supports these codecs: MPEG2, H264, VP8, and Qualcomm
