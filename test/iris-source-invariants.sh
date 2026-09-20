@@ -80,8 +80,10 @@ if grep -q 'va-same-context\|same-context path' "$dynamic_resolution" \
     echo "FAIL dynamic-resolution gate claims FFmpeg reuses one VA context" >&2
     exit 1
 fi
-if ! grep -q 'FAIL VP9 dynamic qualification is disabled' "$dynamic_resolution"; then
-    echo "FAIL VP9 dynamic resolution does not fail closed" >&2
+# VP9 VA is opt-in until Phase 5 closes: the dynamic scenario must only run
+# it with the experimental-profiles switch set, never by default.
+if ! grep -q 'V4L2_VA_EXPERIMENTAL_PROFILES=1' "$dynamic_resolution"; then
+    echo "FAIL VP9 dynamic resolution runs without the experimental-profiles opt-in" >&2
     exit 1
 fi
 
