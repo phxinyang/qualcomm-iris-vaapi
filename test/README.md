@@ -1,226 +1,77 @@
 # Testing
-Set up [vaapi-fits](https://github.com/intel/vaapi-fits), e.g. in the local directory.
-Setup venv with the local `requirements.txt` as well as those of `vaapi-fits`.
-In addition to environment variables described on project level, set `VAAPI_FITS_CAPS=.` to use the custom V4L2 capabilities.
-Run tests:
-```
-./vaapi-fits/vaapi-fits run --platform V4L2 test/gst-vaapi/decode test/ffmpeg-vaapi/decode
-```
 
-For a repeatable browser playback check, download the public 30-second Big Buck
-Bunny sample used by `test/hevc.html` into the project root:
-
-```
-curl -fL -o Big_Buck_Bunny_1080p_30sec.mp4 \
-  https://raw.githubusercontent.com/chthomos/video-media-samples/master/big-buck-bunny-1080p-30sec.mp4
+## Host Unit Tests
+Run the host-side unit tests without hardware:
+```sh
+meson test -C build-local
 ```
 
-The sample is 1920x1080 H.264 High/AAC, 24 fps, and 30 seconds long.
-Open `test/hevc.html` in the test Chrome session for a single pass. Use
-`test/hevc.html?loop=1` only for a looping stress run; the loop seek at the
-30-second boundary is an intentional browser seek and is not part of the
-decode-quality check.
-
-For a frame-counting run, keep the video tab visible and active and close any
-other Chrome instance using the V4L2 device. Background-tab scheduling can
-increment Chrome's `droppedVideoFrames` counter even when the decoder trace is
-clean.
-
-To force a software baseline in Chrome, unset the VA-API variables and launch
-with `--disable-features=VaapiVideoDecoder --disable-accelerated-video-decode`.
-`chrome://media-internals` should then show `FFmpegVideoDecoder` for the video;
-the same page with the rebuilt driver must show `VaapiVideoDecoder`. Record
-`kIsPlatformVideoDecoder=true` when that property is exposed by the tested
-Chrome build; playback alone is not evidence that hardware decode was used.
+## Hardware Gates
+On the tablet, run the following verification gates:
+- `test/iris-browser-acceptance.sh --clip ...`: verifies Chrome `VaapiVideoDecoder` selection, platform decoder status, and zero dropped frames.
+- `test/iris-matrix.sh`: framemd5 output equivalence against software.
+- `test/iris-structure-matrix.sh`: decoding structural variants (all-I, B-frames).
+- `test/iris-dynamic-resolution.sh`: handles in-stream resolution changes.
+- `test/iris-concurrency-soak.sh`: multi-context thermal/stability soaking.
+- `test/av1-obu-roundtrip.sh`: software oracle for AV1 OBU repacking.
 
 ## Qualcomm Iris codec matrix
 
-On the tablet, the node selected by `iris_resolve_device` advertises H.264,
-HEVC, VP9 and AV1 OUTPUT formats. Run the native AV1 baseline with the
-GStreamer stateful client:
+The repeatable matrix (media generation, VA-API decode through FFmpeg, EOS
+oracle and per-frame MD5 against software) is `test/iris-matrix.sh`. Every
+script resolves the Iris node by driver name through `test/lib/iris-env.sh`
+and keeps artifacts under `~/Lab/iris-vaapi-lab/artifacts/` by default:
 
 ```
-gst-launch-1.0 -e filesrc location=$HOME/Lab/Bridge/tmp/trash/iris-av1-matrix/test.webm ! \
-  matroskademux ! av1parse ! v4l2av1dec capture-io-mode=2 output-io-mode=2 ! fakesink sync=false
+LIBVA_DRIVERS_PATH=$PWD/build/src ./test/iris-matrix.sh
 ```
 
-The complete repeatable matrix (material generation, VAAPI decode, EOS
-oracle, and per-frame MD5 comparison) is available as:
+H.264, HEVC and VP9 run through VA and must match software exactly; AV1 runs
+its native GStreamer baseline only (its VA lane is opt-in and documented in
+the README). `IRIS_MATRIX_FRAMES` shortens a development run.
 
-```
-./test/iris-matrix.sh
-```
+`test/iris-structure-matrix.sh` isolates H.264 reference structure: all-I,
+IP-only, B=2 and B=4 streams with exact MD5 equality. Keep GOP-middle
+`-c copy` clips out of this positive matrix; a cut that starts on a P/B
+picture without its references is a negative random-access test.
 
-On the SM8550 tablet, resolve the Iris node by driver name before the matrix:
+`test/iris-zero-copy-suite.sh` is the Direct-path oracle: FFmpeg does not
+pre-export surfaces, so every completion must be `publish=direct` with zero
+copy-engine involvement and software-identical pixels.
 
-```
-. ./test/lib/iris-env.sh
-device=$(iris_resolve_device)
-LIBVA_V4L2_VIDEO_PATH="$device" \
-IRIS_MATRIX_DIR=$HOME/Lab/Bridge/tmp/trash/iris-va-matrix-139 \
-./test/iris-matrix.sh
-```
+`test/iris-dynamic-resolution.sh` alternates 640x360 and 1280x720 one
+hundred times for H.264 (default) or VP9 (`IRIS_DYNAMIC_CODECS=vp9`) and
+requires byte-identical native output, exact MD5 from one VA process across
+every change, and exact output from 101 fresh VA processes.
+`IRIS_DYNAMIC_SWITCHES` shortens a development run.
 
-Set `IRIS_MATRIX_DIR` to keep artifacts in another directory under
-`$HOME/Lab/Bridge/tmp/trash`; set `IRIS_MATRIX_FRAMES` to change the short
-test length.
-
-To isolate H.264 reference-structure effects, run the shorter dedicated
-matrix. It generates all-I, IP-only, B=2 and B=4 streams and requires exact
-software/VA per-frame MD5 equality:
-
-```
-. ./test/lib/iris-env.sh
-device=$(iris_resolve_device)
-LIBVA_V4L2_VIDEO_PATH="$device" \
-IRIS_STRUCTURE_DIR=$HOME/Lab/Bridge/tmp/trash/iris-va-structure-matrix \
-./test/iris-structure-matrix.sh
-```
-
-The script uses a 180-second per-sample limit because a B-frame reorder queue
-can take tens of seconds to drain on this firmware. Keep GOP-middle `-c copy`
-clips outside this positive matrix: a cut that starts on a P/B picture without
-its reference chain is intentionally a negative random-access test.
-
-The VA-API matrix is run with the same `LIBVA_*` variables and FFmpeg's VAAPI
-decoder. A codec counts as passed only when FFmpeg exits successfully, emits
-the expected frame count, and the trace has no capture errors or timestamp
-mismatches. Fixed-resolution VP9 still runs through the native V4L2 baseline,
-but its VA lane is an intentional `SKIP`: repeated session/source-change tests
-reboot the target, so the driver no longer advertises VP9 Profile 0. MPEG-2 and
-VP8 are marked `SKIP` when the target node does not
-enumerate their OUTPUT formats. AV1 is currently `BASELINE-PASS / VA-SKIP`:
-the VA AV1 API provides tile payloads, whereas Iris stateful AV1 requires a
-complete OBU temporal unit; enabling the experimental translator is expected
-to fail until an OBU-preserving VA caller is available. HEVC is enabled
-automatically when its V4L2 OUTPUT format is advertised; set
-`V4L2_VA_DISABLE_HEVC_STATEFUL=1` to opt out.
-The HEVC VA pass runs before its native baseline because some Iris firmware
-revisions leave a reorder queue warm when a GStreamer session closes; the
-ordering keeps the VA cold-start and EOS checks deterministic.
-
-The production dynamic-resolution gate is `iris-dynamic-resolution.sh`. It
-generates an H.264 stream that alternates 640x360 and 1280x720 exactly 100
-times and requires byte-identical native V4L2/software output, exact frame
-MD5 from one FFmpeg VA process across all changes, and exact output from 101
-fresh VA decoder processes. Both native and VA VP9 dynamic probes rebooted the
-qualified Iris kernel/firmware, so the script rejects VP9 before decoding and
-the driver withdraws its VA profile. Unsupported H.264 formats or missing
-required elements fail the run; they are not recorded as passes or skips. Use
-`IRIS_DYNAMIC_SWITCHES` only to shorten a development run.
-
-For dual-H.264 and mixed H.264+HEVC long-run qualification, use:
+For dual-H.264 and mixed H.264+HEVC soaks:
 
 ```
 ./test/iris-concurrency-soak.sh dual-h264
 ./test/iris-concurrency-soak.sh mixed
 ```
 
-Both scenarios default to two wall-clock hours and retain FFmpeg progress,
-stateful traces, temperature samples, uptime and boot IDs. The script rejects
-an interrupted/rebooted predecessor through a durable guard file, enforces a
-thermal ceiling, and runs an exact software/VA MD5 preflight before starting.
-H.264 workers keep one VA context for the full duration. The mixed HEVC worker
-also uses one long-lived context, but its generated input spans the complete
-requested duration with a continuous POC/reference timeline. Repeating a
-48-frame HEVC file with FFmpeg `-stream_loop` would omit EOS between independent
-sequences and create an artificial reorder carry-over that eventually exhausts
-bounded timeout recovery. The real-time aggregate frame floor still applies to
-both concurrent workers.
-`IRIS_SOAK_SECONDS` is available for development, but shortened output is
-labelled explicitly and is not release evidence.
+Both default to two hours, retain progress, traces, temperature samples and
+boot IDs, refuse to start after an interrupted predecessor (guard file),
+enforce an 85 C ceiling, wait for the SoC to cool after generating media, and
+run an exact MD5 preflight first. `IRIS_SOAK_SECONDS` shortens a development
+run; shortened output is labelled and is not release evidence.
 
-For the stateful multi-context regression probe on the tablet:
+Trace checkers for a client run with `V4L2_VA_TRACE=1` (the record
+vocabulary is in `docs/architecture.md` §8):
 
 ```
-. ./test/lib/iris-env.sh
-device=$(iris_resolve_device)
-LIBVA_DRIVER_NAME=v4l2 \
-LIBVA_DRIVERS_PATH=$PWD/build/src \
-LIBVA_V4L2_VIDEO_PATH="$device" \
-./build/test/v4l2-context-isolation
+test/iris-eos-check.sh /path/to/trace.log 720            # every AU completed, one drain
+test/iris-eos-check.sh /path/to/trace.log 720 --allow-bounded-sync
+test/iris-ending-check.sh /path/to/trace.log             # no sync timeouts, terminal drain present
+test/iris-context-retirement-check.sh /path/to/trace.log # every destroyed context finished
 ```
 
-For an end-of-stream teardown check, run a client to completion with
-`V4L2_VA_TRACE=1`, then validate the driver trace. The HTML probe is useful for
-browser playback, but the same check applies to FFmpeg or another VA client:
-
-```
-test/iris-ending-check.sh /path/to/client-trace.log
-```
-
-The check rejects bounded sync timeouts and timestamp misses during stateful
-surface recycling, and requires at least one immediate stateful surface
-teardown record.
-
-For a browser context-recycling run (for example, repeated seeks or loop
-teardown), validate that every destroyed VA context is reclaimed after its
-surfaces disappear:
-
-```
-test/iris-context-retirement-check.sh /path/to/client-trace.log
-```
-
-The trace must be collected after the final surface teardown; the check fails
-if any destroyed context remains deferred until `vaTerminate()`.
-
-For a visual hardware/software comparison, serve the project root and open
-`test/compare.html?mode=hardware` and `test/compare.html?mode=software` in
-separate browser profiles. The page labels the active decoder and uses the
-same 30-second H.264 sample in both windows.
-
-### Electron real-video acceptance
-
-Use `test/electron-video-acceptance.html` inside an isolated Electron profile
-or a small Electron test shell. It runs one bounded foreground `<video>` pass
-(10 seconds by default; set `?duration_ms=5000` for a shorter development run),
-counts decoded/dropped frames with `getVideoPlaybackQuality()` and
-`requestVideoFrameCallback()`, and exports a JSON report. The page can be
-prefilled with query parameters such as `app=Obsidian&display=wayland`; fields
-that are not visible to page JavaScript must be entered from the launch command
-and `chrome://media-internals`.
-
-The decoder field is intentionally manual: an Electron renderer cannot inspect
-`chrome://media-internals` cross-origin. A hardware pass requires the exact
-`VaapiVideoDecoder` name, `kIsPlatformVideoDecoder=true`, and a positive decoded
-frame count. GPU-process startup, `libva.so` loading, or a video that merely
-plays is unqualified. Keep the test window foregrounded and close competing
-video clients so frame counters are not distorted by background throttling.
-
-Validate the exported report before attaching it to a result or compatibility
-matrix:
-
-```sh
-test/electron-video-report-check.sh . path/to/iris-electron-video-report.json
-IRIS_ELECTRON_EXPECT_HARDWARE=1 \
-  test/electron-video-report-check.sh . path/to/iris-electron-video-report.json
-```
-
-The report must also record the Electron/Chrome versions, user agent,
-Wayland/X11 and ozone path, sandbox flags, VA environment, dynamically resolved
-Iris node, boot ID, source commit, and installed driver SHA-256. The example
-shape is `test/electron-video-report.example.json`. A report is acceptance
-evidence for the selected app/runtime only; it does not generalize to another
-Electron version or prove zero-copy, power, or long-duration stability.
-
-For a stateful EOS/drain regression check, run FFmpeg with `V4L2_VA_TRACE=1`
-and validate the resulting trace. The check expects one CAPTURE completion for
-each submitted access unit plus the terminal `V4L2_BUF_FLAG_LAST` marker. It
-also rejects capture errors, broken sequence numbers, missing drain completion,
-and a non-terminal LAST marker. The two-argument form is strict and rejects
-bounded sync timeouts; for a burst-style FFmpeg producer, pass
-`--allow-bounded-sync` to keep the EOS/queue assertions strict while reporting
-expected bounded-wait diagnostics:
-
-```
-test/iris-eos-check.sh /path/to/ffmpeg-trace.log 720
-test/iris-eos-check.sh /path/to/ffmpeg-burst-trace.log 720 --allow-bounded-sync
-```
-
-This follows the Linux stateful decoder contract: `VIDIOC_DECODER_CMD(STOP)`
-initiates a drain, both queues remain active until CAPTURE
-`V4L2_BUF_FLAG_LAST`, and only then may a stateful decoder be restarted.
-`STREAMOFF`/`close()` implicitly stops and discards buffered data.
+Firmware experiments (anything that can reset the decoder) go through
+`scripts/iris-experiment-guard.sh -- command`, which records the boot ID and
+temperature, applies a timeout, and leaves an `interrupted` marker that must
+be reviewed before another run.
 
 ## Full target hardware suite
 
@@ -277,43 +128,13 @@ firmware may not implement. The raw JSON and log are the review artifacts.
 classification; set
 `IRIS_ALLOW_KNOWN_COMPLIANCE_LIMIT=0` to make that result fail the suite.
 
-For the opt-in DMA-BUF CAPTURE contract, run the qualification through the
-experiment guard:
-
-```sh
-IRIS_EXPERIMENT_DIR=$HOME/Lab/Bridge/tmp/trash/zero-copy-guard \
-IRIS_ZERO_COPY_DIR=$HOME/Lab/Bridge/tmp/trash/zero-copy-suite \
-IRIS_EXPERIMENT_TIMEOUT_SECONDS=600 \
-./scripts/iris-experiment-guard.sh -- ./test/iris-zero-copy-suite.sh
-```
-
-The suite requires exact framemd5 and strict EOS for direct no-B H.264, proves
-that no `copy_surface_frame` ran, and verifies that B-frame H.264 and HEVC use
-the stable-copy fallback when the explicit ownership contract is absent.
-
-The browser power harness has three separate, non-poolable modes:
-
-```sh
-sh ./test/iris-power-compare.sh --clip /path/to/h264.mp4 \
-  --browser chrome --hardware-mode copy
-sh ./test/iris-power-compare.sh --clip /path/to/h264.mp4 \
-  --browser chrome --hardware-mode zero-copy
-sh ./test/iris-power-compare.sh --clip /path/to/h264.mp4 \
-  --browser chromium --hardware-mode native
-```
-
-The analyser checks the expected decoder name and whether the resolved Iris
-node is actually held by the hardware arm. Chrome VA-API, Chrome zero-copy,
-and Chromium native V4L2 answer different questions and require separate
-collections.
-
 ## Open-source test corpora
 
 There is no single corpus that covers both codec conformance and browser
 surface-lifetime behavior. Use the following projects together:
 
 - [Fluster](https://github.com/fluendo/fluster) is the primary codec
-  conformance corpus. It includes H.264/AVC, HEVC, VP8/VP9 and AV1 suites with
+  conformance corpus. It includes H.264/AVC, HEVC, VP9 and AV1 suites with
   reference checksums, and can run an external decoder command. The current
   suites include 204 H.264 vectors (`JVT-AVC_V1` + `JVT-FR-EXT`), 147 HEVC
   vectors, 311 VP9 vectors and 242 AV1 vectors. A focused download is:
@@ -332,7 +153,7 @@ surface-lifetime behavior. Use the following projects together:
   `front-discard.mp4`, `mid-file-start-time.mp4`, `bear-1280x720.mp4`,
   `avc-bitstream-format-0.h264` and `avc-bitstream-format-1.h264` cover short
   files, non-zero start timestamps, discard-at-start and H.264 framing. The
-  directory also contains VP8/VP9/HEVC/AV1 samples and documents how each file
+  directory also contains VP9/HEVC/AV1 samples and documents how each file
   was generated.
 - [GStreamer GstValidate](https://gstreamer.freedesktop.org/documentation/gst-devtools/gst-validate.html)
   is a scenario runner rather than a corpus. It is useful for replaying a

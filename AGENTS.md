@@ -8,21 +8,18 @@ safe fallback, not merely successful playback.
 
 - Resolve Iris decoder nodes by the `iris_driver` name at runtime. Never encode
   `/dev/video0`, `/dev/video17`, or any other boot-specific number.
-- Production VA exposure is limited to the profiles proven by the target
-  matrix. VP9 VA is withdrawn on the qualified firmware; AV1 VA remains
-  disabled because of the tile/OBU contract. Keep software/native fallback
-  explicit in docs and tests.
-- The default path is Wayland + VA-API. Vulkan, ANGLE Vulkan and unsafe WebGPU
-  belong only to the separately named experiment entry.
-- `V4L2_VA_ZERO_COPY=1` is experimental and currently limited to the validated
-  one-AU, no-B H.264/VP9 ownership contract. Do not make it the default without
-  multi-slot lifetime and dynamic-resolution evidence.
-- A browser or Electron app counts as hardware-decoder compatible only when a
-  real media surface reports the selected decoder and frame/drop evidence.
-  GPU-process startup or libva mapping alone is insufficient.
-- Dynamic-resolution, VP9 and zero-copy experiments can reset firmware. Use a
-  bounded remote command, record boot ID and temperature, and stop after a
-  reset; do not immediately chain another experiment.
+- Production VA exposure is limited to the profiles proven by the target matrix.
+  VP9 is qualified. AV1 is opt-in because the firmware returns no CAPTURE buffer
+  for hidden frames. Keep software/native fallback explicit in docs and tests.
+- The default path is Wayland + VA-API.
+- The Direct path (zero-copy) is automatic where applicable; there is no
+  environment variable switch for zero-copy.
+- A browser counts as hardware-decoder compatible only when a real media surface
+  reports the selected decoder and frame/drop evidence. GPU-process startup or
+  libva mapping alone is insufficient.
+- Dynamic-resolution experiments can reset firmware. Use a bounded remote command,
+  record boot ID and temperature, and stop after a reset; do not immediately chain
+  another experiment.
 
 ## Verification contract
 

@@ -134,62 +134,18 @@ env -u LIBVA_DRIVERS_PATH \
   vainfo
 ```
 
-The two normal desktop entries, `Chromium (Iris VA-API)` and
-`Google Chrome (Iris VA-API)`, use Wayland and pass no video-decoder feature
+The desktop entry, `Google Chrome (Iris VA-API)`, uses Wayland and passes no video-decoder feature
 override at all:
 
 ```text
 --ozone-platform=wayland
 ```
 
-They do not add `--enable-features=Vulkan`, `--use-angle=vulkan`, or
-`--enable-unsafe-webgpu`.
-
-The launcher used to add `--disable-features=AcceleratedVideoDecodeLinuxZeroCopyGL`
-here while this document claimed the selection was left at its default. On
-Google Chrome 151.0.7922.173 that switch is what loses hardware decode: the
-pipeline logs `VaapiVideoDecoder()`, then
-`PickDecoderOutputFormat(): Initializing ImageProcessor`, then
-`~VaapiVideoDecoder()`, and playback continues on `FFmpegVideoDecoder`. A
-five-configuration comparison on the qualified target with one 1920x1080 H.264
-clip measured:
-
-| Launch configuration | Decoder |
-| --- | --- |
-| no feature override | `VaapiVideoDecoder`, `kIsPlatformVideoDecoder=true` |
-| `--enable-features=AcceleratedVideoDecodeLinuxGL` | `VaapiVideoDecoder`, `kIsPlatformVideoDecoder=true` |
-| `--enable-features=AcceleratedVideoDecodeLinuxZeroCopyGL` | `VaapiVideoDecoder`, `kIsPlatformVideoDecoder=true` |
-| `--disable-features=AcceleratedVideoDecodeLinuxZeroCopyGL` | `FFmpegVideoDecoder` |
-| `--disable-features=AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL` | `FFmpegVideoDecoder` |
-
-The earlier note that `AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL`
-tore the VA context down describes a different, explicitly forced pair and is
-not contradicted by the table above; neither combination is used now.
-`test/run-static-checks.sh` fails if any `AcceleratedVideoDecode` switch
-returns to the VA-only path.
-
-The separately named Vulkan/WebGPU experiment adds its own graphics switches and
-uses a different browser profile. All four entries use
-profiles below `${XDG_CONFIG_HOME:-$HOME/.config}/iris-vaapi-browser`; this
+The entry uses a profile below `${XDG_CONFIG_HOME:-$HOME/.config}/iris-vaapi-browser`; this
 isolation ensures a pre-existing ordinary browser process cannot absorb a new
 URL while silently ignoring the requested GPU flags. Set
 `IRIS_BROWSER_PROFILE_ROOT` only when a different durable profile location is
 needed.
-
-Older lab images may contain
-`~/.local/share/applications/chromium-iris-v4l2.desktop`. A per-user desktop
-file shadows the corrected system entry with the same desktop ID. Inspect and
-remove that legacy copy after installation if its `Exec` line still invokes
-`/usr/bin/chromium-browser` directly:
-
-```sh
-grep '^Exec=' ~/.local/share/applications/chromium-iris-v4l2.desktop 2>/dev/null || true
-rm ~/.local/share/applications/chromium-iris-v4l2.desktop
-update-desktop-database ~/.local/share/applications 2>/dev/null || true
-```
-
-Deleting that one known legacy launcher is a migration step, not permission
-to clean unrelated user desktop files.
 
 ### Browser acceptance gate
 
@@ -213,11 +169,10 @@ Also record decoded/dropped frame counts, confirm the Iris V4L2 context and
 OUTPUT/CAPTURE activity in a trace-enabled diagnostic run, and compare the
 device boot ID before and after. Small videos may fall below Chromium's
 hardware-decoder performance threshold, so a low-resolution
-`FFmpegVideoDecoder` result is not a release verdict. VP9 must remain a safe
-software fallback on the qualified target because its VA profile is withdrawn.
-Validate Chromium and Google Chrome separately; Electron applications such as
-VS Code and Obsidian need their own version, Wayland/X11, sandbox, and actual
-decoder result recorded rather than inheriting the browser result.
+`FFmpegVideoDecoder` result is not a release verdict. H.264, HEVC and VP9
+are the qualified VA profiles; AV1 is opt-in (see README). Validate Google
+Chrome; Fedora's Chromium decodes through its own native V4L2 stack and its
+result says nothing about this driver.
 
 ## Distribution packaging
 
@@ -246,29 +201,9 @@ the decoder node by driver name because the number moves between boots on this
 device, and without `v4l2-ctl` it exits instead of falling back to a fixed
 `/dev/videoN` that may be a camera.
 
-Neither browser is a dependency. The driver serves any VA-API client, and each
-desktop entry names the browser it launches in `TryExec` so an entry for an
-absent browser hides itself instead of appearing in the menu and failing on
-click. `TryExec` names a binary, not a package: Fedora and Debian install
-`/usr/bin/chromium-browser` and have no `/usr/bin/chromium`, while Arch ships
-the opposite, so the source entries carry `chromium-browser` and the Arch
-package rewrites them. Naming the wrong one hides the entry on a system where
-Chromium is installed, which is indistinguishable from the entry working.
-
-The zero-copy experiment is qualified separately from the package default. Run
-`test/iris-zero-copy-suite.sh` through `scripts/iris-experiment-guard.sh` with
-`V4L2_VA_ZERO_COPY=1`, `V4L2_VA_ZERO_COPY_CONTRACT=h264-no-b-v1`, and
-`V4L2_VA_BATCH_SIZE=1`. The direct path is currently limited to single-plane
-NV12 H.264 without B-frame reordering; B-frame H.264, HEVC, dynamic geometry,
-and any missing or unknown ownership contract stay on stable MMAP/copy. Do not
-promote the experiment by setting an environment variable globally or by adding
-it to a desktop entry.
-
-The industrial target gate combines the exact framemd5/EOS matrices with
-Qualcomm's `v4l-video-test-app`, `v4l2-compliance`, native V4L2 baselines,
-context isolation/concurrency, and a real Chrome media-surface check. A
-successful GPU-process start or a `DMABUF` QBUF alone is not a zero-copy
-qualification.
+Google Chrome is not a dependency. The desktop entry names the browser in
+`TryExec`, so on a system without Chrome the entry hides itself instead of
+appearing in the menu and failing on click.
 
 Which browser benefits differs by distribution. On Fedora 44, Chromium
 151.0.7922.169 already decodes in hardware through Chromium's own native V4L2
@@ -286,8 +221,7 @@ repository's `pkgs/libva-v4l2-iris/` directory and add it to the package list.
 The generated rootfs then ships the driver in libva's standard directory and
 no user has to set `LIBVA_DRIVERS_PATH`. That path is not validated here: the
 qualified target in this repository is Fedora, and an Arch image needs its own
-`vainfo`, `media-internals` and battery acceptance before its result may be
-claimed.
+`vainfo` and `media-internals` acceptance before its result may be claimed.
 
 ## Dynamic resolution qualification
 
@@ -323,10 +257,12 @@ the same checks. FFmpeg is allowed to recreate VA contexts on a coded-size
 change; the single-process lane therefore qualifies context retirement and
 session cleanup rather than asserting a client behavior FFmpeg does not have.
 
-Do not run VP9 dynamic qualification on this target: both the native in-place
-lane and the VA context-recreation lane rebooted the kernel/firmware. VA Profile
-0 is withdrawn entirely, so VP9 falls back to software. A missing H.264 device
-format, required element or VA capability is a failure, not a skip.
+VP9 runs the same lanes with `IRIS_DYNAMIC_CODECS=vp9`; on the decode-order
+kernel module it passed all 100 switches in both lanes (TEST-RESULTS.md,
+Phase 5). Run it through `scripts/iris-experiment-guard.sh` on any other
+kernel, because the old display-order module rebooted on VP9 source changes.
+A missing device format, required element or VA capability is a failure,
+not a skip.
 Development runs may shorten the matrix explicitly with
 `IRIS_DYNAMIC_SWITCHES` and `IRIS_DYNAMIC_FRAMES_PER_SEGMENT`; qualification
 results must retain the defaults.

@@ -23,8 +23,7 @@ corpora, traces, screenshots, and media outside the repository.
 
 When changing codec support, queue ownership, or browser launch behavior, add a
 regression check and update the relevant capability or compatibility document.
-Do not enable Vulkan/WebGPU or zero-copy in the default launcher without new
-target evidence. Never hardcode a boot-specific `/dev/videoN` node.
+Never hardcode a boot-specific `/dev/videoN` node.
 
 ## Commits and pull requests
 
