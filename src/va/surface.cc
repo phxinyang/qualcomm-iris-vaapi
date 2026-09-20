@@ -215,8 +215,13 @@ VAStatus querySurfaceAttributes(VADriverContextP ctx, VAConfigID config, VASurfa
         list[n].value.value.i = value;
         ++n;
     };
-    add(VASurfaceAttribPixelFormat, static_cast<int>(fourcc_for(it->second.rt_format)),
-        VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
+    // FFmpeg creates its config with no RT-format attribute and then picks
+    // the surface format from this list by bit depth, so list every format
+    // the profile can decode into rather than the one the config defaulted to.
+    add(VASurfaceAttribPixelFormat, VA_FOURCC_NV12, VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
+    const VAProfile profile = it->second.profile;
+    if (d.capabilities.p010 && (profile == VAProfileHEVCMain10 || profile == VAProfileVP9Profile2))
+        add(VASurfaceAttribPixelFormat, VA_FOURCC_P010, VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
     add(VASurfaceAttribMinWidth, static_cast<int>(d.capabilities.min_width), VA_SURFACE_ATTRIB_GETTABLE);
     add(VASurfaceAttribMaxWidth, static_cast<int>(d.capabilities.max_width), VA_SURFACE_ATTRIB_GETTABLE);
     add(VASurfaceAttribMinHeight, static_cast<int>(d.capabilities.min_height), VA_SURFACE_ATTRIB_GETTABLE);

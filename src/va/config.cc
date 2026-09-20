@@ -87,6 +87,8 @@ VAStatus createConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entr
             VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
         iris::require(entrypoint == VAEntrypointVLD, "only VLD is supported", VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT);
         uint32_t rt_format = VA_RT_FORMAT_YUV420;
+        if (d.capabilities.p010 && (profile == VAProfileHEVCMain10 || profile == VAProfileVP9Profile2))
+            rt_format |= VA_RT_FORMAT_YUV420_10;
         for (int i = 0; i < count; ++i) {
             if (attributes[i].type == VAConfigAttribRTFormat && attributes[i].value != VA_ATTRIB_NOT_SUPPORTED)
                 rt_format = attributes[i].value;
