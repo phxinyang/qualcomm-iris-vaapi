@@ -424,6 +424,30 @@ void test_au_larger_than_slot_is_rejected()
     CHECK_THROWS(h.session->submit(huge.data(), huge.size(), t), VA_STATUS_ERROR_NOT_ENOUGH_BUFFER);
 }
 
+void test_visible_rectangle_prefers_kernel_compose_when_sane()
+{
+    // The kernel reports the firmware crop through COMPOSE. A 1080-line
+    // stream decodes into 1088 coded rows; the visible rectangle must be
+    // 1080, and a nonsense compose (larger than coded) must not be trusted.
+    FakeConfig fc;
+    fc.coded_height = 1088;
+    fc.visible_height = 1080;
+    Harness h(fc);
+    Target t;
+    h.submit(t);
+    CHECK(h.session->visible().height == 1080);
+    CHECK(h.session->capture_layout().height == 1088);
+    CHECK(h.session->height() == 1080);
+
+    FakeConfig bad;
+    bad.coded_height = 1088;
+    bad.visible_height = 4000; // corrupt compose: exceeds coded size
+    Harness g(bad, fast_options(), config());
+    Target u;
+    g.submit(u);
+    CHECK(g.session->visible().height == 1080); // falls back to the client's geometry
+}
+
 void test_stable_layout()
 {
     const Layout l = stable_layout(VA_FOURCC_NV12, 720, 405);
@@ -460,6 +484,7 @@ int main()
         { "resolution change rebuilds capture", test_resolution_change_rebuilds_capture },
         { "resolution change waits for held frames", test_resolution_change_waits_for_held_frames },
         { "AU larger than slot is rejected", test_au_larger_than_slot_is_rejected },
+        { "visible rectangle prefers sane kernel compose", test_visible_rectangle_prefers_kernel_compose_when_sane },
         { "stable layout", test_stable_layout },
     };
     int ran = 0;
