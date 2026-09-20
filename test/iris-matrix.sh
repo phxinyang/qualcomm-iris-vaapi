@@ -94,12 +94,7 @@ fi
 
 if has_format VP90; then
     run_native vp9 matroskademux vp9parse v4l2vp9dec test-vp9.webm
-    # VP9 VA is opt-in until Phase 5 closes (docs/architecture.md §9).
-    if [ -n "${V4L2_VA_EXPERIMENTAL_PROFILES:-}" ]; then
-        run_va vp9 "$root/test-vp9.webm" V4L2_VA_EXPERIMENTAL_PROFILES=1
-    else
-        echo "SKIP vp9 va=not-advertised (set V4L2_VA_EXPERIMENTAL_PROFILES=1)"
-    fi
+    run_va vp9 "$root/test-vp9.webm"
 else
     echo "SKIP vp9 device-format-unavailable"
 fi

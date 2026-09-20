@@ -103,15 +103,16 @@ Capabilities probe_capabilities(const iris::Options& options)
         if (caps.p010)
             caps.profiles.insert(VAProfileHEVCMain10);
     }
-    if (options.experimental_profiles) {
-        if (caps.output_formats.count(V4L2_PIX_FMT_VP9) && caps.nv12) {
-            caps.profiles.insert(VAProfileVP9Profile0);
-            if (caps.p010)
-                caps.profiles.insert(VAProfileVP9Profile2);
-        }
-        if (caps.output_formats.count(V4L2_PIX_FMT_AV1) && caps.nv12)
-            caps.profiles.insert(VAProfileAV1Profile0);
+    // VP9 passed its Phase 5 gate on the decode-order module (matrix,
+    // 100 context recreations, 100 resolution switches, Chrome 1080p with
+    // alt-ref); see TEST-RESULTS.md. AV1 stays opt-in.
+    if (caps.output_formats.count(V4L2_PIX_FMT_VP9) && caps.nv12) {
+        caps.profiles.insert(VAProfileVP9Profile0);
+        if (caps.p010)
+            caps.profiles.insert(VAProfileVP9Profile2);
     }
+    if (options.experimental_profiles && caps.output_formats.count(V4L2_PIX_FMT_AV1) && caps.nv12)
+        caps.profiles.insert(VAProfileAV1Profile0);
     return caps;
 }
 
