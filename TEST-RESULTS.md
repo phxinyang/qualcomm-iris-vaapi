@@ -1050,3 +1050,69 @@ Three stale per-user desktop entries from earlier installs
 `google-chrome-iris-vulkan-webgpu`) were removed from
 `~/.local/share/applications` on the target; the package ships only
 `google-chrome-iris-v4l2.desktop`.
+
+## Phase 7: 10-bit, conformance corpus, module provenance (2026-09-21)
+
+Same target and boot ID (`4944865b…`) as Phases 3 to 6; every corpus run
+guarded, no reset.
+
+### 10-bit profiles
+
+HEVC Main10 and VP9 Profile 2 decode bit-exact against software (48 frames
+each, P010 CAPTURE at 128-pixel stride) once two glue defects were fixed:
+the session took its CAPTURE fourcc from the config instead of the first
+target surface, and the surface attribute list offered only NV12 to
+clients that create a config without an RT-format attribute (FFmpeg). A
+1080p24 Main10 B-frame stream plays in Chrome 152 as `VaapiVideoDecoder`,
+platform=true, on the GPU copy engine with P010 stable buffers (three
+runs: 720/4, 719/3, 719/0 dropped; the 8-bit control in the same session
+showed 719/2, so the drops track tablet load, not bit depth).
+
+### Fluster conformance, driver path (`FFmpeg-*-VAAPI`)
+
+Firmware baseline is the 2026-09-08 `GStreamer-*-V4L2` run on the same
+resources (the native path, bypassing this driver).
+
+| Suite | Old driver (2026-09-08) | Rebuilt driver, first run | Rebuilt driver, final | Firmware |
+| --- | --- | --- | --- | --- |
+| JVT-AVC_V1 (135) | 7 pass | 40 pass | 40 pass | 40 pass |
+| JCT-VC-HEVC_V1 (147) | 20 pass | 57 pass | 111 pass | 112 pass |
+
+H.264: the VA pass set equals the firmware pass set exactly; the 95 others
+fail natively too (SVC, interlaced, FMO/ASO and other tools the firmware
+does not implement).
+
+HEVC: the first rebuilt run already tripled the old count. The remaining
+gap was closed in three steps found by classifying every failing vector's
+trace: (1) the generated SPS carried one repeated RPS with only the
+current picture's references, which evicted follow pictures and broke any
+stream whose slices index different sets; every slice header is now
+rewritten with an explicit RPS built from VA's DPB (used flags, long-term
+entries) and VA's RefPicList spelled out as a list modification, the
+approach strongtz/libva-v4l2 uses; (2) FFmpeg renders one slice data
+buffer per slice while the translator assumed one blob for the picture;
+(3) three PPS fields were clamped inside their legal ranges
+(`init_qp_minus26` for 10-bit, `diff_cu_qp_delta_depth`,
+`log2_parallel_merge_level_minus2`).
+
+Final state: 111/147. The two firmware-passing vectors the driver does
+not pass (`NUT_A_ericsson_5`, `RPS_D_ericsson_6`) decode all frames
+without a firmware error and match software frame for frame under
+`framemd5`; Fluster reports them as failing because FFmpeg's software
+reference decoder itself logs "Could not find ref with POC" on both and
+emits a different frame set than the conformance MD5. `RAP_A_docomo_6`
+passes through the driver (RASL pictures after the opening CRA are refused
+by the translator, so the output starts where the reference does) while
+the native GStreamer path emitted one frame fewer. `DELTAQP_A_BRCM_4`,
+`INITQP_B_Main10_Sony_1` and `PMERGE_E_TI_3` complete every frame with no
+firmware error but differ in pixels; they are the residual and were not
+chased further in this phase.
+
+The HEVC parameter-set unit test is registered again (it had been dropped
+from `test/meson.build` in Phase 3).
+
+### Provenance
+
+`test/remote/provenance.py` records the installed `qcom-iris` module path
+and SHA-256 alongside the kernel release, so a result carries the
+decode-order patch identity.
