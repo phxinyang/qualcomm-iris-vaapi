@@ -145,12 +145,16 @@ void Session::configure_capture()
     require(granted.pixelformat == pixelformat && granted.num_planes == 1, "decoder CAPTURE layout unsupported",
         VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
 
-    if (auto compose = device_->get_compose(Queue::Capture); compose && compose->width && compose->height)
+    // The visible rectangle. The kernel reports the firmware's crop through
+    // every selection target; when it is empty (this Iris driver returns a
+    // zero rectangle before the first frame) fall back to what the client
+    // declared, bounded by the coded size. The client's geometry is the SPS
+    // crop as far as it knows, so it is the right default.
+    if (auto compose = device_->get_compose(Queue::Capture); compose && compose->width && compose->height
+        && compose->width <= granted.width && compose->height <= granted.height)
         visible_ = *compose;
     else
         visible_ = Selection { 0, 0, std::min(config_.width, granted.width), std::min(config_.height, granted.height) };
-    // The stream's real geometry may differ from what the VA client
-    // declared (it reported the SPS, the firmware reports the coded size).
     config_.width = visible_.width;
     config_.height = visible_.height;
 
