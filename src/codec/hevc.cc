@@ -524,12 +524,14 @@ std::vector<uint8_t> hevc_pps(const VAPictureParameterBufferHEVC& picture)
     writer.bit(picture.slice_parsing_fields.bits.cabac_init_present_flag);
     writer.ue(std::min<unsigned>(14, picture.num_ref_idx_l0_default_active_minus1));
     writer.ue(std::min<unsigned>(14, picture.num_ref_idx_l1_default_active_minus1));
-    writer.se(std::clamp<int>(picture.init_qp_minus26, -26, 25));
+    // init_qp_minus26 ranges down to -(26 + QpBdOffsetY): 10-bit streams
+    // legitimately go below -26.
+    writer.se(std::clamp<int>(picture.init_qp_minus26, -(26 + 6 * static_cast<int>(picture.bit_depth_luma_minus8)), 25));
     writer.bit(picture.pic_fields.bits.constrained_intra_pred_flag);
     writer.bit(picture.pic_fields.bits.transform_skip_enabled_flag);
     writer.bit(picture.pic_fields.bits.cu_qp_delta_enabled_flag);
     if (picture.pic_fields.bits.cu_qp_delta_enabled_flag)
-        writer.ue(std::min<unsigned>(3, picture.diff_cu_qp_delta_depth));
+        writer.ue(picture.diff_cu_qp_delta_depth);
     writer.se(std::clamp<int>(picture.pps_cb_qp_offset, -12, 12));
     writer.se(std::clamp<int>(picture.pps_cr_qp_offset, -12, 12));
     writer.bit(picture.slice_parsing_fields.bits.pps_slice_chroma_qp_offsets_present_flag);
@@ -564,7 +566,8 @@ std::vector<uint8_t> hevc_pps(const VAPictureParameterBufferHEVC& picture)
     writer.bit(0); // pps_scaling_list_data_present_flag (lists live in the SPS)
     // Rewritten slice headers always spell their reference lists out.
     writer.bit(1); // lists_modification_present_flag
-    writer.ue(std::min<unsigned>(3, picture.log2_parallel_merge_level_minus2));
+    // Range is 0..CtbLog2SizeY-2, so up to 4 for 64x64 CTBs; do not clamp.
+    writer.ue(picture.log2_parallel_merge_level_minus2);
     writer.bit(picture.slice_parsing_fields.bits.slice_segment_header_extension_present_flag);
     writer.bit(0); // pps_extension_present_flag
     writer.trailing_bits();
