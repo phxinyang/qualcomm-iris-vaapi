@@ -1116,3 +1116,21 @@ from `test/meson.build` in Phase 3).
 `test/remote/provenance.py` records the installed `qcom-iris` module path
 and SHA-256 alongside the kernel release, so a result carries the
 decode-order patch identity.
+
+### Final installed package (2026-09-21)
+
+RPM rebuilt from `adba51f` and reinstalled; `rpm -V` clean; installed
+driver `579d1bc1fa18af5e…`, manifest source commit matches. Chrome 152
+from the installed package, packaged defaults, boot ID unchanged:
+
+| Clip | Decoder | Frames / dropped (30 s) |
+| --- | --- | --- |
+| H.264 1080p24 B-frames | `VaapiVideoDecoder`, platform=true | 708 / 2 |
+| HEVC Main 1080p24 B-frames | `VaapiVideoDecoder`, platform=true | 714 / 0 |
+| VP9 1080p24 alt-ref | `VaapiVideoDecoder`, platform=true | 720 / 0 |
+| HEVC Main10 1080p24 B-frames | `VaapiVideoDecoder`, platform=true | 720 / 3 |
+
+A full-duration (2 h per scenario) `iris-concurrency-soak.sh` against the
+installed driver was started after this table; its log is
+`~/Lab/iris-vaapi-lab/artifacts/final-soak-2h-20260921.log` on the target
+and its result is not yet recorded here.
