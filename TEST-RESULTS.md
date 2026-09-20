@@ -924,3 +924,49 @@ in the pre-rebuild baseline:
 | --- | --- | --- | --- | --- |
 | patched module, installed driver, H.264 | `VaapiVideoDecoder` | true | 671 / 0 | `--type=gpu-process` |
 | patched module, installed driver, HEVC | `VaapiVideoDecoder` | true | 672 / 0 | `--type=gpu-process` |
+
+## Phase 3: rebuilt driver on the new core (2026-09-20)
+
+Source commit range `1f1f2fa..f6642b1` on `iris/rebuild`; the driver is now
+`src/va` on `src/iris` with `src/codec` translators (docs/architecture.md).
+Target as in Phase 1, patched `qcom-iris` module (`1c1a4ef9…`), decode-order
+mode active. The tablet rebooted at 14:12 local by a clean `systemd-reboot`
+(previous boot's journal ends in an orderly shutdown; no Iris or firmware
+message precedes it); every run below is on boot ID
+`4944865b-f3b2-424b-8853-375f29bba7b4` and none changed it.
+
+| Gate | Result |
+| --- | --- |
+| `meson test` on host | 15/15 including the 19-case FakeDevice session suite |
+| `test/iris-matrix.sh` | H.264 48/48 and HEVC 48/48 exact framemd5; `submitted=48 capture=48 drain=1 timeouts=0 drops=0` each |
+| `test/iris-structure-matrix.sh` | all-I, IP/GOP12, B2, B4 at 640x360: 48/48 each, zero drops or timeouts |
+| `test/iris-zero-copy-suite.sh` (Direct path) | 24/24 frames `publish=direct`, zero copies, framemd5 equals software |
+| `test/iris-dynamic-resolution.sh` | native 202/100 switches; VA single-process 202 frames, 101 contexts, pixels equal software |
+| `test/iris-concurrency-soak.sh` 120 s | dual H.264 2880+2880 frames; mixed H.264+HEVC 2880+2880 frames; strict EOS on all four; boot ID unchanged |
+| Chrome 152 H.264 1080p24 B-frames, `V4L2_VA_TRACE=1` | `VaapiVideoDecoder`, platform=true, 719 frames / 0 dropped; trace: 920 `publish=copy-gpu`, 0 drops, 0 timeouts, 1 drain |
+| Chrome 152 HEVC 1080p24 B-frames, traced | `VaapiVideoDecoder`, platform=true, 719 / 0; 919 `publish=copy-gpu`, 0 drops, 0 timeouts, 1 drain |
+| `iris-ending-check`, `iris-context-retirement-check` on both Chrome traces | pass |
+
+FFmpeg 1080p H.264, 240 frames, CPU time of the ffmpeg process (bash `time`):
+
+| Path | user | sys |
+| --- | --- | --- |
+| Direct (no copy) | 1.22 s | 0.43 s |
+| Copy, GPU engine | 0.75 s | 0.47 s |
+| Copy, CPU engine | 1.17 s | 0.38 s |
+| Software decode | 2.80 s | 0.18 s |
+
+The GPU engine's pixels are bit-identical to software for 48 frames. Chrome
+pre-exports its pool and therefore runs the GPU-copy path; FFmpeg runs
+Direct.
+
+Two things learned on hardware and fixed in this phase: FFmpeg destroys a
+resolution segment's VA context before downloading that segment's last
+pictures, so a completed Direct frame must survive `vaDestroyContext`
+(vb2 orphans exported buffers, the fd keeps the pixels); and the soak's own
+libx265 encode leaves the prime core at the 85 C guard, so a scenario now
+waits for a 15 C margin before its first sample.
+
+Not yet done in this phase: VP9 and AV1 stay unadvertised (Phase 5);
+`data/iris-codec-capabilities.json`, the launcher, packaging and the README
+prose still describe the old tree (Phase 6).
