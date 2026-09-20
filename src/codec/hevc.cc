@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: MIT
 //
 // HEVC: VPS/SPS/PPS synthesised from VA picture parameters on every access
-// unit. The short-term RPS is rebuilt from the current DPB flags and repeated
-// for every index so the slice header's index stays valid unchanged.
+// unit. The original SPS reference picture sets are not in VA, so every slice
+// header is rewritten to carry an explicit RPS and an explicit reference list
+// modification that reproduce VA's reference graph; everything else in the
+// header is copied bit for bit. This follows the approach of
+// strongtz/libva-v4l2 (MIT).
 
 #include "translator.h"
 
@@ -78,6 +81,260 @@ bool has_start_code(const uint8_t* data, size_t size)
     return size >= 3 && data[0] == 0 && data[1] == 0 && (data[2] == 1 || (size >= 4 && data[2] == 0 && data[3] == 1));
 }
 
+size_t start_code_length(const uint8_t* data, size_t size)
+{
+    return has_start_code(data, size) ? (data[2] == 1 ? 3 : 4) : 0;
+}
+
+// VA's view of the DPB, sorted the way the spec builds RefPicSetStCurrBefore,
+// StCurrAfter and LtCurr, plus the initial RefPicList0/1 that results.
+struct Reference {
+    unsigned index; // into ReferenceFrames[]
+    int32_t poc;
+    bool used;
+};
+struct References {
+    std::vector<Reference> before, after, long_term;
+    std::vector<unsigned> list[2];
+    unsigned total_curr() const { return static_cast<unsigned>(list[0].size()); }
+};
+
+References collect_references(const VAPictureParameterBufferHEVC& p)
+{
+    References result;
+    std::vector<int32_t> pocs;
+    for (unsigned i = 0; i < 15; ++i) {
+        const auto& r = p.ReferenceFrames[i];
+        if (r.picture_id == VA_INVALID_SURFACE || (r.flags & VA_PICTURE_HEVC_INVALID))
+            continue;
+        require(r.pic_order_cnt != p.CurrPic.pic_order_cnt
+                && std::find(pocs.begin(), pocs.end(), r.pic_order_cnt) == pocs.end(),
+            "HEVC reference POC collides", VA_STATUS_ERROR_INVALID_BUFFER);
+        pocs.push_back(r.pic_order_cnt);
+        const bool lt = r.flags & VA_PICTURE_HEVC_LONG_TERM_REFERENCE;
+        const bool used = r.flags
+            & (VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE | VA_PICTURE_HEVC_RPS_ST_CURR_AFTER | VA_PICTURE_HEVC_RPS_LT_CURR);
+        auto& bucket = lt ? result.long_term : r.pic_order_cnt < p.CurrPic.pic_order_cnt ? result.before : result.after;
+        bucket.push_back({ i, r.pic_order_cnt, used });
+    }
+    std::sort(result.before.begin(), result.before.end(), [](auto& a, auto& b) { return a.poc > b.poc; });
+    std::sort(result.after.begin(), result.after.end(), [](auto& a, auto& b) { return a.poc < b.poc; });
+    std::sort(result.long_term.begin(), result.long_term.end(), [](auto& a, auto& b) { return a.poc > b.poc; });
+    // Spec 8.3.4: L0 = StCurrBefore, StCurrAfter, LtCurr; L1 = StCurrAfter,
+    // StCurrBefore, LtCurr (each list cycled to num_ref_idx, done by the
+    // decoder). Only the "used" entries count.
+    for (unsigned l = 0; l < 2; ++l) {
+        for (const auto& r : l ? result.after : result.before)
+            if (r.used)
+                result.list[l].push_back(r.index);
+        for (const auto& r : l ? result.before : result.after)
+            if (r.used)
+                result.list[l].push_back(r.index);
+        for (const auto& r : result.long_term)
+            if (r.used)
+                result.list[l].push_back(r.index);
+    }
+    return result;
+}
+
+// Explicit st_ref_pic_set(0) plus the long-term section, written into a
+// slice header in place of whatever the original carried.
+void write_rps(BitWriter& b, const References& refs, const VAPictureParameterBufferHEVC& p)
+{
+    b.bit(0); // short_term_ref_pic_set_sps_flag: the generated SPS has none
+    // idx == num_short_term_ref_pic_sets == 0: no inter_ref_pic_set_prediction_flag
+    b.ue(static_cast<uint32_t>(refs.before.size()));
+    b.ue(static_cast<uint32_t>(refs.after.size()));
+    for (unsigned l = 0; l < 2; ++l) {
+        int64_t previous = p.CurrPic.pic_order_cnt;
+        for (const auto& r : l ? refs.after : refs.before) {
+            const int64_t delta = l ? static_cast<int64_t>(r.poc) - previous : previous - r.poc;
+            require(delta > 0 && delta <= 32768, "HEVC short-term POC delta out of range", VA_STATUS_ERROR_INVALID_BUFFER);
+            b.ue(static_cast<uint32_t>(delta - 1));
+            b.bit(r.used);
+            previous = r.poc;
+        }
+    }
+    if (p.slice_parsing_fields.bits.long_term_ref_pics_present_flag) {
+        // num_long_term_sps is absent (num_long_term_ref_pics_sps == 0 in our SPS)
+        b.ue(static_cast<uint32_t>(refs.long_term.size()));
+        const unsigned n = p.log2_max_pic_order_cnt_lsb_minus4 + 4;
+        const unsigned mask = (1u << n) - 1;
+        const int64_t current_msb = static_cast<int64_t>(p.CurrPic.pic_order_cnt)
+            - (static_cast<unsigned>(p.CurrPic.pic_order_cnt) & mask);
+        int64_t previous_cycle = 0;
+        for (const auto& r : refs.long_term) {
+            const unsigned lsb = static_cast<unsigned>(r.poc) & mask;
+            const int64_t cycle = (current_msb - (static_cast<int64_t>(r.poc) - lsb)) / (1 << n);
+            require(cycle >= previous_cycle && cycle < 0x7fffffff, "HEVC long-term MSB cycle unsupported",
+                VA_STATUS_ERROR_UNIMPLEMENTED);
+            b.bits(lsb, n); // poc_lsb_lt
+            b.bit(r.used); // used_by_curr_pic_lt_flag
+            b.bit(1); // delta_poc_msb_present_flag: always explicit
+            b.ue(static_cast<uint32_t>(cycle - previous_cycle));
+            previous_cycle = cycle;
+        }
+    } else {
+        require(refs.long_term.empty(), "HEVC long-term references without the SPS flag", VA_STATUS_ERROR_INVALID_BUFFER);
+    }
+}
+
+// Rewrite one slice segment NAL: keep every field except pps id (-> 0),
+// no_output_of_prior_pics (-> 0), pic_output_flag (-> 1), the RPS and the
+// reference list modification. Returns the NAL with emulation prevention.
+void rewrite_slice(const uint8_t* nal, size_t size, const VASliceParameterBufferHEVC& slice,
+    const VAPictureParameterBufferHEVC& p, const References& refs, std::vector<uint8_t>& out)
+{
+    require(size >= 3, "truncated HEVC slice NAL", VA_STATUS_ERROR_INVALID_BUFFER);
+    const unsigned header = static_cast<unsigned>(nal[0]) << 8 | nal[1];
+    const unsigned type = (header >> 9) & 63;
+    require(!(header & 0x8000) && !(header & 0x1f8) && (header & 7) && type <= 31,
+        "invalid or multilayer HEVC slice NAL", VA_STATUS_ERROR_INVALID_BUFFER);
+    const auto& f = p.slice_parsing_fields.bits;
+
+    BitReader r(nal + 2, size - 2, 0);
+    BitWriter b;
+    size_t copied = 0; // reader position from which verbatim copy resumes
+    auto copy_to = [&](size_t end) {
+        const size_t saved = r.position();
+        r.seek(copied);
+        r.copy(b, end);
+        copied = end;
+        r.seek(saved);
+    };
+
+    const unsigned first = r.bit();
+    b.bit(first);
+    if (type >= 16 && type <= 23) {
+        r.bit(); // no_output_of_prior_pics_flag
+        b.bit(0); // VA owns output; every picture must complete
+    }
+    r.ue(); // slice_pic_parameter_set_id
+    b.ue(0);
+    copied = r.position();
+    bool dependent = false;
+    if (!first) {
+        if (f.dependent_slice_segments_enabled_flag)
+            dependent = r.bit();
+        const unsigned ctb = 1u << (p.log2_min_luma_coding_block_size_minus3 + 3 + p.log2_diff_max_min_luma_coding_block_size);
+        const unsigned count = ((p.pic_width_in_luma_samples + ctb - 1) / ctb) * ((p.pic_height_in_luma_samples + ctb - 1) / ctb);
+        const unsigned address = r.bits(nal_ceil_log2(count));
+        require(address == slice.slice_segment_address, "HEVC slice address mismatch", VA_STATUS_ERROR_INVALID_BUFFER);
+    }
+    if (!dependent) {
+        r.skip(p.num_extra_slice_header_bits);
+        const unsigned slice_type = r.ue();
+        require(slice_type <= 2 && slice_type == slice.LongSliceFlags.fields.slice_type, "HEVC slice type mismatch",
+            VA_STATUS_ERROR_INVALID_BUFFER);
+        if (f.output_flag_present_flag) {
+            copy_to(r.position());
+            r.bit(); // pic_output_flag
+            b.bit(1);
+            copied = r.position();
+        }
+        if (p.pic_fields.bits.separate_colour_plane_flag)
+            r.bits(2); // colour_plane_id, copied
+        if (type != 19 && type != 20) {
+            r.bits(p.log2_max_pic_order_cnt_lsb_minus4 + 4); // slice_pic_order_cnt_lsb, copied
+            copy_to(r.position());
+            // Skip the original RPS syntax entirely.
+            const bool from_sps = r.bit();
+            if (from_sps) {
+                require(p.num_short_term_ref_pic_sets > 0, "HEVC slice references an SPS RPS the stream lacks",
+                    VA_STATUS_ERROR_INVALID_BUFFER);
+                r.bits(nal_ceil_log2(p.num_short_term_ref_pic_sets));
+            } else {
+                const size_t start = r.position();
+                const bool predicted = p.num_short_term_ref_pic_sets && r.bit();
+                if (predicted) {
+                    require(p.st_rps_bits > 0, "HEVC predicted RPS without st_rps_bits", VA_STATUS_ERROR_INVALID_BUFFER);
+                    r.seek(start);
+                    r.skip(p.st_rps_bits);
+                } else {
+                    const unsigned neg = r.ue(), pos = r.ue();
+                    require(neg + pos <= 16, "invalid HEVC RPS size", VA_STATUS_ERROR_INVALID_BUFFER);
+                    for (unsigned i = 0; i < neg + pos; ++i) {
+                        r.ue();
+                        r.bit();
+                    }
+                }
+            }
+            if (f.long_term_ref_pics_present_flag) {
+                const unsigned ns = p.num_long_term_ref_pic_sps ? r.ue() : 0;
+                const unsigned np = r.ue();
+                require(ns <= p.num_long_term_ref_pic_sps && ns + np <= 16, "invalid HEVC long-term RPS",
+                    VA_STATUS_ERROR_INVALID_BUFFER);
+                for (unsigned i = 0; i < ns + np; ++i) {
+                    if (i < ns) {
+                        r.bits(nal_ceil_log2(p.num_long_term_ref_pic_sps));
+                    } else {
+                        r.bits(p.log2_max_pic_order_cnt_lsb_minus4 + 4);
+                        r.bit();
+                    }
+                    if (r.bit())
+                        r.ue();
+                }
+            }
+            copied = r.position();
+            write_rps(b, refs, p);
+            if (f.sps_temporal_mvp_enabled_flag)
+                r.bit(); // slice_temporal_mvp_enabled_flag, copied
+        }
+        if (f.sample_adaptive_offset_enabled_flag) {
+            r.bit();
+            r.bit();
+        }
+        if (slice_type != 2) {
+            unsigned counts[2] = { p.num_ref_idx_l0_default_active_minus1 + 1u, p.num_ref_idx_l1_default_active_minus1 + 1u };
+            if (r.bit()) { // num_ref_idx_active_override_flag
+                counts[0] = r.ue() + 1;
+                if (slice_type == 0)
+                    counts[1] = r.ue() + 1;
+            }
+            const unsigned lists = slice_type == 0 ? 2 : 1;
+            const unsigned total = refs.total_curr();
+            require(total > 0 && total <= 16, "HEVC inter slice without reference pictures", VA_STATUS_ERROR_INVALID_BUFFER);
+            copy_to(r.position());
+            for (unsigned l = 0; l < lists; ++l) {
+                require(counts[l] <= 15, "invalid HEVC active reference count", VA_STATUS_ERROR_INVALID_BUFFER);
+                // Skip the original modification, if any.
+                if (f.lists_modification_present_flag && total > 1 && r.bit())
+                    r.skip(counts[l] * nal_ceil_log2(total));
+                // Ours: the generated PPS always allows modification, and we
+                // spell out VA's RefPicList as positions in our initial list.
+                if (total > 1)
+                    b.bit(1); // ref_pic_list_modification_flag_lX
+                for (unsigned j = 0; j < counts[l]; ++j) {
+                    const unsigned index = slice.RefPicList[l][j];
+                    auto it = std::find(refs.list[l].begin(), refs.list[l].end(), index);
+                    require(it != refs.list[l].end(), "HEVC active reference missing from RPS", VA_STATUS_ERROR_INVALID_BUFFER);
+                    if (total > 1)
+                        b.bits(static_cast<uint32_t>(it - refs.list[l].begin()), nal_ceil_log2(total));
+                }
+            }
+            copied = r.position();
+        }
+    }
+    // The rest of the header is copied up to the byte_alignment() marker,
+    // which is the last 1 bit before slice data. VA's offset includes the
+    // two-byte NAL header and excludes emulation prevention bytes.
+    require(slice.slice_data_byte_offset >= 3, "missing HEVC slice data offset", VA_STATUS_ERROR_INVALID_BUFFER);
+    const size_t data = static_cast<size_t>(slice.slice_data_byte_offset - 2) * 8;
+    require(data <= r.size_bits() && data >= r.position(), "invalid HEVC slice data offset", VA_STATUS_ERROR_INVALID_BUFFER);
+    size_t alignment = data;
+    const size_t parsed = r.position();
+    do {
+        require(alignment > parsed && data - alignment < 8, "invalid HEVC byte alignment", VA_STATUS_ERROR_INVALID_BUFFER);
+        r.seek(--alignment);
+    } while (!r.bit());
+    r.seek(copied);
+    r.copy(b, alignment);
+    b.trailing_bits();
+    r.seek(data);
+    r.copy(b, r.size_bits());
+    append_escaped_nal(out, { static_cast<uint8_t>(header >> 8), static_cast<uint8_t>(header & 0xff) }, b);
+}
+
 class HEVC final : public Translator {
 public:
     explicit HEVC(VAProfile profile)
@@ -90,50 +347,56 @@ public:
 
     void translate(const Picture& picture, AccessUnit& out) override
     {
-        require(picture.parameters && !picture.slice_data.empty(), "HEVC picture without parameters or slices",
-            VA_STATUS_ERROR_INVALID_PARAMETER);
+        require(picture.parameters && !picture.slice_data.empty() && !picture.slice_parameters.empty(),
+            "HEVC picture without parameters or slices", VA_STATUS_ERROR_INVALID_PARAMETER);
         const auto& parameters = *static_cast<const VAPictureParameterBufferHEVC*>(picture.parameters);
-        // A stream that uses long-term references cannot be described by the
-        // generated SPS; refuse rather than decode with wrong references.
-        for (const auto& reference : parameters.ReferenceFrames) {
-            if (reference.flags & VA_PICTURE_HEVC_INVALID)
-                continue;
-            require(!(reference.flags & (VA_PICTURE_HEVC_LONG_TERM_REFERENCE | VA_PICTURE_HEVC_RPS_LT_CURR)),
-                "HEVC long-term references are not supported by the generated parameter sets",
-                VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
-        }
-        require(parameters.num_long_term_ref_pic_sps == 0, "HEVC lt_ref_pic_sps unsupported",
-            VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
+        const unsigned depth = profile_ == VAProfileHEVCMain10 ? 2 : 0;
+        require(parameters.pic_fields.bits.chroma_format_idc == 1 && !parameters.pic_fields.bits.separate_colour_plane_flag
+                && parameters.bit_depth_luma_minus8 == depth && parameters.bit_depth_chroma_minus8 == depth,
+            "HEVC stream does not match the profile's 4:2:0 bit depth", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+        require(!(parameters.CurrPic.flags & VA_PICTURE_HEVC_FIELD_PIC), "interlaced HEVC unsupported",
+            VA_STATUS_ERROR_UNIMPLEMENTED);
         const auto* matrix = static_cast<const VAIQMatrixBufferHEVC*>(picture.iq_matrix);
         if (matrix)
             scaling_ = *matrix; // VA may free the buffer after this picture
         const VAIQMatrixBufferHEVC* effective
             = parameters.pic_fields.bits.scaling_list_enabled_flag && scaling_ ? &*scaling_ : nullptr;
 
+        // The slice data buffer may hold every slice of the picture; each
+        // slice parameter set locates its own NAL inside it.
+        std::vector<std::pair<const uint8_t*, size_t>> nals;
+        const auto& [blob, blob_size] = picture.slice_data.front();
+        for (const void* raw : picture.slice_parameters) {
+            const auto* sp = static_cast<const VASliceParameterBufferHEVC*>(raw);
+            require(static_cast<size_t>(sp->slice_data_offset) + sp->slice_data_size <= blob_size,
+                "HEVC slice exceeds its data buffer", VA_STATUS_ERROR_INVALID_BUFFER);
+            const uint8_t* nal = blob + sp->slice_data_offset;
+            size_t nal_size = sp->slice_data_size;
+            const size_t prefix = start_code_length(nal, nal_size);
+            nals.emplace_back(nal + prefix, nal_size - prefix);
+        }
+        const unsigned first_type = (nals.front().first[0] >> 1) & 63;
+        require(started_ || (first_type >= 16 && first_type <= 21), "HEVC decode must start at an IRAP picture",
+            VA_STATUS_ERROR_DECODING_ERROR);
+        // RASL pictures after a CRA/BLA that opened the sequence reference a
+        // GOP the decoder never saw; the firmware produces nothing for them.
+        require(!(no_rasl_output_ && (first_type == 8 || first_type == 9)),
+            "HEVC RASL picture unavailable after random access", VA_STATUS_ERROR_DECODING_ERROR);
+
+        const References refs = collect_references(parameters);
         out.bytes.clear();
         out.deferred = false;
         for (const auto& nal : { hevc_vps(profile_, parameters), hevc_sps(profile_, parameters, effective),
                  hevc_pps(parameters) })
             out.bytes.insert(out.bytes.end(), nal.begin(), nal.end());
-        for (const auto& [data, size] : picture.slice_data) {
-            if (size == 0)
-                continue;
-            // Do not treat 00 02 as a prefix: it is a valid two-byte NAL header.
-            if (!has_start_code(data, size))
-                out.bytes.insert(out.bytes.end(), { 0, 0, 1 });
-            out.bytes.insert(out.bytes.end(), data, data + size);
+        for (size_t i = 0; i < nals.size(); ++i) {
+            const auto* sp = static_cast<const VASliceParameterBufferHEVC*>(picture.slice_parameters[i]);
+            rewrite_slice(nals[i].first, nals[i].second, *sp, parameters, refs, out.bytes);
         }
-        // IRAP: NoPicReordering is not a start marker; use the slice NAL type
-        // (16..23) of the first slice.
-        out.sequence_start = false;
-        if (!picture.slice_data.empty()) {
-            const auto [data, size] = picture.slice_data.front();
-            const size_t header = has_start_code(data, size) ? (data[2] == 1 ? 3 : 4) : 0;
-            if (size > header) {
-                const unsigned nal_type = (data[header] >> 1) & 0x3f;
-                out.sequence_start = nal_type >= 16 && nal_type <= 23;
-            }
-        }
+        out.sequence_start = first_type >= 16 && first_type <= 23;
+        if (first_type >= 16 && first_type <= 21)
+            no_rasl_output_ = !started_ || first_type <= 20;
+        started_ = true;
     }
 
     bool flush(AccessUnit&) override { return false; }
@@ -141,6 +404,8 @@ public:
 private:
     VAProfile profile_;
     std::optional<VAIQMatrixBufferHEVC> scaling_;
+    bool started_ = false;
+    bool no_rasl_output_ = false;
 };
 
 } // namespace
@@ -221,58 +486,12 @@ std::vector<uint8_t> hevc_sps(VAProfile profile, const VAPictureParameterBufferH
         writer.bit(picture.pic_fields.bits.pcm_loop_filter_disabled_flag);
     }
 
-    // Rebuild one explicit short-term RPS from the DPB and repeat it for
-    // every set the stream declared, so the slice's index stays valid. The
-    // RPS is the decoder's whole short-term reference picture set, not just
-    // what the current picture uses: every valid DPB entry VA lists without a
-    // "current" flag is a follow picture (kept for later pictures) and must
-    // be written with used_by_curr_pic = 0, or the decoder evicts it and the
-    // pictures that reference it later fail.
-    struct Entry {
-        int32_t poc;
-        bool used;
-    };
-    std::vector<Entry> negative, positive;
-    std::vector<int32_t> seen;
-    for (const auto& reference : picture.ReferenceFrames) {
-        if (reference.flags & VA_PICTURE_HEVC_INVALID)
-            continue;
-        if (reference.flags & VA_PICTURE_HEVC_LONG_TERM_REFERENCE)
-            continue;
-        if (std::find(seen.begin(), seen.end(), reference.pic_order_cnt) != seen.end())
-            continue;
-        seen.push_back(reference.pic_order_cnt);
-        const bool used = reference.flags & (VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE | VA_PICTURE_HEVC_RPS_ST_CURR_AFTER);
-        if (reference.pic_order_cnt < picture.CurrPic.pic_order_cnt)
-            negative.push_back({ reference.pic_order_cnt, used });
-        else if (reference.pic_order_cnt > picture.CurrPic.pic_order_cnt)
-            positive.push_back({ reference.pic_order_cnt, used });
-    }
-    std::sort(negative.begin(), negative.end(), [](auto& a, auto& b) { return a.poc > b.poc; });
-    std::sort(positive.begin(), positive.end(), [](auto& a, auto& b) { return a.poc < b.poc; });
-    const unsigned rps_count = std::min<unsigned>(64, picture.num_short_term_ref_pic_sets);
-    writer.ue(rps_count);
-    for (unsigned i = 0; i < rps_count; ++i) {
-        if (i != 0)
-            writer.bit(0); // inter_ref_pic_set_prediction_flag
-        writer.ue(std::min<size_t>(16, negative.size()));
-        writer.ue(std::min<size_t>(16, positive.size()));
-        int32_t previous = picture.CurrPic.pic_order_cnt;
-        for (size_t j = 0; j < negative.size() && j < 16; ++j) {
-            const int32_t delta = previous - negative[j].poc;
-            writer.ue(delta > 0 ? static_cast<uint32_t>(delta - 1) : 0);
-            writer.bit(negative[j].used ? 1 : 0);
-            previous = negative[j].poc;
-        }
-        previous = picture.CurrPic.pic_order_cnt;
-        for (size_t j = 0; j < positive.size() && j < 16; ++j) {
-            const int32_t delta = positive[j].poc - previous;
-            writer.ue(delta > 0 ? static_cast<uint32_t>(delta - 1) : 0);
-            writer.bit(positive[j].used ? 1 : 0);
-            previous = positive[j].poc;
-        }
-    }
-    writer.bit(0); // long_term_ref_pics_present_flag (rejected in translate)
+    // The original RPS definitions are not in VA. Declare none here and let
+    // every rewritten slice header carry its own explicit set.
+    writer.ue(0); // num_short_term_ref_pic_sets
+    writer.bit(picture.slice_parsing_fields.bits.long_term_ref_pics_present_flag);
+    if (picture.slice_parsing_fields.bits.long_term_ref_pics_present_flag)
+        writer.ue(0); // num_long_term_ref_pics_sps: slices carry theirs explicitly
     writer.bit(picture.slice_parsing_fields.bits.sps_temporal_mvp_enabled_flag);
     writer.bit(picture.pic_fields.bits.strong_intra_smoothing_enabled_flag);
     writer.bit(0); // vui_parameters_present_flag
@@ -323,23 +542,18 @@ std::vector<uint8_t> hevc_pps(const VAPictureParameterBufferHEVC& picture)
         writer.bit(picture.pic_fields.bits.loop_filter_across_tiles_enabled_flag);
     }
     writer.bit(picture.pic_fields.bits.pps_loop_filter_across_slices_enabled_flag);
-    // pps_deblocking_filter_control_present_flag is not in VA; it must be
-    // set whenever any of the three fields it guards is non-default, or the
-    // beta/tc offsets are silently lost.
-    const bool deblocking_control = picture.slice_parsing_fields.bits.deblocking_filter_override_enabled_flag
-        || picture.slice_parsing_fields.bits.pps_disable_deblocking_filter_flag
-        || picture.pps_beta_offset_div2 != 0 || picture.pps_tc_offset_div2 != 0;
-    writer.bit(deblocking_control);
-    if (deblocking_control) {
-        writer.bit(picture.slice_parsing_fields.bits.deblocking_filter_override_enabled_flag);
-        writer.bit(picture.slice_parsing_fields.bits.pps_disable_deblocking_filter_flag);
-        if (!picture.slice_parsing_fields.bits.pps_disable_deblocking_filter_flag) {
-            writer.se(std::clamp<int>(picture.pps_beta_offset_div2, -6, 6));
-            writer.se(std::clamp<int>(picture.pps_tc_offset_div2, -6, 6));
-        }
+    // pps_deblocking_filter_control_present_flag is not in VA; always
+    // present, so the offsets and override flag are never lost.
+    writer.bit(1);
+    writer.bit(picture.slice_parsing_fields.bits.deblocking_filter_override_enabled_flag);
+    writer.bit(picture.slice_parsing_fields.bits.pps_disable_deblocking_filter_flag);
+    if (!picture.slice_parsing_fields.bits.pps_disable_deblocking_filter_flag) {
+        writer.se(std::clamp<int>(picture.pps_beta_offset_div2, -6, 6));
+        writer.se(std::clamp<int>(picture.pps_tc_offset_div2, -6, 6));
     }
-    writer.bit(0); // pps_scaling_list_data_present_flag
-    writer.bit(picture.slice_parsing_fields.bits.lists_modification_present_flag);
+    writer.bit(0); // pps_scaling_list_data_present_flag (lists live in the SPS)
+    // Rewritten slice headers always spell their reference lists out.
+    writer.bit(1); // lists_modification_present_flag
     writer.ue(std::min<unsigned>(3, picture.log2_parallel_merge_level_minus2));
     writer.bit(picture.slice_parsing_fields.bits.slice_segment_header_extension_present_flag);
     writer.bit(0); // pps_extension_present_flag

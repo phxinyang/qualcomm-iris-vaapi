@@ -7,6 +7,13 @@ session_test = executable(
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('session', session_test)
 
+# Parameter-set bitstream round trips for the HEVC translator.
+hevc_parameter_sets_test = executable(
+  'hevc-parameter-sets-test',
+  'hevc-parameter-sets-test.cc',
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+test('hevc-parameter-sets', hevc_parameter_sets_test)
 
 # Hardware-independent regression guards for the browser-facing queue and
 # stable-export invariants. The integration probe above remains opt-in because

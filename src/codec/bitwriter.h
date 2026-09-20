@@ -118,6 +118,79 @@ private:
     unsigned bit_offset_ = 0;
 };
 
+// MSB-first reader over one NAL unit with emulation prevention removed.
+// Used to rewrite slice headers whose reference syntax cannot be
+// reproduced by a generated SPS/PPS.
+class BitReader {
+public:
+    // `nal` starts at the NAL header; `header_bytes` of it are copied
+    // verbatim, the rest has emulation prevention removed.
+    BitReader(const uint8_t* nal, size_t size, size_t header_bytes)
+    {
+        unsigned zeros = 0;
+        for (size_t i = 0; i < size; ++i) {
+            const uint8_t byte = nal[i];
+            if (i >= header_bytes && zeros == 2 && byte == 3) {
+                zeros = 0;
+                continue;
+            }
+            bytes_.push_back(byte);
+            zeros = byte == 0 ? zeros + 1 : 0;
+        }
+    }
+    size_t position() const { return position_; }
+    size_t size_bits() const { return bytes_.size() * 8; }
+    bool exhausted() const { return position_ >= size_bits(); }
+    void seek(size_t bit) { position_ = bit; }
+    void skip(size_t count) { position_ += count; }
+    unsigned bit()
+    {
+        const size_t p = position_++;
+        if (p >= size_bits())
+            return 0;
+        return (bytes_[p / 8] >> (7 - p % 8)) & 1u;
+    }
+    uint32_t bits(unsigned count)
+    {
+        uint32_t value = 0;
+        while (count--)
+            value = (value << 1) | bit();
+        return value;
+    }
+    uint32_t ue()
+    {
+        unsigned zeros = 0;
+        while (!bit() && zeros < 32)
+            ++zeros;
+        return ((1u << zeros) - 1) + bits(zeros);
+    }
+    int32_t se()
+    {
+        const uint32_t code = ue();
+        return (code & 1) ? static_cast<int32_t>((code + 1) / 2) : -static_cast<int32_t>(code / 2);
+    }
+    // Copy bits [position, end) into the writer.
+    void copy(BitWriter& writer, size_t end)
+    {
+        while (position_ < end && position_ < size_bits())
+            writer.bit(bit());
+    }
+    const uint8_t* data() const { return bytes_.data(); }
+    size_t size() const { return bytes_.size(); }
+
+private:
+    std::vector<uint8_t> bytes_;
+    size_t position_ = 0;
+};
+
+inline unsigned nal_ceil_log2(unsigned n)
+{
+    unsigned bits = 0;
+    for (unsigned v = n ? n - 1 : 0; v; v >>= 1)
+        ++bits;
+    return bits;
+}
+
 // Emit an Annex-B start code, the codec's NAL header bytes, and the payload
 // with emulation prevention applied.
 inline void append_escaped_nal(
