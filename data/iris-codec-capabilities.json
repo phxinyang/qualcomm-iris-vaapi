@@ -4,7 +4,7 @@
   "policy": {
     "production_va_requires_exact_evidence": true,
     "unknown_codec_action": "software-fallback",
-    "evidence": "TEST-RESULTS.md"
+    "evidence": "TEST-RESULTS.md (Phase 3, 5, 7 sections)"
   },
   "codecs": [
     {
@@ -46,11 +46,10 @@
       "fallback": "software",
       "rejected": [
         "long-term references (generated parameter sets cannot describe them)",
-        "interlaced"
+        "interlaced",
+        "12-bit"
       ],
-      "experimental": [
-        "Main10 is advertised when the node offers P010 and has not been separately qualified"
-      ]
+      "experimental": []
     },
     {
       "codec": "vp9",
@@ -72,9 +71,7 @@
         "12-bit",
         "RGB"
       ],
-      "experimental": [
-        "Profile2 is advertised when the node offers P010 and has not been separately qualified"
-      ]
+      "experimental": []
     },
     {
       "codec": "av1",

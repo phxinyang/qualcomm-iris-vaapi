@@ -59,8 +59,8 @@ Every switch the driver reads is listed here and read in exactly one place, `src
 | H.264 | Qualified (exact framemd5 matrix, structure matrix, 100-switch dynamic resolution, 120 s dual-context soak, Chrome B-frame zero dropped, Direct-path zero-copy under FFmpeg) |
 | HEVC Main | Qualified |
 | VP9 Profile 0 | Qualified (additionally 100 context recreations and Chrome with alt-ref) |
-| HEVC Main10 | Advertised when the node offers P010 but not separately qualified |
-| VP9 Profile 2 | Advertised when the node offers P010 but not separately qualified |
+| HEVC Main10 | Qualified (exact framemd5 at 10-bit, Chrome 1080p24 Main10 B-frame stream with the GPU copy engine on P010) |
+| VP9 Profile 2 | Qualified (exact framemd5 at 10-bit through FFmpeg) |
 | AV1 | Opt-in. The OBU rebuild is bit-exact (software oracle) but the firmware returns no CAPTURE buffer for hidden (show_frame=0) pictures and VA has no show_existing_frame call, so VA clients time out on streams with alt-ref frames. Not a driver bug. |
 
 ## Verifying

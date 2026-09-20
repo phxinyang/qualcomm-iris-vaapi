@@ -271,15 +271,18 @@ va export_surface id=<n> persistent=0|1
 Each phase is independently mergeable and leaves a shippable driver. Each
 ends with a tag. Gates are commands, not opinions.
 
-| Phase | Deliverable | Gate | Rollback |
+| Phase | Deliverable | Gate | Tag |
 | --- | --- | --- | --- |
-| 0 | Branch layout, baseline, acceptance script, this document, tests unpinned from source text | `sh test/run-static-checks.sh`; driver bytes identical; `TEST-RESULTS.md` baseline recorded (done) | tag `pre-rebuild-20260920` |
-| 1 | Kernel: both Iris patches applied to `sheng-7.2.2`, `qcom-iris.ko` rebuilt and installed with the previous module kept | `v4l2-ctl --list-ctrls` shows `display_delay*`; CAPTURE max 64; acceptance H.264+HEVC pass on the unchanged driver; boot ID unchanged | restore saved `.ko.zst`, `depmod`, reboot |
-| 2 | `src/iris/` core (Device, Session, slots, publish, alloc) with FakeDevice unit tests; not yet wired | `meson test` unit suite green on host; scripted sequences: decode-order, display-order timeout drain, DRC, LAST, ERROR marker, EBUSY retry, EIO fail | none needed (unwired) |
-| 3 | VA glue rewired to the new core for H.264 + HEVC; old `context.cc`/`surface.cc` stateful paths, watchdog, retired contexts, env knobs deleted | host units; `iris-matrix.sh` 48/48 exact framemd5 both codecs; structure matrix; `iris-dynamic-resolution.sh`; `iris-concurrency-soak.sh`; browser acceptance both codecs on patched **and** unpatched module; FFmpeg trace shows `publish=direct` and zero copies | tag `phase-2` |
-| 4 | GPU blit copy engine for persistent exports | acceptance; GPU-process CPU time per frame lower than CPU copy; `V4L2_VA_COPY=cpu` still passes | `V4L2_VA_COPY=cpu` default flip, tag `phase-3` |
-| 5 | VP9 (decode-order, superframe for invisible frames) and AV1 (OBU translator) on the new core, advertised only when the matrix passes | framemd5 vs software for both; 100 context recreations and 100 DRC switches under the experiment guard with boot ID unchanged; capability JSON updated from evidence | keep profiles unadvertised, tag `phase-4` |
-| 6 | Delete stateless/request-API inheritance, MPEG2/VP8, gstreamer dependency, media-controller walk; harness trim; packaging and docs | static checks; package build; acceptance from the installed package | tag `phase-5` |
+| 0 | Branch layout, baseline, acceptance script, this document, tests unpinned from source text | static checks; driver bytes identical; baseline in `TEST-RESULTS.md` | `pre-rebuild-20260920` |
+| 1 | Kernel: both Iris patches on `sheng-7.2.2`, `qcom-iris.ko` rebuilt and installed with rollback kept | `display_delay*` controls present; acceptance H.264+HEVC on the unchanged driver; boot ID unchanged | (module only; `ROLLBACK.sh` under the lab dir) |
+| 2 | `src/iris/` core with the FakeDevice unit suite | `meson test` green on host | (in `phase-3-core-rewired`) |
+| 3 | VA glue on the core for H.264 + HEVC, GPU blit engine, old tree deleted | host units; matrix 48/48 both codecs; structure matrix; DRC; 120 s soak; Chrome both codecs; FFmpeg `publish=direct` | `phase-3-core-rewired` |
+| 5 | VP9 qualified and advertised; AV1 OBU rebuild bit-exact but opt-in (firmware returns no CAPTURE for hidden frames) | VP9: matrix, 100 context recreations, 100 DRC switches, Chrome with alt-ref, all guarded | `phase-5-vp9-qualified` |
+| 6 | Harness/packaging/docs trimmed to the shipped tree | static checks; RPM built and installed; acceptance from the installed package for H.264/HEVC/VP9 | `phase-6-packaged` |
+| 7 | 10-bit (HEVC Main10, VP9 Profile 2) qualified; Fluster conformance on the new driver; module identity in provenance | 10-bit framemd5 both codecs; Chrome Main10; Fluster H.264/HEVC driver-path counts recorded against the old tree's | `phase-7-conformance` |
+
+Phase 4 (GPU copy engine) was delivered inside Phase 3; the numbering above
+is the one the tags carry.
 
 Research track (unscheduled): client-owned CAPTURE buffers. Acceptance test
 before any code: a standalone V4L2 program that, under decode-order output,

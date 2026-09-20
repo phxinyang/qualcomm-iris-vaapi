@@ -65,6 +65,17 @@ def validate_source_identity(commit: str, digest: str, dirty: str) -> bool:
     return dirty == "1"
 
 
+def iris_module_identity() -> dict:
+    """SHA-256 and path of the installed qcom-iris module, if any."""
+    root = Path("/lib/modules") / platform.release()
+    for candidate in sorted(root.glob("**/qcom-iris.ko*")) if root.is_dir() else []:
+        try:
+            return {"path": str(candidate), "sha256": sha256(candidate)}
+        except OSError:
+            continue
+    return {}
+
+
 def generate(args: argparse.Namespace) -> None:
     artifact = args.artifact.resolve()
     build_dir = args.build_dir.resolve()
@@ -90,6 +101,10 @@ def generate(args: argparse.Namespace) -> None:
             "kernel_release": platform.release(),
             "kernel": command_output(["uname", "-srvm"]),
             "machine": platform.machine(),
+            # The Iris kernel module is part of the qualified contract (the
+            # decode-order patch lives there), so its identity travels with
+            # every hardware result. Absent on hosts without the module.
+            "iris_module": iris_module_identity(),
         },
         "artifact": {
             "path": str(artifact),
