@@ -283,8 +283,17 @@ for codec in $codecs; do
             run_va_new_contexts h264 mkv
             ;;
         vp9)
-            echo 'FAIL VP9 dynamic qualification is disabled: target kernel/firmware reboots' >&2
-            exit 1
+            # VP9 VA is advertised only under V4L2_VA_EXPERIMENTAL_PROFILES
+            # until this scenario and the churn loop pass under the guard on
+            # the decode-order module (docs/architecture.md §9, Phase 5).
+            # Run it through scripts/iris-experiment-guard.sh.
+            require_format VP90 vp9
+            va_env="$va_env V4L2_VA_EXPERIMENTAL_PROFILES=1"
+            make_concat_stream vp9 "${IRIS_VP9_ENCODER:-libvpx-vp9}" webm \
+                '-b:v 300k -g 1 -lag-in-frames 0 -auto-alt-ref 0 -pix_fmt yuv420p'
+            run_native_baseline vp9 vp9parse v4l2vp9dec webm
+            run_va_single_process vp9
+            run_va_new_contexts vp9 webm
             ;;
         *)
             echo "FAIL unknown IRIS_DYNAMIC_CODECS entry: $codec" >&2
