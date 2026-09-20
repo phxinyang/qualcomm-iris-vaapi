@@ -317,10 +317,32 @@ start_once_job() {
     printf '%s\n' "$!" >>"$pid_file"
 }
 
+# Media generation and the preflight decodes run the CPU encoder flat out and
+# leave the big cores well above their idle temperature. The thermal guard is
+# there to catch heat the *decoder* produces, so let the SoC settle below the
+# limit with margin before a scenario's first sample, instead of failing a
+# soak on the encoder's tail.
+wait_for_cooldown() {
+    settle=$((max_temperature - 15000))
+    deadline=$(( $(date +%s) + ${IRIS_SOAK_COOLDOWN_MAX_SECONDS:-180} ))
+    while :; do
+        hottest=$(temperature_snapshot "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            | awk -F, 'BEGIN { max=-999999 } $4+0 > max { max=$4+0 } END { print max }')
+        [ "$hottest" -gt "$settle" ] || break
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "FAIL SoC did not cool below $settle millidegrees C before the scenario (hottest=$hottest)" >&2
+            return 1
+        fi
+        sleep 5
+    done
+    printf 'cooldown settled hottest=%s limit=%s\n' "$hottest" "$max_temperature"
+}
+
 run_scenario() {
     scenario_name=$1
     rm -f "$pid_file" "$root/$scenario_name-environment-failure"
     : >"$pid_file"
+    wait_for_cooldown
     case "$scenario_name" in
         dual-h264)
             scenario_jobs='dual-h264-a dual-h264-b'
