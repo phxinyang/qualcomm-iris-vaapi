@@ -37,21 +37,35 @@ uint32_t fourcc_for(uint32_t rt_format)
 }
 
 // Wait for the surface's picture outside the driver mutex, then report.
-VAStatus wait_for(DriverData& d, const std::shared_ptr<Context>& owner, const std::shared_ptr<Surface>& s)
+// `session` is the owner's session captured under the lock (may be null when
+// the owner is gone); holding it by value keeps it alive for the wait.
+VAStatus wait_for(DriverData& d, std::shared_ptr<iris::Session> session, const std::shared_ptr<Surface>& s)
 {
     if (!s->rendering()) {
         iris::require(!s->failed, "surface decode failed", VA_STATUS_ERROR_DECODING_ERROR);
         return VA_STATUS_SUCCESS;
     }
-    iris::require(owner && owner->session, "rendering surface has no live session", VA_STATUS_ERROR_INVALID_SURFACE);
+    if (!session) {
+        // The owner was destroyed between our two reads. destroyContext
+        // drains before it drops the context, so the target is settled now.
+        iris::require(!s->rendering(), "rendering surface has no live session", VA_STATUS_ERROR_INVALID_SURFACE);
+        iris::require(!s->failed, "surface decode failed", VA_STATUS_ERROR_DECODING_ERROR);
+        return VA_STATUS_SUCCESS;
+    }
     try {
-        owner->session->wait(s->target);
+        session->wait(s->target);
     } catch (const iris::Error& error) {
         s->failed = true;
         d.trace("va sync failed surface status=%d: %s", error.status, error.what());
         throw;
     }
     return VA_STATUS_SUCCESS;
+}
+
+std::shared_ptr<iris::Session> session_of(DriverData& d, const Surface& s)
+{
+    auto owner = owner_of(d, s);
+    return owner ? owner->session : nullptr;
 }
 
 } // namespace
@@ -121,7 +135,7 @@ VAStatus destroySurfaces(VADriverContextP ctx, VASurfaceID* ids, int count)
     return guarded(ctx, "destroySurfaces", [&] {
         auto& d = data(ctx);
         std::vector<std::shared_ptr<Surface>> doomed;
-        std::vector<std::shared_ptr<Context>> owners;
+        std::vector<std::shared_ptr<iris::Session>> sessions;
         {
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
             for (int i = 0; i < count; ++i) {
@@ -131,7 +145,7 @@ VAStatus destroySurfaces(VADriverContextP ctx, VASurfaceID* ids, int count)
                 iris::require(it->second->acquired_handles == 0, "surface has an acquired handle",
                     VA_STATUS_ERROR_SURFACE_BUSY);
                 doomed.push_back(it->second);
-                owners.push_back(owner_of(d, *it->second));
+                sessions.push_back(session_of(d, *it->second));
                 d.surfaces.erase(it);
             }
         }
@@ -139,8 +153,8 @@ VAStatus destroySurfaces(VADriverContextP ctx, VASurfaceID* ids, int count)
         // and may complete a deferred reconfigure.
         for (size_t i = 0; i < doomed.size(); ++i) {
             auto& s = doomed[i];
-            if (owners[i] && owners[i]->session)
-                owners[i]->session->release(s->target);
+            if (sessions[i])
+                sessions[i]->release(s->target);
             if (s->stable && d.copier)
                 d.copier->forget(s->stable->id());
             if (s->target.frame && d.copier)
@@ -156,13 +170,13 @@ VAStatus syncSurface(VADriverContextP ctx, VASurfaceID id)
     return guarded(ctx, "syncSurface", [&] {
         auto& d = data(ctx);
         std::shared_ptr<Surface> s;
-        std::shared_ptr<Context> owner;
+        std::shared_ptr<iris::Session> session;
         {
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
             s = surface(d, id);
-            owner = owner_of(d, *s);
+            session = session_of(d, *s);
         }
-        return wait_for(d, owner, s);
+        return wait_for(d, std::move(session), s);
     });
 }
 
@@ -171,15 +185,15 @@ VAStatus querySurfaceStatus(VADriverContextP ctx, VASurfaceID id, VASurfaceStatu
     return guarded(ctx, "querySurfaceStatus", [&] {
         auto& d = data(ctx);
         std::shared_ptr<Surface> s;
-        std::shared_ptr<Context> owner;
+        std::shared_ptr<iris::Session> session;
         {
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
             s = surface(d, id);
-            owner = owner_of(d, *s);
+            session = session_of(d, *s);
         }
         // A client that polls instead of syncing still drives completions.
-        if (s->rendering() && owner && owner->session)
-            owner->session->service();
+        if (s->rendering() && session)
+            session->service();
         *status = s->rendering() ? VASurfaceRendering : VASurfaceReady;
         return VA_STATUS_SUCCESS;
     });
@@ -222,15 +236,15 @@ VAStatus exportSurfaceHandle(VADriverContextP ctx, VASurfaceID id, uint32_t mem_
         iris::require(mem_type == VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2, "export requires DRM_PRIME_2",
             VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE);
         std::shared_ptr<Surface> s;
-        std::shared_ptr<Context> owner;
+        std::shared_ptr<iris::Session> session;
         {
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
             s = surface(d, id);
-            owner = owner_of(d, *s);
+            session = session_of(d, *s);
         }
         // The client wants pixels: finish the picture first.
         if (s->rendering())
-            wait_for(d, owner, s);
+            wait_for(d, std::move(session), s);
 
         int fd = -1;
         iris::Layout layout;

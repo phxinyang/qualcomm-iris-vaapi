@@ -75,7 +75,9 @@ struct Context {
     VAProfile profile;
     unsigned width = 0, height = 0;
     std::unique_ptr<iris::codec::Translator> translator;
-    std::unique_ptr<iris::Session> session;
+    // Shared so a vaSyncSurface in flight on another thread keeps the
+    // session alive while vaDestroyContext drops the context's reference.
+    std::shared_ptr<iris::Session> session;
     std::vector<VASurfaceID> render_targets;
     // vaBeginPicture .. vaEndPicture state.
     VASurfaceID current = VA_INVALID_ID;

@@ -93,7 +93,7 @@ VAStatus createContext(VADriverContextP ctx, VAConfigID config, int width, int h
         sc.surface_count = static_cast<unsigned>(std::max(count, 0));
         // Opening the node and OUTPUT STREAMON happen here, outside the
         // table lock. SOURCE_CHANGE and CAPTURE follow the first AU.
-        c->session = std::make_unique<iris::Session>(iris::open_device(d.options.video_path), sc, d.options,
+        c->session = std::make_shared<iris::Session>(iris::open_device(d.options.video_path), sc, d.options,
             d.copier.get(), d.trace);
 
         std::lock_guard<std::recursive_mutex> lock(d.mutex);
@@ -122,7 +122,10 @@ VAStatus destroyContext(VADriverContextP ctx, VAContextID id)
         {
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
             c = context(d, id);
-            d.contexts.erase(id);
+            // The context stays in the table until its session has drained:
+            // a vaSyncSurface arriving from another thread (FFmpeg's filter
+            // thread downloads while the decoder thread tears down) must
+            // still find the session and wait on it.
             for (auto& [sid, s] : d.surfaces)
                 if (s->owner == id)
                     owned.push_back(s);
@@ -154,6 +157,10 @@ VAStatus destroyContext(VADriverContextP ctx, VAContextID id)
         // every target lets go of its frame so REQBUFS(0) can run when the
         // session is destroyed.
         c->session->finish();
+        {
+            std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            d.contexts.erase(id);
+        }
         for (auto& s : owned) {
             if (s->rendering())
                 c->session->release(s->target);
