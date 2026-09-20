@@ -1017,3 +1017,36 @@ AV1 therefore stays behind `V4L2_VA_EXPERIMENTAL_PROFILES=1`. Closing it
 needs either firmware/kernel support for returning hidden pictures (a
 `DISPLAY_DELAY`-style control for AV1) or a VA client contract that
 tolerates missing completions; neither is a driver change.
+
+## Phase 6: trimmed tree, packaged, installed (2026-09-20)
+
+The tree now contains only what the rebuilt driver ships (commit `069a58c`
+and the docs pass `25dd21b`). Host gates: `meson test` 13/13, static checks
+pass, `ldd -r` clean, no gstreamer/udev linkage.
+
+Fedora RPM built on the target from `git archive` of HEAD through
+`packaging/fedora/libva-v4l2-iris.spec` (EGL/GLESv2/GBM build deps, one
+desktop entry), installed with `dnf reinstall`, `rpm -V` clean. Installed
+driver SHA-256 `fe3acad292835061460f6455d080c368b5319ce10aad6ba0786eb37afe354c50`.
+`vainfo` on the installed driver lists H.264 CBP/Main/High, HEVC Main/Main10,
+VP9 Profile 0/2 and no AV1.
+
+Acceptance from the installed package, no build-tree override, no
+`V4L2_VA_*` switch, boot ID `4944865b…` unchanged:
+
+| Clip (30 s window) | Decoder | Platform | Frames / dropped | Node holder |
+| --- | --- | --- | --- | --- |
+| H.264 1080p24 B-frames | `VaapiVideoDecoder` | true | 718 / 4 | `--type=gpu-process` |
+| HEVC 1080p24 B-frames | `VaapiVideoDecoder` | true | 720 / 0 | `--type=gpu-process` |
+| VP9 1080p24 alt-ref | `VaapiVideoDecoder` | true | 718 / 0 | `--type=gpu-process` |
+
+The four dropped H.264 frames were the only non-zero drop count in the
+rebuild series; that run shared the tablet with the RPM install's
+post-transaction work. A rerun on the idle tablet from the same installed
+package: `VaapiVideoDecoder`, platform=true, 720 / 0.
+
+Three stale per-user desktop entries from earlier installs
+(`chromium-iris-v4l2`, `chromium-iris-vulkan-webgpu`,
+`google-chrome-iris-vulkan-webgpu`) were removed from
+`~/.local/share/applications` on the target; the package ships only
+`google-chrome-iris-v4l2.desktop`.
