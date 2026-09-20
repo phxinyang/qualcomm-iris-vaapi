@@ -157,13 +157,14 @@ VAStatus destroyContext(VADriverContextP ctx, VAContextID id)
         for (auto& s : owned) {
             if (s->rendering())
                 c->session->release(s->target);
-            // Completed Direct frames stay valid for display until the
-            // surface is reused or destroyed: they own their fd. But the
-            // session's pool is about to close, so they are the last
-            // reference to the slot; nothing else can requeue them.
-            if (s->target.frame && d.copier)
-                d.copier->forget(s->target.frame->id());
-            s->target.frame.reset();
+            // A completed Direct frame stays with its surface: the Frame
+            // owns an exported fd, and vb2 orphans exported buffers when
+            // the queue is freed, so the pixels remain readable after the
+            // session closes. FFmpeg downloads the last pictures of a
+            // resolution segment after destroying that segment's context.
+            // The frame is simply the last reference to its slot now;
+            // nothing can requeue it, and it is dropped when the surface is
+            // reused or destroyed.
             s->owner = VA_INVALID_ID;
         }
         c->session.reset();
