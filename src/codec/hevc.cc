@@ -221,19 +221,32 @@ std::vector<uint8_t> hevc_sps(VAProfile profile, const VAPictureParameterBufferH
         writer.bit(picture.pic_fields.bits.pcm_loop_filter_disabled_flag);
     }
 
-    // Rebuild one explicit short-term RPS from the DPB flags and repeat it
-    // for every set the stream declared, so the slice's index is valid.
+    // Rebuild one explicit short-term RPS from the DPB and repeat it for
+    // every set the stream declared, so the slice's index stays valid. The
+    // RPS is the decoder's whole short-term reference picture set, not just
+    // what the current picture uses: every valid DPB entry VA lists without a
+    // "current" flag is a follow picture (kept for later pictures) and must
+    // be written with used_by_curr_pic = 0, or the decoder evicts it and the
+    // pictures that reference it later fail.
     struct Entry {
         int32_t poc;
+        bool used;
     };
     std::vector<Entry> negative, positive;
+    std::vector<int32_t> seen;
     for (const auto& reference : picture.ReferenceFrames) {
         if (reference.flags & VA_PICTURE_HEVC_INVALID)
             continue;
-        if (reference.flags & VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE)
-            negative.push_back({ reference.pic_order_cnt });
-        else if (reference.flags & VA_PICTURE_HEVC_RPS_ST_CURR_AFTER)
-            positive.push_back({ reference.pic_order_cnt });
+        if (reference.flags & VA_PICTURE_HEVC_LONG_TERM_REFERENCE)
+            continue;
+        if (std::find(seen.begin(), seen.end(), reference.pic_order_cnt) != seen.end())
+            continue;
+        seen.push_back(reference.pic_order_cnt);
+        const bool used = reference.flags & (VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE | VA_PICTURE_HEVC_RPS_ST_CURR_AFTER);
+        if (reference.pic_order_cnt < picture.CurrPic.pic_order_cnt)
+            negative.push_back({ reference.pic_order_cnt, used });
+        else if (reference.pic_order_cnt > picture.CurrPic.pic_order_cnt)
+            positive.push_back({ reference.pic_order_cnt, used });
     }
     std::sort(negative.begin(), negative.end(), [](auto& a, auto& b) { return a.poc > b.poc; });
     std::sort(positive.begin(), positive.end(), [](auto& a, auto& b) { return a.poc < b.poc; });
@@ -248,14 +261,14 @@ std::vector<uint8_t> hevc_sps(VAProfile profile, const VAPictureParameterBufferH
         for (size_t j = 0; j < negative.size() && j < 16; ++j) {
             const int32_t delta = previous - negative[j].poc;
             writer.ue(delta > 0 ? static_cast<uint32_t>(delta - 1) : 0);
-            writer.bit(1);
+            writer.bit(negative[j].used ? 1 : 0);
             previous = negative[j].poc;
         }
         previous = picture.CurrPic.pic_order_cnt;
         for (size_t j = 0; j < positive.size() && j < 16; ++j) {
             const int32_t delta = positive[j].poc - previous;
             writer.ue(delta > 0 ? static_cast<uint32_t>(delta - 1) : 0);
-            writer.bit(1);
+            writer.bit(positive[j].used ? 1 : 0);
             previous = positive[j].poc;
         }
     }
@@ -310,8 +323,12 @@ std::vector<uint8_t> hevc_pps(const VAPictureParameterBufferHEVC& picture)
         writer.bit(picture.pic_fields.bits.loop_filter_across_tiles_enabled_flag);
     }
     writer.bit(picture.pic_fields.bits.pps_loop_filter_across_slices_enabled_flag);
+    // pps_deblocking_filter_control_present_flag is not in VA; it must be
+    // set whenever any of the three fields it guards is non-default, or the
+    // beta/tc offsets are silently lost.
     const bool deblocking_control = picture.slice_parsing_fields.bits.deblocking_filter_override_enabled_flag
-        || picture.slice_parsing_fields.bits.pps_disable_deblocking_filter_flag;
+        || picture.slice_parsing_fields.bits.pps_disable_deblocking_filter_flag
+        || picture.pps_beta_offset_div2 != 0 || picture.pps_tc_offset_div2 != 0;
     writer.bit(deblocking_control);
     if (deblocking_control) {
         writer.bit(picture.slice_parsing_fields.bits.deblocking_filter_override_enabled_flag);
