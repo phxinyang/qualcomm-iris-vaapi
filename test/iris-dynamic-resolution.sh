@@ -83,7 +83,7 @@ check_exact_context_count() {
     trace=$1
     label=$2
     expected=$3
-    contexts=$(grep -c 'va create_context done' "$trace" || true)
+    contexts=$(grep -c 'va create_context id=' "$trace" || true)
     if [ "$contexts" -ne "$expected" ]; then
         echo "FAIL $label created $contexts VA contexts; expected=$expected" >&2
         exit 1
@@ -208,22 +208,27 @@ run_va_single_process() {
         2>"$trace"
     check_frame_count "$va_md5" "$expected_frames" "$codec VA single-process"
     test/iris-eos-check.sh "$trace" "$expected_frames"
-    contexts=$(grep -c 'va create_context done' "$trace" || true)
+    contexts=$(grep -c 'va create_context id=' "$trace" || true)
     if [ "$contexts" -lt 1 ]; then
         echo "FAIL $codec VA single-process did not create a VA context" >&2
         exit 1
     fi
-    init_failures=$(grep -Ec 'Unable to initialize V4L2 queues|stateful resize initialize failed' "$trace" || true)
+    init_failures=$(grep -c 'session failed:' "$trace" || true)
     if [ "$init_failures" -ne 0 ]; then
         echo "FAIL $codec VA single-process context initialization failures=$init_failures" >&2
+        exit 1
+    fi
+    reconfigures=$(grep -c 'session reconfigure -> ' "$trace" || true)
+    if [ "$reconfigures" -lt 1 ]; then
+        echo "FAIL $codec VA single-process did not reconfigure (reconfigures=$reconfigures)" >&2
         exit 1
     fi
     if ! cmp -s "$software_md5" "$va_md5"; then
         echo "FAIL $codec VA single-process pixels differ from software output" >&2
         exit 1
     fi
-    printf 'PASS %s va-single-process frames=%s switches=%s contexts=%s\n' \
-        "$codec" "$expected_frames" "$switches" "$contexts"
+    printf 'PASS %s va-single-process frames=%s switches=%s contexts=%s reconfigures=%s\n' \
+        "$codec" "$expected_frames" "$switches" "$contexts" "$reconfigures"
 }
 
 run_va_new_contexts() {

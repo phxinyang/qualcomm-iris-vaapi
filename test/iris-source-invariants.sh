@@ -31,13 +31,13 @@ fi
 # Normal CAPTURE completion traces include error=0. Do not let a broad
 # "capture.*error" matcher reject every successfully decoded frame.
 if grep -q "capture\.\*error\\\\|V4L2_BUF_FLAG_ERROR" "$structure_matrix" \
-    || ! grep -q 'capture\.\*error=\[1-9\]' "$structure_matrix"; then
+    || ! grep -q 'capture error index=' "$structure_matrix"; then
     echo "FAIL Iris structure matrix treats successful CAPTURE logs as errors" >&2
     exit 1
 fi
 
 if grep -q "capture\[\^:\]\*error|undefined symbol" "$concurrency_soak" \
-    || ! grep -q 'capture\[\^:\]\*error=\[1-9\]' "$concurrency_soak"; then
+    || ! grep -q 'capture error index=' "$concurrency_soak"; then
     echo "FAIL concurrency soak treats successful CAPTURE logs as errors" >&2
     exit 1
 fi

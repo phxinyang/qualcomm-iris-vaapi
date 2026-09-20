@@ -13,23 +13,58 @@ trap 'rm -rf "$scratch"' EXIT HUP INT TERM
 log="$scratch/multi-context.trace"
 
 cat >"$log" <<'EOF'
-va create_context done id=0 ptr=0x1
-stateful flush batch=0 surfaces=2
-v4l2 dq type=10 index=0 flags=0x0 last=0 ts=1.0 seq=0
-v4l2 dq type=9 index=0 flags=0x0 last=0 ts=1.0 seq=0
-v4l2 dq type=9 index=1 flags=0x0 last=0 ts=2.0 seq=1
-v4l2 decoder STOP
-v4l2 dq type=9 index=0 flags=0x0 last=1 ts=0.0 seq=2
-stateful drain complete last=1 output=0 batches=0
-va create_context done id=0 ptr=0x2
-stateful flush batch=0 surfaces=2
-v4l2 dq type=10 index=0 flags=0x0 last=0 ts=3.0 seq=0
-v4l2 dq type=9 index=0 flags=0x0 last=0 ts=3.0 seq=0
-v4l2 dq type=9 index=1 flags=0x0 last=0 ts=4.0 seq=1
-v4l2 decoder STOP
-v4l2 dq type=9 index=0 flags=0x0 last=1 ts=0.0 seq=2
-stateful drain complete last=1 output=0 batches=0
+va create_context id=0
+submit token=1
+submit token=2
+capture token=1 index=0 flags=0 publish=direct
+capture token=2 index=1 flags=0 publish=direct
+capture last
+drain complete last=1
+va create_context id=1
+submit token=3
+submit token=4
+capture token=3 index=0 flags=0 publish=direct
+capture token=4 index=1 flags=0 publish=direct
+capture last
+drain complete last=1
 EOF
 
-sh "$root/test/iris-eos-check.sh" "$log" 4
+sh "$root/test/iris-eos-check.sh" "$log" 4 || exit 1
+
+cat >"$log" <<'EOF'
+va create_context id=0
+submit token=1
+capture token=1 index=0 flags=0 publish=direct
+capture last
+EOF
+if sh "$root/test/iris-eos-check.sh" "$log" 1 2>/dev/null; then
+    echo "FAIL allowed missing drain" >&2
+    exit 1
+fi
+
+cat >"$log" <<'EOF'
+va create_context id=0
+submit token=1
+submit token=2
+capture token=1 index=0 flags=0 publish=direct
+capture last
+drain complete last=1
+EOF
+if sh "$root/test/iris-eos-check.sh" "$log" 2 2>/dev/null; then
+    echo "FAIL allowed missing completion" >&2
+    exit 1
+fi
+
+cat >"$log" <<'EOF'
+va create_context id=0
+submit token=1
+capture token=1 index=0 flags=0 publish=error
+capture last
+drain complete last=1
+EOF
+if sh "$root/test/iris-eos-check.sh" "$log" 1 2>/dev/null; then
+    echo "FAIL allowed capture error" >&2
+    exit 1
+fi
+
 echo 'PASS multi-context EOS checker'

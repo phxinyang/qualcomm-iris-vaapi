@@ -16,16 +16,16 @@ if [ ! -r "$log" ]; then
     exit 2
 fi
 
-destroyed=$(grep -a -c 'va destroy_context' "$log" || true)
-reaped=$(grep -a -c 'va reap retired context' "$log" || true)
+destroyed=$(grep -a -c 'va destroy_context id=' "$log" || true)
+finished=$(grep -a -c 'session finish' "$log" || true)
 
 if [ "$destroyed" -eq 0 ]; then
     echo "FAIL retired_contexts_destroyed=0 (expected a context teardown)" >&2
     exit 1
 fi
-if [ "$reaped" -ne "$destroyed" ]; then
-    echo "FAIL retired_contexts_destroyed=$destroyed reaped=$reaped (expected every destroyed context reaped)" >&2
+if [ "$finished" -lt "$destroyed" ]; then
+    echo "FAIL retired_contexts_destroyed=$destroyed finished=$finished (expected every destroyed context logged session finish)" >&2
     exit 1
 fi
 
-echo "PASS retired_contexts_destroyed=$destroyed reaped=$reaped"
+echo "PASS retired_contexts_destroyed=$destroyed finished=$finished"

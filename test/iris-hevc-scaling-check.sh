@@ -26,7 +26,7 @@ fi
 actual=$(grep -c '^[0-9]' "$root/hardware.md5" || true)
 [ "$actual" -eq "$frames" ] || { echo "FAIL HEVC IQ frames=$actual expected=$frames" >&2; exit 1; }
 diff -u "$root/software.md5" "$root/hardware.md5"
-if grep -Eq 'v4l2 dq ERROR|Timed out waiting|stateful timestamp miss|Failed to upload decode parameters' "$root/decode.trace"; then
+if grep -Eq 'publish=error|capture error index=|sync timeout token=|publish=drop|Failed to upload decode parameters' "$root/decode.trace"; then
     echo 'FAIL HEVC IQ decoder diagnostics' >&2
     exit 1
 fi

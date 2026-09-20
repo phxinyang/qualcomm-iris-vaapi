@@ -17,19 +17,12 @@ if [ ! -r "$log" ]; then
     exit 2
 fi
 
-timeouts=$(grep -c 'Timed out waiting for surface' "$log" || true)
-# The terminal CAPTURE LAST marker has timestamp 0 by contract and has no VA
-# surface to resolve. Only non-terminal timestamp misses are regressions.
-misses=$(awk '/stateful timestamp miss/ && $0 !~ /ts=0[.]000000/ { count++ } END { print count + 0 }' "$log")
-drain=$(grep -c 'stateful drain complete last=1' "$log" || true)
+timeouts=$(grep -c 'sync timeout token=' "$log" || true)
+drain=$(grep -c 'drain complete last=1' "$log" || true)
 
 fail=0
 if [ "$timeouts" -ne 0 ]; then
     echo "FAIL teardown_timeouts=$timeouts (expected 0)" >&2
-    fail=1
-fi
-if [ "$misses" -ne 0 ]; then
-    echo "FAIL teardown_timestamp_misses=$misses (expected 0)" >&2
     fail=1
 fi
 if [ "$drain" -eq 0 ]; then
@@ -41,4 +34,4 @@ if [ "$fail" -ne 0 ]; then
     exit 1
 fi
 
-echo "PASS teardown_timeouts=0 timestamp_misses=0 stateful_drain_complete=$drain"
+echo "PASS teardown_timeouts=0 stateful_drain_complete=$drain"
