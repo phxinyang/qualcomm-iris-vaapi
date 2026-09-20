@@ -429,6 +429,184 @@ AV1SequenceState av1_sequence_state(const VADecPictureParameterBufferAV1& pictur
     return state;
 }
 
+namespace {
+
+// --- global_motion_params() (spec 5.9.24 - 5.9.26) --------------------------
+//
+// VA hands the driver the *decoded* gm_params per reference (wmmat), which is
+// exactly the value the decoder ends up with. The bitstream, though, codes
+// each parameter as a subexp-coded delta against the primary reference
+// frame's parameter (or the default when there is no primary reference), so
+// the writer inverts decode_signed_subexp_with_ref().
+
+constexpr unsigned WARPEDMODEL_PREC_BITS = 16;
+constexpr unsigned GM_ABS_TRANS_BITS = 12;
+constexpr unsigned GM_ABS_TRANS_ONLY_BITS = 9;
+constexpr unsigned GM_ABS_ALPHA_BITS = 12;
+constexpr unsigned GM_ALPHA_PREC_BITS = 15;
+constexpr unsigned GM_TRANS_PREC_BITS = 6;
+constexpr unsigned GM_TRANS_ONLY_PREC_BITS = 3;
+constexpr int32_t WARPEDMODEL_ONE = 1 << WARPEDMODEL_PREC_BITS;
+
+enum WarpType { IDENTITY = 0, TRANSLATION = 1, ROTZOOM = 2, AFFINE = 3 };
+
+void default_gm_params(int32_t out[6])
+{
+    out[0] = 0;
+    out[1] = 0;
+    out[2] = WARPEDMODEL_ONE;
+    out[3] = 0;
+    out[4] = 0;
+    out[5] = WARPEDMODEL_ONE;
+}
+
+// Forward re-centering per spec inverse_recenter(r, v):
+//   if v > 2r: v; else if v odd: r - (v+1)/2; else r + v/2
+// The writer needs the inverse: given target t, find v.
+unsigned recenter_forward(unsigned r, unsigned t)
+{
+    if (t > 2 * r)
+        return t;
+    if (t >= r)
+        return 2 * (t - r);
+    return 2 * (r - t) - 1;
+}
+
+void write_subexp(BitWriter& writer, unsigned num_syms, unsigned value)
+{
+    // Inverse of decode_subexp(numSyms), spec 5.9.27.
+    unsigned i = 0;
+    unsigned mk = 0;
+    const unsigned k = 3;
+    for (;;) {
+        const unsigned b2 = i ? k + i - 1 : k;
+        const unsigned a = 1u << b2;
+        if (num_syms <= mk + 3 * a) {
+            // ns(numSyms - mk)
+            writer.ns(value - mk, num_syms - mk);
+            return;
+        }
+        const bool more = value >= mk + a;
+        writer.bit(more);
+        if (!more) {
+            writer.bits(value - mk, b2);
+            return;
+        }
+        i++;
+        mk += a;
+    }
+}
+
+void write_unsigned_subexp_with_ref(BitWriter& writer, unsigned mx, unsigned r, unsigned v)
+{
+    // Inverse of decode_unsigned_subexp_with_ref (spec 5.9.26).
+    if ((r << 1) <= mx) {
+        write_subexp(writer, mx, recenter_forward(r, v));
+    } else {
+        write_subexp(writer, mx, recenter_forward(mx - 1 - r, mx - 1 - v));
+    }
+}
+
+void write_signed_subexp_with_ref(BitWriter& writer, int low, int high, int r, int v)
+{
+    // Inverse of decode_signed_subexp_with_ref (spec 5.9.26).
+    write_unsigned_subexp_with_ref(writer, static_cast<unsigned>(high - low), static_cast<unsigned>(r - low),
+        static_cast<unsigned>(v - low));
+}
+
+// Spec 5.9.25 read_global_param(), inverted. `value` and `reference` are the
+// full-precision gm_params entries; the bitstream carries them shifted.
+void write_global_param(BitWriter& writer, unsigned type, unsigned idx, int32_t value, int32_t reference,
+    bool allow_high_precision_mv)
+{
+    unsigned abs_bits = GM_ABS_ALPHA_BITS;
+    unsigned prec_bits = GM_ALPHA_PREC_BITS;
+    if (idx < 2) {
+        if (type == TRANSLATION) {
+            abs_bits = GM_ABS_TRANS_ONLY_BITS - (allow_high_precision_mv ? 0 : 1);
+            prec_bits = GM_TRANS_ONLY_PREC_BITS - (allow_high_precision_mv ? 0 : 1);
+        } else {
+            abs_bits = GM_ABS_TRANS_BITS;
+            prec_bits = GM_TRANS_PREC_BITS;
+        }
+    }
+    const unsigned prec_diff = WARPEDMODEL_PREC_BITS - prec_bits;
+    // The decoder reconstructs (coded << precDiff) + round; invert that.
+    const int32_t round = (idx % 3) == 2 ? (1 << WARPEDMODEL_PREC_BITS) : 0;
+    const int sub = (idx % 3) == 2 ? (1 << prec_bits) : 0;
+    const int mx = 1 << abs_bits;
+    const int r = (reference >> prec_diff) - sub;
+    const int v = static_cast<int>((value - round) >> prec_diff);
+    write_signed_subexp_with_ref(writer, -mx, mx + 1, r, v);
+}
+
+bool write_global_motion_params(BitWriter& writer, const VADecPictureParameterBufferAV1& picture,
+    const AV1ReferenceState& references, bool frame_is_intra, const char** reject_reason)
+{
+    if (frame_is_intra)
+        return true;
+    for (unsigned ref = 1; ref < NUM_REF_FRAMES; ++ref) {
+        const auto& wm = picture.wm[ref - 1];
+        const unsigned type = wm.wmtype;
+        if (type > AFFINE) {
+            *reject_reason = "unknown global motion type";
+            return false;
+        }
+        // Reference parameters: the primary reference frame's saved
+        // gm_params, or the defaults (spec setup_past_independence / 7.20).
+        int32_t prev[6];
+        default_gm_params(prev);
+        if (picture.primary_ref_frame != PRIMARY_REF_NONE) {
+            const unsigned slot = picture.ref_frame_idx[picture.primary_ref_frame];
+            if (slot < NUM_REF_FRAMES && references.gm_valid[slot])
+                std::memcpy(prev, references.gm_params[slot][ref], sizeof(prev));
+        }
+        const bool is_global = type != IDENTITY;
+        writer.bit(is_global);
+        if (!is_global)
+            continue;
+        const bool is_rot_zoom = type == ROTZOOM;
+        writer.bit(is_rot_zoom);
+        if (!is_rot_zoom)
+            writer.bit(type == TRANSLATION);
+        const bool hp = picture.pic_info_fields.bits.allow_high_precision_mv != 0;
+        if (type >= ROTZOOM) {
+            write_global_param(writer, type, 2, wm.wmmat[2], prev[2], hp);
+            write_global_param(writer, type, 3, wm.wmmat[3], prev[3], hp);
+            if (type == AFFINE) {
+                write_global_param(writer, type, 4, wm.wmmat[4], prev[4], hp);
+                write_global_param(writer, type, 5, wm.wmmat[5], prev[5], hp);
+            }
+        }
+        write_global_param(writer, type, 0, wm.wmmat[0], prev[0], hp);
+        write_global_param(writer, type, 1, wm.wmmat[1], prev[1], hp);
+    }
+    return true;
+}
+
+} // namespace
+
+void av1_update_reference_gm(AV1ReferenceState& references, const VADecPictureParameterBufferAV1& picture,
+    uint8_t refresh_frame_flags)
+{
+    const bool intra = picture.pic_info_fields.bits.frame_type == KEY_FRAME
+        || picture.pic_info_fields.bits.frame_type == INTRA_ONLY_FRAME;
+    for (unsigned slot = 0; slot < NUM_REF_FRAMES; ++slot) {
+        if (!(refresh_frame_flags & (1u << slot)))
+            continue;
+        for (unsigned ref = 1; ref < NUM_REF_FRAMES; ++ref) {
+            if (intra) {
+                int32_t defaults[6];
+                default_gm_params(defaults);
+                std::memcpy(references.gm_params[slot][ref], defaults, sizeof(defaults));
+            } else {
+                std::memcpy(references.gm_params[slot][ref], picture.wm[ref - 1].wmmat, 6 * sizeof(int32_t));
+            }
+        }
+        references.gm_valid[slot] = true;
+    }
+}
+
 bool av1_build_temporal_unit(std::vector<uint8_t>& out,
     const VADecPictureParameterBufferAV1& picture, const AV1SequenceState& sequence,
     const AV1ReferenceState& references, bool emit_sequence_header, uint8_t refresh_frame_flags,
@@ -446,12 +624,6 @@ bool av1_build_temporal_unit(std::vector<uint8_t>& out,
     if (picture.profile != 0) {
         *reject_reason = "only AV1 profile 0 is supported";
         return false;
-    }
-    for (unsigned i = 1; i < 8; ++i) {
-        if (picture.wm[i].wmtype != 0) {
-            *reject_reason = "global motion parameters are not reconstructed";
-            return false;
-        }
     }
     if (picture.film_grain_info.film_grain_info_fields.bits.apply_grain) {
         *reject_reason = "film grain parameters are not reconstructed";
@@ -696,12 +868,8 @@ bool av1_build_temporal_unit(std::vector<uint8_t>& out,
         writer.bit(pic.allow_warped_motion);
     writer.bit(picture.mode_control_fields.bits.reduced_tx_set_used);
 
-    // global_motion_params(): every reference was verified identity above, so
-    // only the seven is_global flags are written.
-    if (!frame_is_intra) {
-        for (unsigned i = 1; i < 8; ++i)
-            writer.bit(0);
-    }
+    if (!write_global_motion_params(writer, picture, references, frame_is_intra, reject_reason))
+        return false;
 
     // film_grain_params(): apply_grain was verified zero above.
     if (seq.film_grain_params_present && (pic.show_frame || pic.showable_frame))

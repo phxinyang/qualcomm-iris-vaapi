@@ -8,9 +8,10 @@
 # reproduces the original stream's pixels or it does not, and that question is
 # answerable with an independent software decoder.
 #
-# The driver appends every rebuilt unit to av1-rebuilt.obu when
-# V4L2_VA_DUMP_BATCH points at a directory. This script decodes that file with
-# libdav1d and checks the result against a software decode of the source.
+# With V4L2_VA_DUMP pointing at a directory the driver writes every submitted
+# access unit of a session into one file; for AV1 that is the rebuilt
+# low-overhead OBU stream. This script decodes it with libdav1d and checks
+# the result against a software decode of the source.
 #
 # Frame counts are expected to differ. AV1 repeats already-decoded frames with
 # show_existing_frame, which carries no payload and never reaches a VA-API
@@ -45,18 +46,20 @@ if [ -z "$source" ]; then
         -frames:v "$frames" -c:v libaom-av1 -cpu-used 8 -crf 40 -an "$source"
 fi
 
-rebuilt="$root/av1-rebuilt.obu"
-rm -f "$rebuilt"
+dump="$root/dump"
+rm -rf "$dump"
+mkdir -p "$dump"
 
-# The decode is expected to be imperfect on hardware; this run exists only to
-# make the driver emit its reconstruction, so its own output is discarded.
+# The hardware result is checked elsewhere; this run exists to make the
+# driver emit its reconstruction, so its own output is discarded.
 LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH="$driver_path" LIBVA_V4L2_VIDEO_PATH="$device" \
-    V4L2_VA_ENABLE_AV1_STATEFUL=1 V4L2_VA_DUMP_BATCH="$root" \
+    V4L2_VA_EXPERIMENTAL_PROFILES=1 V4L2_VA_DUMP="$dump" \
     ffmpeg -y -hide_banner -loglevel error -vaapi_device /dev/dri/renderD128 \
     -hwaccel vaapi -hwaccel_output_format vaapi -i "$source" -f null - \
     >"$root/driver.log" 2>&1 || true
 
-if [ ! -s "$rebuilt" ]; then
+rebuilt=$(ls -S "$dump"/iris-session-*.bin 2>/dev/null | head -1 || true)
+if [ -z "$rebuilt" ] || [ ! -s "$rebuilt" ]; then
     echo "FAIL the driver produced no rebuilt OBU stream; see $root/driver.log" >&2
     exit 1
 fi

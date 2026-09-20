@@ -26,7 +26,18 @@ extern "C" {
 // across frames, since skip-mode signalling depends on it.
 struct AV1ReferenceState {
     unsigned order_hint[8] = {};
+    // gm_params saved per reference slot (spec 7.20): global motion is coded
+    // as a delta against the primary reference frame's parameters, so the
+    // writer needs what each slot's frame carried. Index [slot][ref 1..7][6].
+    int32_t gm_params[8][8][6] = {};
+    bool gm_valid[8] = {};
 };
+
+// After a frame is written, record its global-motion parameters into the
+// slots it refreshed. The writer cannot do this itself because it does not
+// know refresh_frame_flags until the caller derived them.
+void av1_update_reference_gm(AV1ReferenceState& references, const VADecPictureParameterBufferAV1& picture,
+    uint8_t refresh_frame_flags);
 
 // Everything the sequence header needs that must stay fixed for the stream.
 struct AV1SequenceState {

@@ -98,6 +98,7 @@ private:
         for (unsigned slot = 0; slot < 8; ++slot)
             if (refresh_frame_flags & (1u << slot))
                 references_.order_hint[slot] = held_picture_.order_hint;
+        av1_update_reference_gm(references_, held_picture_, refresh_frame_flags);
         out.sequence_start = held_sequence_start_;
         out.released_surface = held_surface_;
     }
