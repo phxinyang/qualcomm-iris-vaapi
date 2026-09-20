@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstring>
 #include <optional>
+#include <string>
 
 namespace iris::codec {
 
@@ -320,7 +321,11 @@ void rewrite_slice(const uint8_t* nal, size_t size, const VASliceParameterBuffer
     // two-byte NAL header and excludes emulation prevention bytes.
     require(slice.slice_data_byte_offset >= 3, "missing HEVC slice data offset", VA_STATUS_ERROR_INVALID_BUFFER);
     const size_t data = static_cast<size_t>(slice.slice_data_byte_offset - 2) * 8;
-    require(data <= r.size_bits() && data >= r.position(), "invalid HEVC slice data offset", VA_STATUS_ERROR_INVALID_BUFFER);
+    if (data > r.size_bits() || data < r.position())
+        throw Error(VA_STATUS_ERROR_INVALID_BUFFER,
+            "invalid HEVC slice data offset: offset=" + std::to_string(slice.slice_data_byte_offset)
+                + " parsed_bits=" + std::to_string(r.position()) + " nal_bits=" + std::to_string(r.size_bits())
+                + " type=" + std::to_string(type) + " dependent=" + std::to_string(dependent));
     size_t alignment = data;
     const size_t parsed = r.position();
     do {
@@ -362,16 +367,21 @@ public:
         const VAIQMatrixBufferHEVC* effective
             = parameters.pic_fields.bits.scaling_list_enabled_flag && scaling_ ? &*scaling_ : nullptr;
 
-        // The slice data buffer may hold every slice of the picture; each
-        // slice parameter set locates its own NAL inside it.
+        // Clients differ in how they hand over slices: FFmpeg renders one
+        // slice data buffer per slice parameter buffer (offset 0 in each),
+        // GStreamer and Chromium may put every slice of the picture in one
+        // data buffer and let each parameter set locate its NAL by offset.
+        // Pair by index when the counts match, otherwise address into the
+        // single blob.
         std::vector<std::pair<const uint8_t*, size_t>> nals;
-        const auto& [blob, blob_size] = picture.slice_data.front();
-        for (const void* raw : picture.slice_parameters) {
-            const auto* sp = static_cast<const VASliceParameterBufferHEVC*>(raw);
+        const bool paired = picture.slice_data.size() == picture.slice_parameters.size();
+        for (size_t i = 0; i < picture.slice_parameters.size(); ++i) {
+            const auto* sp = static_cast<const VASliceParameterBufferHEVC*>(picture.slice_parameters[i]);
+            const auto& [blob, blob_size] = paired ? picture.slice_data[i] : picture.slice_data.front();
             require(static_cast<size_t>(sp->slice_data_offset) + sp->slice_data_size <= blob_size,
                 "HEVC slice exceeds its data buffer", VA_STATUS_ERROR_INVALID_BUFFER);
             const uint8_t* nal = blob + sp->slice_data_offset;
-            size_t nal_size = sp->slice_data_size;
+            const size_t nal_size = sp->slice_data_size;
             const size_t prefix = start_code_length(nal, nal_size);
             nals.emplace_back(nal + prefix, nal_size - prefix);
         }
