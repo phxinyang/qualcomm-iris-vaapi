@@ -1,0 +1,164 @@
+// SPDX-License-Identifier: MIT
+//
+// One Iris stateful decode session per VA context: the only object that
+// sequences ioctls (docs/architecture.md §4). It owns the OUTPUT and
+// CAPTURE pools, associates completions to callers by token, and publishes
+// through the policy the caller chose per target.
+
+#pragma once
+
+#include "alloc.h"
+#include "device.h"
+#include "publish.h"
+#include "slots.h"
+
+#include "../util/options.h"
+#include "../util/trace.h"
+
+#include <chrono>
+#include <cstdint>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <vector>
+
+namespace iris {
+
+enum class SessionMode { DecodeOrder, DisplayOrder };
+
+enum class SessionState {
+    Configured, // OUTPUT streaming, waiting for the first SOURCE_CHANGE
+    Streaming, // both queues live
+    Draining, // STOP issued, waiting for LAST
+    RestartPending, // LAST seen; START not yet issued
+    Reconfiguring, // resolution change: CAPTURE torn down, waiting to re-enter Streaming
+    Finished, // final drain done, nothing more accepted
+    Failed, // firmware or ioctl error; every pending target failed
+};
+
+// What the caller wants done with a completed frame for one target.
+enum class Publish { Direct, Copy };
+
+// A decode target: one VA surface, as far as the session is concerned.
+struct Target {
+    uint64_t token = 0;
+    bool pending = false;
+    // Filled by the session on completion.
+    FrameRef frame; // Direct: the held CAPTURE slot
+    bool completed = false;
+    bool error = false;
+    Publish publish = Publish::Direct;
+    StableBuffer* destination = nullptr; // Copy: where pixels go
+    unsigned width = 0, height = 0;
+};
+
+struct SessionConfig {
+    uint32_t codec_pixelformat = 0; // V4L2_PIX_FMT_H264 / HEVC / VP9 / AV1
+    uint32_t capture_fourcc = 0; // VA_FOURCC_NV12 or P010
+    unsigned width = 0, height = 0;
+    unsigned surface_count = 0; // the client's pool size, for CAPTURE sizing
+    unsigned output_slots = 4;
+    unsigned au_capacity = 0; // bytes per OUTPUT slot; 0 = derive from geometry
+};
+
+struct SessionStats {
+    uint64_t submitted = 0, completed = 0, errors = 0, drops = 0, timeouts = 0, drains = 0, reconfigures = 0;
+};
+
+class Session {
+public:
+    Session(std::unique_ptr<Device> device, const SessionConfig& config, const Options& options, CopyEngine* copier,
+        const Trace& trace);
+    ~Session();
+    Session(const Session&) = delete;
+    Session& operator=(const Session&) = delete;
+
+    SessionMode mode() const { return mode_; }
+    SessionState state() const { return state_; }
+    const SessionStats& stats() const { return stats_; }
+    const Layout& capture_layout() const { return pool_.capture_layout(); }
+    unsigned width() const { return config_.width; }
+    unsigned height() const { return config_.height; }
+    // Visible rectangle reported by the decoder after SOURCE_CHANGE, or the
+    // configured geometry before then.
+    Selection visible() const { return visible_; }
+
+    // Submit one complete access unit for `target`. Assigns the token,
+    // copies the bytes into a free OUTPUT slot and queues it. Blocks only
+    // while every OUTPUT slot is busy (servicing completions meanwhile),
+    // bounded by the sync timeout. Throws iris::Error.
+    void submit(const uint8_t* data, size_t size, Target& target);
+
+    // Service completions without blocking. Safe to call from any VA entry
+    // point; a no-op when nothing is ready.
+    void service();
+
+    // Block until `target` is completed or failed, within the bound. In
+    // display-order mode a timeout triggers one STOP/LAST/START drain before
+    // giving up. Throws Error(TIMEDOUT / DECODING_ERROR).
+    void wait(Target& target);
+
+    // The caller is about to reuse `target` for a new picture (beginPicture)
+    // or destroy it. Releases the held frame and invalidates a still-pending
+    // token so a late completion is dropped, never published.
+    void release(Target& target);
+    void release_locked(Target& target);
+
+    // Finish the stream: flush, STOP, wait LAST. After this no submit is
+    // accepted. Called from destroyContext.
+    void finish();
+
+    // Number of CAPTURE slots the firmware currently owns / the driver holds.
+    unsigned capture_queued() const { return pool_.capture_queued(); }
+    unsigned capture_held() const { return pool_.capture_held(); }
+
+private:
+    void configure_output();
+    void configure_capture();
+    void enter_streaming();
+    void pump(int timeout_ms);
+    void handle_events();
+    void handle_output_returns();
+    bool handle_capture_returns(); // returns true when LAST was seen
+    void publish(Target& target, FrameRef frame, const Dequeued& completion);
+    // wait_output: block until every pre-STOP OUTPUT is recycled, which a
+    // following START requires; a resolution change keeps its new-stream
+    // OUTPUT queued by design and skips it.
+    void drain(const char* reason, bool wait_output);
+    void restart();
+    void reconfigure();
+    // Completes a deferred resolution change once no CAPTURE frame is held.
+    void continue_reconfigure();
+    void fail_unrecoverable_tokens();
+    void fail(const char* what);
+    void fail_all_pending();
+    bool expired(std::chrono::steady_clock::time_point deadline) const;
+    int sync_timeout_ms() const;
+
+    std::unique_ptr<Device> device_;
+    SessionConfig config_;
+    Options options_;
+    CopyEngine* copier_;
+    Trace trace_;
+    SlotPool pool_;
+    SessionMode mode_ = SessionMode::DisplayOrder;
+    SessionState state_ = SessionState::Configured;
+    SessionStats stats_;
+    Selection visible_;
+    uint64_t next_token_ = 1;
+    // Live tokens -> targets. A token leaves the map when it completes,
+    // errors, or its target is released.
+    std::map<uint64_t, Target*> pending_;
+    bool source_change_ = false;
+    bool saw_last_ = false;
+    bool cold_ = true; // no completion yet in this session
+    // Bumped on every completion and state transition. wait() measures its
+    // bound from the last progress, not from the call: a drain or
+    // reconfigure that took 500 ms is progress, not a stall.
+    uint64_t progress_ = 0;
+    std::mutex mutex_;
+    void* dump_ = nullptr;
+};
+
+} // namespace iris

@@ -21,7 +21,7 @@
 # TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-project('libva-v4l2', 'cpp',
+project('libva-v4l2', ['cpp', 'c'],
 	# Derived from git when one is available. The fallback matters: the driver
 	# is routinely built from a source tree synced to a target device without
 	# its .git directory, and a hard failure here blocks the build entirely.
@@ -40,6 +40,13 @@ libgstcodecs_dep = cc.find_library('gstcodecs-1.0',  # Present but not advertise
 	required: false,
 )
 libudev_dep = dependency('libudev', version : '>= 247')
+# GPU copy engine for persistent exports (docs/architecture.md §3.3). Optional
+# at build time so a host without Mesa dev packages still builds and tests
+# the core; the driver falls back to the CPU engine when absent.
+egl_dep = dependency('egl', required: false)
+glesv2_dep = dependency('glesv2', required: false)
+gbm_dep = dependency('gbm', required: false)
+have_gpu_copy = egl_dep.found() and glesv2_dep.found() and gbm_dep.found()
 libva_drm_dep = dependency('libva-drm', version : '>= 1.1.0', required: false)
 kernel_dep = declare_dependency(include_directories : get_option('kernel_headers'))
 

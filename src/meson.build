@@ -82,6 +82,37 @@ if libgstcodecparsers_dep.found() and libgstcodecs_dep.found()
 	cpp_args += '-DENABLE_VP9'
 endif
 
+# The Iris core (docs/architecture.md §5): the only code that touches the
+# decoder node, built as a static library so the unit tests link it against
+# a FakeDevice without the VA glue.
+iris_core_sources = [
+	'util/options.cc',
+	'iris/device.cc',
+	'iris/slots.cc',
+	'iris/alloc.cc',
+	'iris/msm_alloc.c',
+	'iris/publish.cc',
+	'iris/session.cc',
+]
+iris_core_deps = [libva_dep, libdrm_dep, kernel_dep]
+iris_core_args = ['-Wall', '-Wextra', '-fvisibility=hidden']
+iris_core_cpp_args = iris_core_args + ['-std=c++20']
+if have_gpu_copy
+	iris_core_sources += 'iris/gpu_copy.cc'
+	iris_core_deps += [egl_dep, glesv2_dep, gbm_dep]
+	iris_core_cpp_args += '-DIRIS_HAVE_GPU_COPY'
+endif
+iris_core = static_library('iris-core',
+	iris_core_sources,
+	cpp_args: iris_core_cpp_args,
+	c_args: iris_core_args,
+	pic: true,
+	dependencies: iris_core_deps)
+iris_core_dep = declare_dependency(
+	link_with: iris_core,
+	include_directories: include_directories('.'),
+	dependencies: iris_core_deps)
+
 v4l2_drv_video = shared_module('v4l2_drv_video',
 	name_prefix: '',
 	install: true,

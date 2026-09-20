@@ -25,6 +25,15 @@ hevc_parameter_sets_test = executable(
   link_args: ['-Wl,--gc-sections'])
 test('hevc-parameter-sets', hevc_parameter_sets_test)
 
+# Scripted sequences against a FakeDevice: the state machine, slot ownership
+# and publish rules of src/iris without hardware (docs/architecture.md §9).
+session_test = executable(
+  'session-test',
+  ['unit/session-test.cc', 'unit/fake_device.cc'],
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+test('session', session_test)
+
 surface_export_layout_test = executable(
   'surface-export-layout-test',
   ['surface-export-layout-test.cc', '../src/format.cc'],
