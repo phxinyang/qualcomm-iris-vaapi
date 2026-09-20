@@ -11,15 +11,16 @@ Usage: iris-vaapi-browser [OPTIONS] [--] [BROWSER_ARGUMENTS...]
 
 Options:
   --browser=auto|chromium|chrome  Select the browser family (default: auto).
-  --vulkan-webgpu                Use the isolated Vulkan/ANGLE/WebGPU experiment.
   --print-node                   Print the resolved Iris decoder and exit.
   -h, --help                     Show this help.
 
-The VA-only default deliberately does not enable Vulkan, ANGLE Vulkan, or
-unsafe WebGPU. It also leaves Chromium's Linux video-decoder feature selection
-at its packaged default: on the qualified Chrome build, forcing the Linux GL
-decode feature selects an ImageProcessor path that immediately falls back from
-VA-API. LIBVA_V4L2_VIDEO_PATH may override automatic node discovery.
+Google Chrome is the qualified client: stock arm64 Chrome has no video decode
+path other than VA-API, and this launcher gives it the Iris driver. Fedora's
+Chromium is built with its own native V4L2 decoder and does not use this
+driver; --browser=chromium is accepted for a separately built Chromium that
+lacks that path. The launcher passes no video-decoder feature override:
+Chromium's packaged default is the configuration this project qualifies.
+LIBVA_V4L2_VIDEO_PATH may override automatic node discovery.
 IRIS_BROWSER_BIN may override browser executable discovery.
 IRIS_BROWSER_PROFILE_ROOT may override the isolated profile root.
 EOF
@@ -108,16 +109,12 @@ find_browser() {
 }
 
 browser_family=auto
-graphics_mode=vaapi
+
 print_node=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --browser=auto|--browser=chromium|--browser=chrome)
             browser_family=${1#--browser=}
-            shift
-            ;;
-        --vulkan-webgpu)
-            graphics_mode=vulkan-webgpu
             shift
             ;;
         --print-node)
@@ -157,7 +154,7 @@ case "${browser##*/}" in
 esac
 
 profile_root=${IRIS_BROWSER_PROFILE_ROOT:-${XDG_CONFIG_HOME:-$HOME/.config}/iris-vaapi-browser}
-profile_dir=$profile_root/$profile_browser-$graphics_mode
+profile_dir=$profile_root/$profile_browser-vaapi
 mkdir -p "$profile_dir"
 
 # Fedora's Chromium 152 arm64 package injects AcceleratedVideoDecodeLinuxGL
@@ -196,17 +193,6 @@ LIBVA_V4L2_VIDEO_PATH=$node
 export LIBVA_DRIVER_NAME LIBVA_V4L2_VIDEO_PATH
 
 common_args="--ozone-platform=wayland"
-
-if [ "$graphics_mode" = vulkan-webgpu ]; then
-    exec "$browser" \
-        "$common_args" \
-        "--user-data-dir=$profile_dir" \
-        "--enable-features=Vulkan" \
-        --disable-features=AcceleratedVideoDecodeLinuxZeroCopyGL \
-        --use-angle=vulkan \
-        --enable-unsafe-webgpu \
-        "$@"
-fi
 
 # The VA-only default passes no video-decoder feature override at all.
 #

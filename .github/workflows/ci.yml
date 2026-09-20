@@ -18,8 +18,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             meson ninja-build pkg-config g++ \
-            libva-dev libdrm-dev libudev-dev \
-            libgstreamer-plugins-bad1.0-dev
+            libva-dev libdrm-dev \
+            libegl-dev libgles-dev libgbm-dev
 
       - name: Configure
         run: meson setup build
@@ -35,7 +35,8 @@ jobs:
           meson test -C build --list | tee build/meson-tests.txt
           test -s build/meson-tests.txt
           for required in \
-            stateful-session \
+            session \
+            hevc-parameter-sets \
             static-checks \
             iris-source-invariants \
             iris-env-doc-check \

@@ -29,10 +29,9 @@ license=('MIT' 'LGPL-2.1-or-later')
 # v4l-utils is not optional: the launcher resolves the decoder node by driver
 # name because the node number moves between boots on this device, and it
 # refuses to fall back to a fixed /dev/video number that may be a camera.
-depends=('libva' 'libdrm' 'systemd-libs' 'v4l-utils')
+depends=('libva' 'libdrm' 'mesa' 'v4l-utils')
 makedepends=('meson' 'ninja' 'pkgconf' 'python')
-optdepends=('chromium: Chromium (Iris VA-API) desktop entry'
-            'google-chrome: Google Chrome (Iris VA-API) desktop entry')
+optdepends=('google-chrome: Google Chrome (Iris VA-API) desktop entry')
 source=("$pkgname-$pkgver.tar.gz")
 sha256sums=('SKIP')
 # makepkg normally strips payloads after package(); do it explicitly before the
@@ -65,14 +64,6 @@ package() {
     IRIS_TRACKED_SOURCE_SHA256="${IRIS_TRACKED_SOURCE_SHA256:-0000000000000000000000000000000000000000000000000000000000000000}" \
     IRIS_SOURCE_DIRTY="$dirty" \
         sh scripts/install-system.sh "$srcdir/build"
-
-    # Arch ships /usr/bin/chromium; Fedora and Debian ship
-    # /usr/bin/chromium-browser, which is the name in the source entries. An
-    # entry whose TryExec names an absent binary hides itself, so the browser
-    # is installed and its launcher never appears in the menu.
-    sed -i 's/^TryExec=chromium-browser$/TryExec=chromium/' \
-        "$pkgdir/usr/share/applications/chromium-iris-v4l2.desktop" \
-        "$pkgdir/usr/share/applications/chromium-iris-vulkan-webgpu.desktop"
 
     strip -g "$pkgdir/usr/lib/dri/v4l2_drv_video.so"
     strip -R .comment "$pkgdir/usr/lib/dri/v4l2_drv_video.so" 2>/dev/null || true

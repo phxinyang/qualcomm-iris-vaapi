@@ -1,71 +1,100 @@
 {
-  "schema_version": 1,
-  "target": "Qualcomm Iris stateful V4L2 on ARM64",
+  "schema_version": 2,
+  "target": "Qualcomm Iris stateful V4L2 on ARM64 (SM8550, decode-order kernel module)",
   "policy": {
     "production_va_requires_exact_evidence": true,
     "unknown_codec_action": "software-fallback",
-    "vulkan_is_independent_from_video_decode": true
+    "evidence": "TEST-RESULTS.md"
   },
   "codecs": [
     {
       "codec": "h264",
       "production": "supported",
-      "va_profiles": ["H264ConstrainedBaseline", "H264Main", "H264High"],
-      "v4l2_output_formats": ["H264", "H264_SLICE"],
-      "capture_formats": ["NV12", "NV12M"],
+      "va_profiles": [
+        "H264ConstrainedBaseline",
+        "H264Main",
+        "H264High"
+      ],
+      "v4l2_output_formats": [
+        "H264"
+      ],
+      "capture_formats": [
+        "NV12"
+      ],
       "fallback": "software",
-      "rejected": ["MVC/multiview", "non-8-bit-4:2:0 surfaces"],
-      "experimental": ["zero-copy requires V4L2_VA_ZERO_COPY_CONTRACT=h264-no-b-v1 and is limited to one-AU, no-B streams"]
+      "rejected": [
+        "MVC/multiview",
+        "interlaced",
+        "non-8-bit or non-4:2:0"
+      ],
+      "experimental": []
     },
     {
       "codec": "hevc",
       "production": "supported",
-      "va_profiles": ["HEVCMain"],
-      "v4l2_output_formats": ["HEVC"],
-      "capture_formats": ["NV12", "NV12M"],
+      "va_profiles": [
+        "HEVCMain",
+        "HEVCMain10"
+      ],
+      "v4l2_output_formats": [
+        "HEVC"
+      ],
+      "capture_formats": [
+        "NV12",
+        "P010"
+      ],
       "fallback": "software",
-      "rejected": ["profiles not advertised by the target node"],
-      "experimental": ["zero-copy is rejected; stable-copy path is required"]
-    },
-    {
-      "codec": "vp8",
-      "production": "supported",
-      "va_profiles": ["VP8Version0_3"],
-      "v4l2_output_formats": ["VP8_FRAME"],
-      "capture_formats": ["NV12", "NV12M"],
-      "fallback": "software",
-      "rejected": ["profiles not advertised by the target node"],
-      "experimental": []
-    },
-    {
-      "codec": "mpeg2",
-      "production": "supported",
-      "va_profiles": ["MPEG2Simple", "MPEG2Main"],
-      "v4l2_output_formats": ["MPEG2_SLICE"],
-      "capture_formats": ["NV12", "NV12M"],
-      "fallback": "software",
-      "rejected": ["profiles not advertised by the target node"],
-      "experimental": []
+      "rejected": [
+        "long-term references (generated parameter sets cannot describe them)",
+        "interlaced"
+      ],
+      "experimental": [
+        "Main10 is advertised when the node offers P010 and has not been separately qualified"
+      ]
     },
     {
       "codec": "vp9",
-      "production": "fallback",
-      "va_profiles": [],
-      "v4l2_output_formats": ["VP9_FRAME", "VP9"],
-      "capture_formats": ["NV12", "NV12M"],
+      "production": "supported",
+      "va_profiles": [
+        "VP9Profile0",
+        "VP9Profile2"
+      ],
+      "v4l2_output_formats": [
+        "VP9"
+      ],
+      "capture_formats": [
+        "NV12",
+        "P010"
+      ],
       "fallback": "software",
-      "rejected": ["VA Profile 0/stateful VP9 due to reproducible source-change/reset failures"],
-      "experimental": ["native V4L2 only; do not re-enable VA advertisement without reboot-free evidence"]
+      "rejected": [
+        "show_existing_frame through VA",
+        "12-bit",
+        "RGB"
+      ],
+      "experimental": [
+        "Profile2 is advertised when the node offers P010 and has not been separately qualified"
+      ]
     },
     {
       "codec": "av1",
       "production": "fallback",
       "va_profiles": [],
-      "v4l2_output_formats": ["AV1"],
-      "capture_formats": ["NV12", "NV12M"],
+      "v4l2_output_formats": [
+        "AV1"
+      ],
+      "capture_formats": [
+        "NV12"
+      ],
       "fallback": "native-v4l2-or-software",
-      "rejected": ["VA AV1 tile payloads cannot satisfy Iris complete-OBU temporal-unit input"],
-      "experimental": ["V4L2_VA_ENABLE_AV1_STATEFUL=1 is diagnostic and not release-qualified"]
+      "rejected": [
+        "hidden (show_frame=0) pictures: the firmware returns no CAPTURE for them and VA has no show_existing_frame call",
+        "film grain",
+        "large-scale tile"
+      ],
+      "experimental": [
+        "V4L2_VA_EXPERIMENTAL_PROFILES=1 advertises AV1Profile0; the OBU rebuild is bit-exact under test/av1-obu-roundtrip.sh but VA clients time out on hidden frames"
+      ]
     }
   ]
 }

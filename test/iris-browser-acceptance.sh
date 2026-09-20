@@ -61,7 +61,7 @@ mkdir -p "$out"
 
 launcher=$here/../scripts/iris-vaapi-browser
 [ -x "$launcher" ] || fail "launcher missing: $launcher"
-page=$here/power-playback.html
+page=$here/playback.html
 [ -f "$page" ] || fail "playback page missing: $page"
 cdp=$here/remote/cdp.py
 

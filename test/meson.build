@@ -1,14 +1,3 @@
-# Integration probe for a V4L2-capable target: built when libva-drm is
-# available, never registered as a default test because it needs a decoder
-# node. Hosts without libva-drm (CI containers, cross builds) still get the
-# static checks below.
-if libva_drm_dep.found()
-	context_isolation = executable(
-		'v4l2-context-isolation',
-		'context-isolation.cc',
-		dependencies: [libva_dep, libva_drm_dep, libdrm_dep])
-endif
-
 # Scripted sequences against a FakeDevice: the state machine, slot ownership
 # and publish rules of src/iris without hardware (docs/architecture.md §9).
 session_test = executable(
@@ -46,11 +35,7 @@ test('iris-packaging-check', find_program('iris-packaging-check.sh'),
      args: [meson.project_source_root()])
 test('iris-install-manifest-check', find_program('iris-install-manifest-check.sh'),
      args: [meson.project_source_root()])
-test('iris-power-report-check', find_program('iris-power-report-check.sh'),
-     args: [meson.project_source_root()])
 test('provenance-self-test', find_program('provenance-self-test.sh'),
-     args: [meson.project_source_root()])
-test('electron-video-report-check', find_program('electron-video-report-check.sh'),
      args: [meson.project_source_root()])
 test('iris-browser-launcher-check', find_program('iris-browser-launcher-check.sh'),
      args: [meson.project_source_root()])

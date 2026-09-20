@@ -33,13 +33,6 @@ cc = meson.get_compiler('cpp')
 
 libva_dep = dependency('libva', version : '>= 1.1.0')
 libdrm_dep = dependency('libdrm', version : '>= 2.4.52')
-libgstcodecparsers_dep = dependency('gstreamer-codecparsers-1.0', version : '>= 1.12', required: false)
-libgstcodecs_dep = cc.find_library('gstcodecs-1.0',  # Present but not advertised via pkgconfig.
-	has_headers: ['gst/codecs/gstvp9statefulparser.h'],
-	header_dependencies: libgstcodecparsers_dep,
-	required: false,
-)
-libudev_dep = dependency('libudev', version : '>= 247')
 # GPU copy engine for persistent exports (docs/architecture.md §3.3). Optional
 # at build time so a host without Mesa dev packages still builds and tests
 # the core; the driver falls back to the CPU engine when absent.
@@ -47,7 +40,6 @@ egl_dep = dependency('egl', required: false)
 glesv2_dep = dependency('glesv2', required: false)
 gbm_dep = dependency('gbm', required: false)
 have_gpu_copy = egl_dep.found() and glesv2_dep.found() and gbm_dep.found()
-libva_drm_dep = dependency('libva-drm', version : '>= 1.1.0', required: false)
 kernel_dep = declare_dependency(include_directories : get_option('kernel_headers'))
 
 va_api_version_array = libva_dep.version().split('.')
@@ -69,9 +61,6 @@ install_data(
 	install_mode: 'rwxr-xr-x',
 )
 install_data(
-	'data/chromium-iris-v4l2.desktop',
 	'data/google-chrome-iris-v4l2.desktop',
-	'data/chromium-iris-vulkan-webgpu.desktop',
-	'data/google-chrome-iris-vulkan-webgpu.desktop',
 	install_dir: join_paths(get_option('datadir'), 'applications'),
 )

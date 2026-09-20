@@ -61,10 +61,6 @@ if printf '%s\n' "$scenario_block" | grep -q '^    name=\$1$' \
     echo "FAIL concurrency scenario label can be clobbered by POSIX shell function variables" >&2
     exit 1
 fi
-if grep -Eq '/dev/video[0-9]+' "$root/test/compare.html"; then
-    echo "FAIL browser comparison UI hardcodes a V4L2 node" >&2
-    exit 1
-fi
 
 if ! grep -Fq "awk -F, 'NF >= 2 { print \$1 \",\" \$2 }'" "$dynamic_resolution"; then
     echo "FAIL dynamic-resolution switch count does not normalize ffprobe side-data columns" >&2

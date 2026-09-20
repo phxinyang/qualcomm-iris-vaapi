@@ -113,9 +113,6 @@ grep -Eq '^Requires:[[:space:]]+v4l-utils' "$spec" \
 grep -Fq 'v4l-utils' "$pkgbuild" \
     || fail 'PKGBUILD does not depend on v4l-utils'
 
-grep -Fq 'TryExec=chromium-browser' "$pkgbuild" \
-    || fail 'PKGBUILD does not rewrite TryExec for the Arch chromium binary name'
-
 if command -v bash >/dev/null 2>&1; then
     bash -n "$pkgbuild" || fail 'PKGBUILD does not parse as bash'
 else

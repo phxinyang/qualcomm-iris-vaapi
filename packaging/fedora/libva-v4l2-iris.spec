@@ -45,9 +45,10 @@ BuildRequires:  gcc-c++
 BuildRequires:  pkgconfig
 BuildRequires:  python3
 BuildRequires:  pkgconfig(libva) >= 1.1.0
-BuildRequires:  pkgconfig(libva-drm) >= 1.1.0
 BuildRequires:  pkgconfig(libdrm) >= 2.4.52
-BuildRequires:  pkgconfig(libudev) >= 247
+BuildRequires:  pkgconfig(egl)
+BuildRequires:  pkgconfig(glesv2)
+BuildRequires:  pkgconfig(gbm)
 
 # The launcher resolves the decoder node by driver name with v4l2-ctl, because
 # the node number is not stable across boots on this device. Without v4l-utils
@@ -114,10 +115,7 @@ sh scripts/refresh-install-manifest.sh \
 %doc README.md AUTHORS CREDITS
 %{_libdir}/dri/v4l2_drv_video.so
 %{_bindir}/iris-vaapi-browser
-%{_datadir}/applications/chromium-iris-v4l2.desktop
-%{_datadir}/applications/chromium-iris-vulkan-webgpu.desktop
 %{_datadir}/applications/google-chrome-iris-v4l2.desktop
-%{_datadir}/applications/google-chrome-iris-vulkan-webgpu.desktop
 %dir %{_datadir}/iris-vaapi
 %{_datadir}/iris-vaapi/install-manifest.txt
 

@@ -41,32 +41,16 @@ run browser-launcher-unsets-build-path grep -Fq 'unset LIBVA_DRIVERS_PATH' "$lau
 run browser-launcher-dynamic-node grep -Fq 'iris_driver' "$launcher"
 run browser-launcher-no-fixed-node sh -c '! grep -Eq "/dev/video[0-9]+" "$1"' sh "$launcher"
 
-# Keep the VA-only Chrome path free of video-decoder feature overrides.
-#
-# The previous guard only read the block between `common_args=` and the
-# Vulkan branch, which never contained the exec it was meant to protect. The
-# VA-only exec below that branch carried
-# --disable-features=AcceleratedVideoDecodeLinuxZeroCopyGL, and on Chrome
-# 151.0.7922.173 that switch makes the pipeline build VaapiVideoDecoder, hit
-# the ImageProcessor output path, tear the decoder down and fall back to
-# FFmpegVideoDecoder. Every installed desktop entry shipped software decode
-# while the check reported a pass, so both sections are inspected now.
-# The guard reads code, not prose: the launcher documents the feature names it
-# must never pass, so comment lines are stripped before matching. The default
-# exec is everything after the LAST top-level `fi`, which is the only way to
-# skip both the --print-node early exit and the Vulkan/WebGPU branch; anchoring
-# on the first `fi` pulled the experiment's flags in and made the guard
-# unfalsifiable.
-common_section=$(sed -n '/common_args=/,/if \[ "\$graphics_mode" = vulkan-webgpu \]/p' "$launcher" \
-    | grep -v '^[[:space:]]*#')
-default_exec=$(awk '/^fi$/ { buf = ""; next } { buf = buf $0 "\n" } END { printf "%s", buf }' \
-    "$launcher" | grep -v '^[[:space:]]*#')
-run browser-launcher-common-no-video-feature-override sh -c \
-    '! printf "%s\n" "$1" | grep -Fq AcceleratedVideoDecode' sh "$common_section"
-run browser-launcher-default-no-video-feature-override sh -c \
-    '! printf "%s\n" "$1" | grep -Fq AcceleratedVideoDecode' sh "$default_exec"
-run browser-launcher-default-execs-browser sh -c \
-    'printf "%s\n" "$1" | grep -Fq "exec \"\$browser\""' sh "$default_exec"
+# The Chrome exec must carry no video-decoder feature override: on Chrome
+# 151 forcing AcceleratedVideoDecodeLinuxZeroCopyGL off made the pipeline
+# build VaapiVideoDecoder, hit the ImageProcessor path and fall back to
+# software. Read code, not comments. The Fedora-Chromium compatibility
+# branch is the one deliberate exception and names its own feature list.
+launcher_code=$(grep -v '^[[:space:]]*#' "$launcher" | grep -v 'chromium_compat_args=')
+run browser-launcher-no-video-feature-override sh -c \
+    '! printf "%s\n" "$1" | grep -Fq AcceleratedVideoDecode' sh "$launcher_code"
+run browser-launcher-execs-browser sh -c \
+    'printf "%s\n" "$1" | grep -Fq "exec \"\$browser\""' sh "$launcher_code"
 run iris-browser-launcher-check sh "$test_dir/iris-browser-launcher-check.sh" "$root"
 
 echo "== source invariants"
@@ -78,17 +62,15 @@ run iris-eos-check-self-test sh "$test_dir/iris-eos-check-self-test.sh" "$root"
 run iris-setup-path-check sh "$test_dir/iris-setup-path-check.sh" "$root"
 run iris-packaging-check sh "$test_dir/iris-packaging-check.sh" "$root"
 run iris-install-manifest-check sh "$test_dir/iris-install-manifest-check.sh" "$root"
-run iris-power-report-check sh "$test_dir/iris-power-report-check.sh" "$root"
 run provenance-python-syntax python3 -c \
     'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' \
     "$test_dir/remote/provenance.py"
-for helper in cdp power-sampler power-analyze; do
+for helper in cdp; do
     run "$helper-python-syntax" python3 -c \
         'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' \
         "$test_dir/remote/$helper.py"
 done
 run provenance-self-test sh "$test_dir/provenance-self-test.sh" "$root"
-run electron-video-report-check sh "$test_dir/electron-video-report-check.sh" "$root"
 
 if [ "$failures" -ne 0 ]; then
     printf 'FAIL static checks: %d failing\n' "$failures" >&2
