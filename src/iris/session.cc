@@ -232,6 +232,8 @@ void Session::submit(const uint8_t* data, size_t size, Target& target)
         pump(20);
     }
 
+    if (state_ == SessionState::Configured && target.fourcc != 0)
+        config_.capture_fourcc = target.fourcc;
     std::memcpy(slot->mapping, data, size);
     if (dump_) {
         std::fwrite(data, 1, size, static_cast<FILE*>(dump_));

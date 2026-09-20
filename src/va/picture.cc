@@ -59,6 +59,7 @@ void submit(DriverData& d, Context& c, Surface& s, const iris::codec::AccessUnit
         s.target.destination = nullptr;
     s.target.width = s.width;
     s.target.height = s.height;
+    s.target.fourcc = s.fourcc;
     s.failed = false;
     c.session->submit(au.bytes.data(), au.bytes.size(), s.target);
 }

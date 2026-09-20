@@ -51,6 +51,11 @@ struct Target {
     Publish publish = Publish::Direct;
     StableBuffer* destination = nullptr; // Copy: where pixels go
     unsigned width = 0, height = 0;
+    // VA fourcc of the target surface (NV12 or P010). The first submitted
+    // target fixes the session's CAPTURE format: a VA client may create its
+    // config without an RT format attribute and declare 10-bit only through
+    // its surfaces (FFmpeg does).
+    uint32_t fourcc = 0;
 };
 
 struct SessionConfig {
