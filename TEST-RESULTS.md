@@ -970,3 +970,50 @@ waits for a 15 C margin before its first sample.
 Not yet done in this phase: VP9 and AV1 stay unadvertised (Phase 5);
 `data/iris-codec-capabilities.json`, the launcher, packaging and the README
 prose still describe the old tree (Phase 6).
+
+## Phase 5: VP9 and AV1 on the new core (2026-09-20)
+
+Same target and boot (`4944865b…`) as Phase 3; every run below is on the
+decode-order module. Runs marked *guarded* went through
+`scripts/iris-experiment-guard.sh` (boot ID and thermal watch).
+
+### VP9: qualified, now advertised by default
+
+| Gate | Result |
+| --- | --- |
+| `test/iris-matrix.sh` VP9 (640x360, 48 frames) | 48/48 exact framemd5, `submitted=48 capture=48 drain=1 timeouts=0 drops=0` |
+| 100 VA context recreations, guarded | first run 10/100 FFmpeg failures; root cause a race between FFmpeg's filter-thread `vaSyncSurface` and its decoder-thread `vaDestroyContext` (the context left the table before draining). Fixed in `va: drain before removing a context from the table`; rerun 0/100 failures, boot unchanged |
+| `test/iris-dynamic-resolution.sh` VP9, guarded | native baseline 202 frames / 100 switches; VA single-process 202 frames, 101 contexts, pixels equal software; VA new-context 100 transitions all 2/2 |
+| Chrome 152, 1080p24 VP9 with alt-ref (`lag-in-frames 25`, `auto-alt-ref 1`), 30 s | `VaapiVideoDecoder`, platform=true, 716 frames / 0 dropped; trace 932 `publish=copy-gpu`, 0 drops, 0 timeouts |
+
+The old tree withdrew VP9 because context recreation and source changes
+rebooted the tablet. Neither reproduced in 200 recreations plus 100
+in-stream resolution switches on the patched module. Whether the cause was
+the display-order firmware path or the old driver's queue handling is not
+separated here; the combination that ships is the one that was tested.
+
+### AV1: firmware output contract, kept opt-in
+
+The OBU writer now reconstructs global motion parameters (the previous
+tree rejected any non-identity `wmtype`). Software oracle
+(`test/av1-obu-roundtrip.sh`): 27 rebuilt temporal units, every one
+bit-exact against libdav1d's decode of the source. The same rebuilt stream
+fed to the firmware natively (`v4l2av1dec`) decodes to 27 frames with no
+error; the original stream decodes natively to 48.
+
+The 21-frame difference is the AV1 hidden-frame model: libaom emits
+alt-ref frames with `show_frame=0` and later displays them through
+`show_existing_frame`, a header-only temporal unit that carries no
+payload and never reaches a VA-API hardware accelerator (VA has no call
+for it). The firmware returns a CAPTURE buffer only for shown frames, so
+through VA a client submits 48 pictures and receives 27 completions;
+FFmpeg then times out on the first hidden one. A plain IPPP stream
+(`lag-in-frames 0`, `auto-alt-ref 0`) exposes a second gap: the firmware
+returned the key frame's CAPTURE only after the next AU was queued
+(`va frames=1` at the first download), so even show-every-frame AV1 does
+not satisfy VA's synchronous per-picture model on this firmware.
+
+AV1 therefore stays behind `V4L2_VA_EXPERIMENTAL_PROFILES=1`. Closing it
+needs either firmware/kernel support for returning hidden pictures (a
+`DISPLAY_DELAY`-style control for AV1) or a VA client contract that
+tolerates missing completions; neither is a driver change.
