@@ -1,0 +1,202 @@
+// SPDX-License-Identifier: MIT
+//
+// VA object tables and the entry points. Nothing here touches the decoder
+// node; that is src/iris. Nothing here knows a bitstream; that is src/codec.
+
+#pragma once
+
+#include "../codec/translator.h"
+#include "../iris/alloc.h"
+#include "../iris/device.h"
+#include "../iris/publish.h"
+#include "../iris/session.h"
+#include "../util/options.h"
+#include "../util/trace.h"
+
+#include <map>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <string>
+#include <vector>
+
+extern "C" {
+#include <va/va.h>
+#include <va/va_backend.h>
+}
+
+namespace va {
+
+constexpr const char* kVendor = "Qualcomm Iris V4L2 stateful (libva-v4l2)";
+constexpr unsigned kMaxProfiles = 16;
+constexpr unsigned kMaxEntrypoints = 2;
+constexpr unsigned kMaxAttributes = 8;
+constexpr unsigned kMaxImageFormats = 2;
+constexpr unsigned kMaxSubpictureFormats = 1;
+constexpr unsigned kMaxDisplayAttributes = 1;
+
+struct Config {
+    VAProfile profile;
+    VAEntrypoint entrypoint;
+    uint32_t rt_format;
+};
+
+struct Surface {
+    unsigned width = 0, height = 0;
+    uint32_t fourcc = VA_FOURCC_NV12;
+    VAContextID owner = VA_INVALID_ID;
+    // Session-side state: token, held frame, completion.
+    iris::Target target;
+    // Memory the client may already have imported. Allocated on the first
+    // export/derive/import that happens before a decode, or when the copy
+    // policy is forced. Never replaced once handed out.
+    std::unique_ptr<iris::StableBuffer> stable;
+    bool persistent_export = false;
+    unsigned derived_images = 0;
+    unsigned acquired_handles = 0;
+    // A decode error or a released-while-pending token. Reported by
+    // syncSurface until the surface starts a new picture.
+    bool failed = false;
+
+    bool rendering() const { return target.pending; }
+    bool has_pixels() const { return target.completed && (target.frame || stable); }
+};
+
+struct Buffer {
+    VABufferType type;
+    unsigned size = 0, count = 0;
+    std::vector<uint8_t> data;
+    // Image buffers: which surface's pixels back a derived image.
+    VASurfaceID derived_surface = VA_INVALID_ID;
+    int acquired_fd = -1;
+};
+
+struct Context {
+    VAProfile profile;
+    unsigned width = 0, height = 0;
+    std::unique_ptr<iris::codec::Translator> translator;
+    std::unique_ptr<iris::Session> session;
+    std::vector<VASurfaceID> render_targets;
+    // vaBeginPicture .. vaEndPicture state.
+    VASurfaceID current = VA_INVALID_ID;
+    iris::codec::Picture picture;
+    iris::codec::AccessUnit au;
+};
+
+// What the decoder node offered when the driver was initialised.
+struct Capabilities {
+    std::string node;
+    std::set<uint32_t> output_formats; // V4L2 compressed fourccs
+    bool nv12 = false, p010 = false;
+    unsigned min_width = 96, min_height = 96, max_width = 8192, max_height = 8192;
+    std::set<VAProfile> profiles;
+};
+
+struct DriverData {
+    iris::Options options;
+    iris::Trace trace { false };
+    Capabilities capabilities;
+    int render_fd = -1; // borrowed from the VA display
+    std::unique_ptr<iris::CopyEngine> copier;
+
+    // The mutex guards the tables and the objects' scalar fields only. It is
+    // never held across a session wait, drain or copy (architecture §7).
+    std::recursive_mutex mutex;
+    uint32_t next_id = 1;
+    std::map<VAConfigID, Config> configs;
+    std::map<VAContextID, std::shared_ptr<Context>> contexts;
+    std::map<VASurfaceID, std::shared_ptr<Surface>> surfaces;
+    std::map<VABufferID, std::shared_ptr<Buffer>> buffers;
+    std::map<VAImageID, VAImage> images;
+};
+
+inline DriverData& data(VADriverContextP ctx) { return *static_cast<DriverData*>(ctx->pDriverData); }
+
+// Translate an iris::Error / std::exception into a VA status, logging once.
+VAStatus report(VADriverContextP ctx, const char* where, const std::exception& error);
+
+// Lookups under the driver mutex; throw iris::Error with the VA status.
+std::shared_ptr<Surface> surface(DriverData& d, VASurfaceID id);
+std::shared_ptr<Context> context(DriverData& d, VAContextID id);
+std::shared_ptr<Buffer> buffer(DriverData& d, VABufferID id);
+
+// Owning context of a surface, if any (for sync/export/derive).
+std::shared_ptr<Context> owner_of(DriverData& d, const Surface& surface);
+
+// Publish policy for the next picture on this surface.
+iris::Publish publish_policy(const DriverData& d, const Surface& surface);
+// Allocate the surface's stable buffer if it has none.
+iris::StableBuffer& ensure_stable(DriverData& d, Surface& surface);
+
+// Probe the node once at init.
+Capabilities probe_capabilities(const iris::Options& options);
+
+// Entry points (one per VA vtable slot we implement).
+VAStatus terminate(VADriverContextP ctx);
+VAStatus queryConfigProfiles(VADriverContextP ctx, VAProfile* profiles, int* count);
+VAStatus queryConfigEntrypoints(VADriverContextP ctx, VAProfile profile, VAEntrypoint* entrypoints, int* count);
+VAStatus queryConfigAttributes(VADriverContextP ctx, VAConfigID id, VAProfile* profile, VAEntrypoint* entrypoint,
+    VAConfigAttrib* attributes, int* count);
+VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoint entrypoint,
+    VAConfigAttrib* attributes, int count);
+VAStatus createConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entrypoint, VAConfigAttrib* attributes,
+    int count, VAConfigID* id);
+VAStatus destroyConfig(VADriverContextP ctx, VAConfigID id);
+VAStatus queryDisplayAttributes(VADriverContextP ctx, VADisplayAttribute* attributes, int* count);
+VAStatus getDisplayAttributes(VADriverContextP ctx, VADisplayAttribute* attributes, int count);
+VAStatus setDisplayAttributes(VADriverContextP ctx, VADisplayAttribute* attributes, int count);
+
+VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, unsigned height, VASurfaceID* ids,
+    unsigned count, VASurfaceAttrib* attributes, unsigned attribute_count);
+VAStatus createSurfaces(VADriverContextP ctx, int width, int height, int format, int count, VASurfaceID* ids);
+VAStatus destroySurfaces(VADriverContextP ctx, VASurfaceID* ids, int count);
+VAStatus syncSurface(VADriverContextP ctx, VASurfaceID id);
+VAStatus querySurfaceStatus(VADriverContextP ctx, VASurfaceID id, VASurfaceStatus* status);
+VAStatus querySurfaceAttributes(VADriverContextP ctx, VAConfigID config, VASurfaceAttrib* attributes, unsigned* count);
+VAStatus exportSurfaceHandle(VADriverContextP ctx, VASurfaceID id, uint32_t mem_type, uint32_t flags, void* descriptor);
+VAStatus putSurface(VADriverContextP ctx, VASurfaceID id, void* draw, short srcx, short srcy, unsigned short srcw,
+    unsigned short srch, short dstx, short dsty, unsigned short dstw, unsigned short dsth, VARectangle* cliprects,
+    unsigned cliprect_count, unsigned flags);
+VAStatus lockSurface(VADriverContextP ctx, VASurfaceID id, unsigned* fourcc, unsigned* luma_stride,
+    unsigned* chroma_u_stride, unsigned* chroma_v_stride, unsigned* luma_offset, unsigned* chroma_u_offset,
+    unsigned* chroma_v_offset, unsigned* buffer_name, void** buffer);
+VAStatus unlockSurface(VADriverContextP ctx, VASurfaceID id);
+
+VAStatus createContext(VADriverContextP ctx, VAConfigID config, int width, int height, int flags,
+    VASurfaceID* render_targets, int count, VAContextID* id);
+VAStatus destroyContext(VADriverContextP ctx, VAContextID id);
+VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface);
+VAStatus renderPicture(VADriverContextP ctx, VAContextID id, VABufferID* buffers, int count);
+VAStatus endPicture(VADriverContextP ctx, VAContextID id);
+
+VAStatus createBuffer(VADriverContextP ctx, VAContextID context, VABufferType type, unsigned size, unsigned count,
+    void* data, VABufferID* id);
+VAStatus destroyBuffer(VADriverContextP ctx, VABufferID id);
+VAStatus mapBuffer(VADriverContextP ctx, VABufferID id, void** data);
+VAStatus unmapBuffer(VADriverContextP ctx, VABufferID id);
+VAStatus bufferSetNumElements(VADriverContextP ctx, VABufferID id, unsigned count);
+VAStatus bufferInfo(VADriverContextP ctx, VABufferID id, VABufferType* type, unsigned* size, unsigned* count);
+VAStatus acquireBufferHandle(VADriverContextP ctx, VABufferID id, VABufferInfo* info);
+VAStatus releaseBufferHandle(VADriverContextP ctx, VABufferID id);
+
+VAStatus queryImageFormats(VADriverContextP ctx, VAImageFormat* formats, int* count);
+VAStatus createImage(VADriverContextP ctx, VAImageFormat* format, int width, int height, VAImage* image);
+VAStatus deriveImage(VADriverContextP ctx, VASurfaceID id, VAImage* image);
+VAStatus destroyImage(VADriverContextP ctx, VAImageID id);
+VAStatus setImagePalette(VADriverContextP ctx, VAImageID id, unsigned char* palette);
+VAStatus getImage(VADriverContextP ctx, VASurfaceID id, int x, int y, unsigned width, unsigned height, VAImageID image);
+VAStatus putImage(VADriverContextP ctx, VASurfaceID id, VAImageID image, int srcx, int srcy, unsigned srcw,
+    unsigned srch, int dstx, int dsty, unsigned dstw, unsigned dsth);
+
+VAStatus querySubpictureFormats(VADriverContextP ctx, VAImageFormat* formats, unsigned* flags, unsigned* count);
+VAStatus createSubpicture(VADriverContextP ctx, VAImageID image, VASubpictureID* id);
+VAStatus destroySubpicture(VADriverContextP ctx, VASubpictureID id);
+VAStatus setSubpictureImage(VADriverContextP ctx, VASubpictureID id, VAImageID image);
+VAStatus setSubpictureChromakey(VADriverContextP ctx, VASubpictureID id, unsigned min, unsigned max, unsigned mask);
+VAStatus setSubpictureGlobalAlpha(VADriverContextP ctx, VASubpictureID id, float alpha);
+VAStatus associateSubpicture(VADriverContextP ctx, VASubpictureID id, VASurfaceID* surfaces, int count, short srcx,
+    short srcy, unsigned short srcw, unsigned short srch, short dstx, short dsty, unsigned short dstw,
+    unsigned short dsth, unsigned flags);
+VAStatus deassociateSubpicture(VADriverContextP ctx, VASubpictureID id, VASurfaceID* surfaces, int count);
+
+} // namespace va

@@ -1,0 +1,231 @@
+// SPDX-License-Identifier: MIT
+//
+// Driver init/terminate, capability probe, and the helpers every other
+// src/va file shares.
+
+#include "driver.h"
+
+#include "../util/error.h"
+
+#include <algorithm>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+
+extern "C" {
+#include <linux/v4l2-controls.h>
+#include <va/va_drmcommon.h>
+}
+
+namespace va {
+
+VAStatus report(VADriverContextP ctx, const char* where, const std::exception& error)
+{
+    VAStatus status = VA_STATUS_ERROR_OPERATION_FAILED;
+    if (const auto* iris_error = dynamic_cast<const iris::Error*>(&error))
+        status = iris_error->status;
+    if (ctx && ctx->error_callback)
+        ctx->error_callback(ctx, const_cast<char*>((std::string(where) + ": " + error.what() + "\n").c_str()));
+    data(ctx).trace("va error where=%s status=%d: %s", where, status, error.what());
+    return status;
+}
+
+std::shared_ptr<Surface> surface(DriverData& d, VASurfaceID id)
+{
+    auto it = d.surfaces.find(id);
+    iris::require(it != d.surfaces.end(), "invalid surface", VA_STATUS_ERROR_INVALID_SURFACE);
+    return it->second;
+}
+
+std::shared_ptr<Context> context(DriverData& d, VAContextID id)
+{
+    auto it = d.contexts.find(id);
+    iris::require(it != d.contexts.end(), "invalid context", VA_STATUS_ERROR_INVALID_CONTEXT);
+    return it->second;
+}
+
+std::shared_ptr<Buffer> buffer(DriverData& d, VABufferID id)
+{
+    auto it = d.buffers.find(id);
+    iris::require(it != d.buffers.end(), "invalid buffer", VA_STATUS_ERROR_INVALID_BUFFER);
+    return it->second;
+}
+
+std::shared_ptr<Context> owner_of(DriverData& d, const Surface& surface)
+{
+    if (surface.owner == VA_INVALID_ID)
+        return nullptr;
+    auto it = d.contexts.find(surface.owner);
+    return it == d.contexts.end() ? nullptr : it->second;
+}
+
+iris::Publish publish_policy(const DriverData& d, const Surface& surface)
+{
+    switch (d.options.publish) {
+    case iris::PublishOverride::Copy:
+        return iris::Publish::Copy;
+    case iris::PublishOverride::Direct:
+        return iris::Publish::Direct;
+    case iris::PublishOverride::Auto:
+        break;
+    }
+    return surface.persistent_export ? iris::Publish::Copy : iris::Publish::Direct;
+}
+
+iris::StableBuffer& ensure_stable(DriverData& d, Surface& surface)
+{
+    if (!surface.stable)
+        surface.stable = iris::allocate_stable(d.render_fd, iris::stable_layout(surface.fourcc, surface.width, surface.height));
+    return *surface.stable;
+}
+
+Capabilities probe_capabilities(const iris::Options& options)
+{
+    Capabilities caps;
+    auto device = iris::open_device(options.video_path);
+    caps.node = device->path();
+    for (uint32_t format : { V4L2_PIX_FMT_H264, V4L2_PIX_FMT_HEVC, V4L2_PIX_FMT_VP9, V4L2_PIX_FMT_AV1 })
+        if (device->format_supported(iris::Queue::Output, format))
+            caps.output_formats.insert(format);
+    caps.nv12 = device->format_supported(iris::Queue::Capture, V4L2_PIX_FMT_NV12);
+    caps.p010 = device->format_supported(iris::Queue::Capture, V4L2_PIX_FMT_P010);
+
+    // Profiles: H.264 and HEVC Main are the qualified matrix
+    // (data/iris-codec-capabilities.json). VP9 and AV1 are advertised only
+    // once their hardware gate passes (architecture §9, Phase 5).
+    if (caps.output_formats.count(V4L2_PIX_FMT_H264) && caps.nv12) {
+        caps.profiles.insert(VAProfileH264ConstrainedBaseline);
+        caps.profiles.insert(VAProfileH264Main);
+        caps.profiles.insert(VAProfileH264High);
+    }
+    if (caps.output_formats.count(V4L2_PIX_FMT_HEVC) && caps.nv12)
+        caps.profiles.insert(VAProfileHEVCMain);
+    return caps;
+}
+
+namespace {
+
+int render_fd_of(VADriverContextP ctx)
+{
+    if (!ctx->drm_state)
+        return -1;
+    const auto* state = static_cast<const drm_state*>(ctx->drm_state);
+    return (ctx->display_type & VA_DISPLAY_DRM) ? state->fd : -1;
+}
+
+} // namespace
+
+VAStatus terminate(VADriverContextP ctx)
+{
+    auto* d = static_cast<DriverData*>(ctx->pDriverData);
+    if (!d)
+        return VA_STATUS_SUCCESS;
+    // Contexts first: their sessions drain and close before surfaces drop
+    // the frames they hold.
+    while (!d->contexts.empty())
+        destroyContext(ctx, d->contexts.begin()->first);
+    d->configs.clear();
+    d->images.clear();
+    d->buffers.clear();
+    d->surfaces.clear();
+    d->copier.reset();
+    delete d;
+    ctx->pDriverData = nullptr;
+    return VA_STATUS_SUCCESS;
+}
+
+} // namespace va
+
+using namespace va;
+
+extern "C" VAStatus __attribute__((visibility("default"))) VA_DRIVER_INIT_FUNC(VADriverContextP ctx)
+{
+    auto* d = new DriverData;
+    d->options = iris::Options::from_environment();
+    d->trace = iris::Trace(d->options.trace);
+    try {
+        d->capabilities = probe_capabilities(d->options);
+    } catch (const std::exception& error) {
+        if (ctx->error_callback)
+            ctx->error_callback(ctx, const_cast<char*>((std::string("iris: ") + error.what() + "\n").c_str()));
+        delete d;
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+    d->render_fd = render_fd_of(ctx);
+    if (d->options.copy_mode == iris::CopyMode::Gpu)
+        d->copier = iris::make_gpu_copy(d->render_fd);
+    if (!d->copier)
+        d->copier = iris::make_cpu_copy();
+    d->trace("va init node=%s render_fd=%d copy=%s profiles=%zu", d->capabilities.node.c_str(), d->render_fd,
+        d->copier->name(), d->capabilities.profiles.size());
+
+    ctx->version_major = VA_MAJOR_VERSION;
+    ctx->version_minor = VA_MINOR_VERSION;
+    ctx->max_profiles = kMaxProfiles;
+    ctx->max_entrypoints = kMaxEntrypoints;
+    ctx->max_attributes = kMaxAttributes;
+    ctx->max_image_formats = kMaxImageFormats;
+    ctx->max_subpic_formats = kMaxSubpictureFormats;
+    ctx->max_display_attributes = kMaxDisplayAttributes;
+    ctx->str_vendor = kVendor;
+
+    VADriverVTable* vtable = ctx->vtable;
+    vtable->vaTerminate = terminate;
+    vtable->vaQueryConfigProfiles = queryConfigProfiles;
+    vtable->vaQueryConfigEntrypoints = queryConfigEntrypoints;
+    vtable->vaQueryConfigAttributes = queryConfigAttributes;
+    vtable->vaGetConfigAttributes = getConfigAttributes;
+    vtable->vaCreateConfig = createConfig;
+    vtable->vaDestroyConfig = destroyConfig;
+    vtable->vaQueryDisplayAttributes = queryDisplayAttributes;
+    vtable->vaGetDisplayAttributes = getDisplayAttributes;
+    vtable->vaSetDisplayAttributes = setDisplayAttributes;
+    vtable->vaCreateSurfaces = createSurfaces;
+    vtable->vaCreateSurfaces2 = createSurfaces2;
+    vtable->vaDestroySurfaces = destroySurfaces;
+    vtable->vaSyncSurface = syncSurface;
+    vtable->vaQuerySurfaceStatus = querySurfaceStatus;
+    vtable->vaQuerySurfaceAttributes = querySurfaceAttributes;
+    vtable->vaExportSurfaceHandle = exportSurfaceHandle;
+    vtable->vaPutSurface = putSurface;
+    vtable->vaLockSurface = lockSurface;
+    vtable->vaUnlockSurface = unlockSurface;
+    vtable->vaCreateContext = createContext;
+    vtable->vaDestroyContext = destroyContext;
+    vtable->vaBeginPicture = beginPicture;
+    vtable->vaRenderPicture = renderPicture;
+    vtable->vaEndPicture = endPicture;
+    vtable->vaCreateBuffer = createBuffer;
+    vtable->vaDestroyBuffer = destroyBuffer;
+    vtable->vaMapBuffer = mapBuffer;
+    vtable->vaUnmapBuffer = unmapBuffer;
+    vtable->vaBufferSetNumElements = bufferSetNumElements;
+    vtable->vaBufferInfo = bufferInfo;
+    vtable->vaAcquireBufferHandle = acquireBufferHandle;
+    vtable->vaReleaseBufferHandle = releaseBufferHandle;
+    vtable->vaQueryImageFormats = queryImageFormats;
+    vtable->vaCreateImage = createImage;
+    vtable->vaDeriveImage = deriveImage;
+    vtable->vaDestroyImage = destroyImage;
+    vtable->vaSetImagePalette = setImagePalette;
+    vtable->vaGetImage = getImage;
+    vtable->vaPutImage = putImage;
+    vtable->vaQuerySubpictureFormats = querySubpictureFormats;
+    vtable->vaCreateSubpicture = createSubpicture;
+    vtable->vaDestroySubpicture = destroySubpicture;
+    vtable->vaSetSubpictureImage = setSubpictureImage;
+    vtable->vaSetSubpictureChromakey = setSubpictureChromakey;
+    vtable->vaSetSubpictureGlobalAlpha = setSubpictureGlobalAlpha;
+    vtable->vaAssociateSubpicture = associateSubpicture;
+    vtable->vaDeassociateSubpicture = deassociateSubpicture;
+
+    ctx->pDriverData = d;
+    return VA_STATUS_SUCCESS;
+}
+
+// libva's loader has looked up the 1.0 entry point on some distributions;
+// keep it so one binary works across libva 1.x.
+extern "C" VAStatus __attribute__((visibility("default"))) __vaDriverInit_1_0(VADriverContextP ctx)
+{
+    return VA_DRIVER_INIT_FUNC(ctx);
+}

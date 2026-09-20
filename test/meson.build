@@ -9,22 +9,6 @@ if libva_drm_dep.found()
 		dependencies: [libva_dep, libva_drm_dep, libdrm_dep])
 endif
 
-stateful_session_test = executable(
-	'stateful-session-test',
-	['stateful-session-test.cc', '../src/stateful_session.cc'],
-	include_directories: include_directories('../src'),
-	cpp_args: ['-Wall', '-Wextra', '-Werror', '-std=c++20'])
-test('stateful-session', stateful_session_test)
-
-hevc_parameter_sets_test = executable(
-  'hevc-parameter-sets-test',
-  'hevc-parameter-sets-test.cc',
-  dependencies: [libva_dep, libdrm_dep, libgstcodecparsers_dep, libgstcodecs_dep,
-                 libudev_dep, kernel_dep],
-  cpp_args: ['-Wall', '-Wextra', '-std=c++20', '-ffunction-sections', '-fdata-sections'],
-  link_args: ['-Wl,--gc-sections'])
-test('hevc-parameter-sets', hevc_parameter_sets_test)
-
 # Scripted sequences against a FakeDevice: the state machine, slot ownership
 # and publish rules of src/iris without hardware (docs/architecture.md §9).
 session_test = executable(
@@ -34,14 +18,6 @@ session_test = executable(
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('session', session_test)
 
-surface_export_layout_test = executable(
-  'surface-export-layout-test',
-  ['surface-export-layout-test.cc', '../src/format.cc'],
-  dependencies: [libva_dep, libdrm_dep, libgstcodecparsers_dep, libgstcodecs_dep,
-                 libudev_dep, kernel_dep],
-  cpp_args: ['-Wall', '-std=c++20', '-ffunction-sections', '-fdata-sections'],
-  link_args: ['-Wl,--gc-sections'])
-test('surface-export-layout', surface_export_layout_test)
 
 # Hardware-independent regression guards for the browser-facing queue and
 # stable-export invariants. The integration probe above remains opt-in because

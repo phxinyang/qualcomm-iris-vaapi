@@ -13,9 +13,16 @@ set -eu
 root=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
 readme="$root/README.md"
 
-# Names read by the implementation, through either std::getenv or the
-# getenv_opt wrapper in utils.h.
-in_source=$(grep -rhoE '(std::)?getenv(_opt)?\("[A-Z0-9_]*"\)' "$root/src" \
+# Every switch is read in exactly one file (docs/architecture.md §6), through
+# the env()/env_long() helpers there. Any getenv elsewhere under src/ is a
+# violation of that rule and fails this check on its own.
+stray=$(grep -rlE '(std::)?getenv\(' "$root/src" | grep -v 'src/util/options.cc' || true)
+if [ -n "$stray" ]; then
+    echo "FAIL environment variables must be read only in src/util/options.cc; found getenv in:" >&2
+    printf '  %s\n' $stray >&2
+    exit 1
+fi
+in_source=$(grep -hoE 'env(_long)?\("[A-Z0-9_]*"\)' "$root/src/util/options.cc" \
     | sed -E 's/.*\("//; s/"\)//' \
     | grep -E '^(V4L2_VA_|LIBVA_V4L2_)' \
     | sort -u)

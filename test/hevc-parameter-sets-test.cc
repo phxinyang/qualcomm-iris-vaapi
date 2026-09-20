@@ -1,7 +1,8 @@
-// Exercise the emitted bitstream, not the order of source-code tokens. The
-// translation unit is included to test its private parameter-set generators;
-// section GC discards the device-dependent VA entry points from this test.
-#include "../src/hevc.cc"
+// Exercise the emitted bitstream, not the order of source-code tokens.
+#include "../src/codec/bitwriter.h"
+#include "../src/codec/translator.h"
+
+using iris::codec::hevc_sps;
 
 #include <iostream>
 #include <stdexcept>
@@ -127,12 +128,40 @@ void check_scaling_lists()
         matrix.ScalingListDC16x16[id] = 16 + id;
     matrix.ScalingListDC32x32[0] = 31;
     matrix.ScalingListDC32x32[1] = 253;
-    BitWriter writer;
-    write_hevc_scaling_lists(writer, matrix);
-    writer.trailing_bits();
-    std::vector<uint8_t> nal;
-    append_escaped_nal(nal, { 33 << 1, 1 }, writer);
-    SpsReader reader(nal);
+    // The scaling lists are reachable only through the SPS; parse past the
+    // fields that precede scaling_list_data().
+    VAPictureParameterBufferHEVC picture {};
+    picture.pic_width_in_luma_samples = 960;
+    picture.pic_height_in_luma_samples = 720;
+    picture.pic_fields.bits.chroma_format_idc = 1;
+    picture.pic_fields.bits.NoPicReorderingFlag = 1;
+    picture.pic_fields.bits.scaling_list_enabled_flag = 1;
+    picture.sps_max_dec_pic_buffering_minus1 = 8;
+    for (auto& reference : picture.ReferenceFrames)
+        reference.flags = VA_PICTURE_HEVC_INVALID;
+    SpsReader reader(hevc_sps(VAProfileHEVCMain, picture, &matrix));
+    reader.bits(4);
+    const unsigned layers = reader.bits(3);
+    reader.bits(1);
+    reader.skip(96);
+    reader.skip(2 * 8);
+    reader.ue();
+    reader.ue(); // chroma
+    reader.ue(); reader.ue(); // width, height
+    if (reader.bits(1))
+        for (unsigned i = 0; i < 4; ++i)
+            reader.ue();
+    reader.ue(); reader.ue(); reader.ue(); // bit depths, poc lsb
+    const unsigned first_layer = reader.bits(1) ? 0 : layers;
+    for (unsigned i = first_layer; i <= layers; ++i)
+        for (unsigned j = 0; j < 3; ++j)
+            reader.ue();
+    for (unsigned i = 0; i < 6; ++i)
+        reader.ue(); // block sizes and transform depths
+    if (reader.bits(1) != 1)
+        throw std::runtime_error("scaling_list_enabled_flag not set");
+    if (reader.bits(1) != 1)
+        throw std::runtime_error("sps_scaling_list_data_present_flag not set");
     // Fixed HEVC diagonal tables, independent of the serializer's walk.
     const unsigned scan4[] = {0,4,1,8,5,2,12,9,6,3,13,10,7,14,11,15};
     const unsigned scan8[] = {
@@ -185,7 +214,7 @@ int main()
             for (unsigned intra = 0; intra <= 3; ++intra) {
                 picture.max_transform_hierarchy_depth_inter = inter;
                 picture.max_transform_hierarchy_depth_intra = intra;
-                const auto actual = transform_depths(make_hevc_sps(picture));
+                const auto actual = transform_depths(hevc_sps(VAProfileHEVCMain, picture, nullptr));
                 if (actual != std::pair { inter, intra }) {
                     std::cerr << "FAIL HEVC SPS transform depths: expected inter=" << inter
                               << " intra=" << intra << ", got inter=" << actual.first
