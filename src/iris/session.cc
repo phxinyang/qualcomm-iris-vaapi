@@ -111,6 +111,11 @@ bool Session::supports_import() const
 {
     if (mode_ != SessionMode::DecodeOrder || import_rejected_)
         return false;
+    // VP9 is excluded until the stall measured on 2026-09-22 is understood:
+    // Chrome's VP9 session reached only 127 of 720 pictures in 30 s under
+    // Import and then failed to drain (TEST-RESULTS.md, "Import").
+    if (config_.codec_pixelformat == V4L2_PIX_FMT_VP9)
+        return false;
     return pool_.capture_count() == 0 || pool_.capture_memory() == CaptureMemory::Import;
 }
 
