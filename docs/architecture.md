@@ -114,6 +114,16 @@ When a CAPTURE completion arrives with a token that has a pending Surface:
   fallback and for diagnostics. Before writing, wait on the destination
   DMA-BUF's implicit fence (`poll(POLLOUT)`): the compositor may still be
   sampling the previous frame from that buffer.
+- **Import**: the same pre-exporting surface, but the firmware decodes
+  straight into its `StableBuffer`, which is queued into a CAPTURE pool in
+  DMABUF memory for exactly that picture. It requires decode-order output,
+  a client buffer whose layout equals the CAPTURE layout, **one client
+  buffer in flight at a time** and **no holes** (a released picture still
+  gets its buffer): the firmware picks which queued buffer a picture lands
+  in, so only an empty choice is a determined one, and a missing buffer
+  shifts every later picture into a neighbour's. A completion whose token
+  does not match its buffer's token fails both surfaces and is never
+  published. Measured scope and failures: TEST-RESULTS.md, 2026-09-22.
 
 `persistent_export` is set by `vaExportSurfaceHandle`, `vaAcquireBufferHandle`
 or a `DRM_PRIME_2` import when the surface has no token yet. It is never set
@@ -137,11 +147,12 @@ the EOS watchdog thread; `retired_contexts` reaping (a surface holds a
 `shared_ptr<Frame>`, so nothing dangles when its context dies);
 per-thread current-surface maps; `reference_wrapper` into device vectors.
 
-Client-owned CAPTURE buffers (true zero-copy for Chrome) is a research
-track, not a policy: it requires evidence that Iris fills CAPTURE buffers in
-QBUF order under decode-order output and that references live only in the
-firmware's internal DPB. It is listed in §9 with its acceptance test and
-is not scheduled.
+Client-owned CAPTURE buffers (true zero-copy for Chrome) left the research
+track on 2026-09-22 and became the Import publish policy above. The §9
+acceptance program found that the firmware does *not* fill CAPTURE buffers
+in QBUF order (`test/iris-import-probe.cc`, results in TEST-RESULTS.md);
+the policy exists because the session queues exactly one client buffer at a
+time and never skips a submitted picture.
 
 ## 4. Session state machine
 
@@ -284,11 +295,12 @@ ends with a tag. Gates are commands, not opinions.
 Phase 4 (GPU copy engine) was delivered inside Phase 3; the numbering above
 is the one the tags carry.
 
-Research track (unscheduled): client-owned CAPTURE buffers. Acceptance test
-before any code: a standalone V4L2 program that, under decode-order output,
-queues N distinct DMA-BUFs, submits N AUs, and proves by content hash that
-frame *k* landed in the *k*-th queued buffer for 1000 frames including
-B-frame streams. Without that proof the policy does not exist.
+Research track, resolved 2026-09-22: client-owned CAPTURE buffers.
+`test/iris-import-probe.cc` is the acceptance program; it proved that the
+firmware does not honour QBUF order when it has several buffers to choose
+from (246/360 wrong under the doc's original model), and the Import policy
+is the deformation that survives that finding (one buffer in flight, no
+holes). Results and the VP9 open failure: TEST-RESULTS.md.
 
 ## 10. Invariants (the ones tests exist for)
 

@@ -1197,3 +1197,57 @@ Chromium 154 entry for a build that no longer exists) and a stale driver at
 the RPM's `google-chrome-iris-v4l2.desktop`, the user-level
 `google-chrome.desktop` override that routes the plain Chrome icon through
 `iris-vaapi-browser`, and Fedora's own `chromium-browser.desktop`.
+
+## Client-owned CAPTURE buffers (Import): the §9 gate and the verdict (2026-09-22)
+
+Branch `iris/zero-copy`. Target, module and driver: boot `0bdad14e…`,
+`qcom-iris` `86e5e49a…` (decode-order), driver build `2796989e…`.
+
+The gate the architecture doc demands is `test/iris-import-probe.cc`: a
+standalone V4L2 program that feeds a stream whose every picture's luma is a
+flat grey encoding its decode-order index, queues one client DMA-BUF per
+access unit before the unit, and compares each completion's token with the
+token its buffer was queued for.
+
+What it measured:
+
+| Configuration | Wrong association |
+| --- | --- |
+| 1:1 queue-at-submit, 8-16 surfaces, no holes, B-frames | 246/360 |
+| ... bounded to 2-3 buffers in flight | 246-353/360 (pairwise swaps) |
+| 300 s Chrome, H.264 b3, holes allowed (released surfaces) | 96-272 misplaced |
+
+The pixels themselves are always correct: for a given token the grey is
+identical across runs with different surface counts (360/360), and
+completions arrive strictly in decode order. The firmware chooses which
+queued CAPTURE buffer a picture lands in; the completion names the picture
+(token/timestamp), not the buffer.
+
+Two rules then make the association exact, both measured:
+
+1. **One client buffer in flight.** The next buffer goes in only after the
+   previous completion, so the firmware has no second buffer to choose.
+2. **No holes.** A picture whose surface the client released still gets its
+   buffer (the backlog holds an owned fd duplicate); skipping it shifted
+   every later completion into a neighbour's buffer, permanently.
+
+With both, on Chrome 152 (30 s windows, platform decoder, GPU process on
+the Iris node, boot unchanged):
+
+| Stream | Import publishes | Misplaced | Dropped |
+| --- | --- | --- | --- |
+| H.264 1080p24 B-frames | 901 | 0 | 0 |
+| Frame-index 1080p30 B-frames | 1125 | 0 | 0 |
+| HEVC Main 1080p24 B-frames | 905 | 0 | 0 |
+| HEVC Main10 1080p24 B-frames | 907 | 0 | 0 |
+| VP9 1080p24 alt-ref | 127 of 720 pictures, then `no LAST after STOP` | — | stall |
+
+FFmpeg through Import decodes bit-exactly (`framemd5` identical to the
+software decoder, H.264 and HEVC); the 6-switch dynamic-resolution suite
+passes in Import mode.
+
+Verdict: the policy exists, with the two rules enforced in the session and
+the misplaced-completion check (both surfaces involved are failed, never
+published) as the fail-closed backstop. `V4L2_VA_PUBLISH=import` forces it;
+`auto` selects it for H.264/HEVC/Main10 on a decode-order kernel and keeps
+Copy for VP9 (the stall above) and for display-order kernels.
