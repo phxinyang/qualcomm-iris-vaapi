@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 
@@ -16,6 +17,8 @@ public:
     {
     }
     bool enabled() const { return enabled_; }
+    // Every record ends with ` t=<ms>` since the first record of the
+    // process: the checkers match substrings, so the suffix is additive.
     void operator()(const char* format, ...) const __attribute__((format(printf, 2, 3)))
     {
         if (!enabled_)
@@ -24,10 +27,16 @@ public:
         va_start(args, format);
         std::vfprintf(stderr, format, args);
         va_end(args);
-        std::fputc('\n', stderr);
+        std::fprintf(stderr, " t=%lld\n", static_cast<long long>(now_ms()));
     }
 
 private:
+    static int64_t now_ms()
+    {
+        static const auto start = std::chrono::steady_clock::now();
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start)
+            .count();
+    }
     bool enabled_;
 };
 
