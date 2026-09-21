@@ -72,13 +72,22 @@ public:
     virtual bool set_control(uint32_t id, int32_t value) = 0;
 
     // Buffers.
-    virtual unsigned request_buffers(Queue queue, unsigned count) = 0;
+    // memory: V4L2_MEMORY_MMAP (driver-owned) or V4L2_MEMORY_DMABUF (client
+    // buffers queued per picture, see queue_buffer_dmabuf).
+    virtual unsigned request_buffers(Queue queue, unsigned count, uint32_t memory = V4L2_MEMORY_MMAP) = 0;
     virtual BufferInfo query_buffer(Queue queue, unsigned index) = 0;
     virtual int export_buffer(Queue queue, unsigned index) = 0; // returns fd
     virtual void* map_buffer(Queue queue, const BufferInfo& info) = 0;
     virtual void unmap_buffer(void* mapping, unsigned length) = 0;
     virtual void queue_buffer(Queue queue, unsigned index, unsigned bytesused, uint64_t timestamp_us,
         uint32_t flags) = 0;
+    // One DMA-BUF of `size` bytes the decoder can write (system DMA heap);
+    // the caller closes it. Used for the scratch buffer an Import pool lends
+    // the firmware for LAST.
+    virtual int allocate_dmabuf(unsigned size) = 0;
+    // QBUF an external DMA-BUF into slot `index` of a DMABUF queue.
+    virtual void queue_buffer_dmabuf(Queue queue, unsigned index, int dmabuf_fd, unsigned length,
+        unsigned bytesused, uint64_t timestamp_us, uint32_t flags) = 0;
     // Non-blocking. nullopt on EAGAIN; throws iris::Error on EIO/EPIPE.
     virtual std::optional<Dequeued> dequeue_buffer(Queue queue) = 0;
 

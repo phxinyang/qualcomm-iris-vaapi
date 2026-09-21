@@ -12,7 +12,7 @@
 namespace iris {
 
 enum class CopyMode { Gpu, Cpu };
-enum class PublishOverride { Auto, Copy, Direct };
+enum class PublishOverride { Auto, Copy, Direct, Import };
 
 struct Options {
     // Decoder node override; when empty the node is found by QUERYCAP name.

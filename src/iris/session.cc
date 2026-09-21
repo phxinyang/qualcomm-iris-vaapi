@@ -22,6 +22,9 @@ constexpr unsigned kMaxCapturePool = 64;
 constexpr int kLastWaitMs = 2000;
 constexpr int kOutputDrainMs = 500;
 constexpr int kSourceChangeWaitMs = 5000;
+// Bound on the client buffer's implicit fence before it is handed to the
+// firmware: the compositor may still be sampling the previous picture.
+constexpr int kImportFenceMs = 2000;
 
 // Compressed AU capacity when the caller has no better estimate: Chromium
 // and GStreamer both size the OUTPUT plane from the coded area with a floor.
@@ -99,6 +102,22 @@ bool Session::expired(std::chrono::steady_clock::time_point deadline) const
     return std::chrono::steady_clock::now() >= deadline;
 }
 
+bool Session::supports_import() const
+{
+    if (mode_ != SessionMode::DecodeOrder || import_rejected_)
+        return false;
+    return pool_.capture_count() == 0 || pool_.capture_memory() == CaptureMemory::Import;
+}
+
+bool Session::import_compatible(const Layout& client, const Layout& capture)
+{
+    // The firmware writes with the CAPTURE pitch and puts chroma after
+    // storage_height luma rows; the client's exported offsets are fixed, so
+    // both must agree exactly and the buffer must hold the whole plane set.
+    return client.fourcc == capture.fourcc && client.stride == capture.stride
+        && client.chroma_offset() == capture.chroma_offset() && client.size >= capture.size;
+}
+
 // ---------------------------------------------------------------------------
 // Bring-up
 
@@ -168,9 +187,35 @@ void Session::configure_capture()
     layout.width = granted.width;
     layout.height = granted.height;
     layout.stride = granted.bytesperline;
-    layout.storage_height = granted.height;
+    // iris_buffer.c: luma scanlines aligned to 32, chroma directly after.
+    layout.storage_height = (granted.height + 31) & ~31u;
     layout.data_offset = 0;
     layout.size = granted.sizeimage;
+
+    // Import memory when the first picture asks for it and the contract
+    // holds (docs/architecture.md §3.3): decode-order output, and the
+    // client's buffer laid out exactly as the firmware will write it.
+    CaptureMemory memory = CaptureMemory::Mmap;
+    if (!pending_.empty() && pending_.begin()->second->publish == Publish::Import) {
+        const Target& first = *pending_.begin()->second;
+        const char* why = nullptr;
+        if (mode_ != SessionMode::DecodeOrder)
+            why = "display-order output";
+        else if (!first.destination)
+            why = "no client buffer";
+        else if (!import_compatible(first.destination->layout(), layout))
+            why = "client layout differs from the CAPTURE layout";
+        if (why) {
+            import_rejected_ = true;
+            trace_("import rejected: %s (client stride=%u chroma=%u size=%u; capture stride=%u chroma=%u size=%u)", why,
+                first.destination ? first.destination->layout().stride : 0,
+                first.destination ? first.destination->layout().chroma_offset() : 0,
+                first.destination ? first.destination->size() : 0, layout.stride, layout.chroma_offset(),
+                layout.size);
+        } else {
+            memory = CaptureMemory::Import;
+        }
+    }
 
     // Pool sizing: the client's surface count plus in-flight headroom, never
     // below the firmware's minimum, never below 32 (the old vb2 ceiling that
@@ -179,20 +224,60 @@ void Session::configure_capture()
     unsigned wanted = std::clamp(config_.surface_count + 4, kMinCapturePool, kMaxCapturePool);
     if (minimum && *minimum > 0)
         wanted = std::max(wanted, static_cast<unsigned>(*minimum));
-    pool_.allocate_capture(wanted, layout);
-    trace_("capture configure %ux%u stride=%u size=%u visible=%ux%u pool=%u firmware-min=%d", granted.width,
-        granted.height, granted.bytesperline, granted.sizeimage, visible_.width, visible_.height,
-        pool_.capture_count(), minimum ? *minimum : -1);
+    pool_.allocate_capture(wanted, layout, memory);
+    trace_("capture configure %ux%u stride=%u size=%u visible=%ux%u pool=%u memory=%s firmware-min=%d",
+        granted.width, granted.height, granted.bytesperline, granted.sizeimage, visible_.width, visible_.height,
+        pool_.capture_count(), memory == CaptureMemory::Import ? "import" : "mmap", minimum ? *minimum : -1);
     enter_streaming();
 }
 
 void Session::enter_streaming()
 {
-    pool_.requeue_capture();
+    if (pool_.capture_memory() == CaptureMemory::Import) {
+        // The pictures already submitted (the first AU, or the one that
+        // announced a resolution change) get their buffers now, in token
+        // order, so the firmware fills them in the order it decodes.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kImportFenceMs);
+        for (auto it = pending_.begin(); it != pending_.end();) {
+            Target& target = *it->second;
+            const uint64_t token = it->first;
+            ++it;
+            try {
+                queue_import(target, token, deadline);
+            } catch (const Error& error) {
+                trace_("import token=%llu failed: %s", static_cast<unsigned long long>(token), error.what());
+                pending_.erase(token);
+                target.pending = false;
+                target.error = true;
+                ++stats_.errors;
+            }
+        }
+    } else {
+        pool_.requeue_capture();
+    }
     device_->stream(Queue::Capture, true);
     source_change_ = false;
     saw_last_ = false;
     state_ = SessionState::Streaming;
+}
+
+void Session::queue_import(Target& target, uint64_t token, std::chrono::steady_clock::time_point deadline)
+{
+    require(target.publish != Publish::Direct, "an Import session needs an exported surface for every picture",
+        VA_STATUS_ERROR_INVALID_SURFACE);
+    require(target.destination != nullptr, "Import target without a client buffer", VA_STATUS_ERROR_INVALID_SURFACE);
+    require(import_compatible(target.destination->layout(), pool_.capture_layout()),
+        "client buffer layout does not match the CAPTURE layout", VA_STATUS_ERROR_INVALID_SURFACE);
+    // The compositor may still be sampling the previous picture from this
+    // buffer; the firmware must not write under it.
+    wait_dma_buf(target.destination->fd(), true, kImportFenceMs);
+    std::optional<unsigned> slot;
+    while (!(slot = pool_.queue_capture_import(target.destination->fd(), target.destination->size(), token))) {
+        require(!expired(deadline), "every CAPTURE slot is in flight", VA_STATUS_ERROR_TIMEDOUT);
+        pump(20);
+    }
+    trace_("import token=%llu index=%u fd=%d", static_cast<unsigned long long>(token), *slot,
+        target.destination->fd());
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +325,19 @@ void Session::submit(const uint8_t* data, size_t size, Target& target)
         std::fflush(static_cast<FILE*>(dump_));
     }
     const uint64_t token = next_token_++;
+    if (pool_.capture_memory() == CaptureMemory::Import) {
+        // The client's buffer goes in before the bitstream so it is the next
+        // one the firmware picks up when it decodes this picture. A buffer
+        // of another geometry cannot be written by the current CAPTURE
+        // format: it is the first picture of a resolution change and gets
+        // queued when the pool is rebuilt (enter_streaming). If no change
+        // follows, the completion lands elsewhere and is reported misplaced.
+        if (target.destination && import_compatible(target.destination->layout(), pool_.capture_layout()))
+            queue_import(target, token, deadline);
+        else
+            trace_("import token=%llu deferred: geometry differs from the CAPTURE format",
+                static_cast<unsigned long long>(token));
+    }
     device_->queue_buffer(Queue::Output, slot->index, static_cast<unsigned>(size), token, 0);
     slot->queued = true;
     slot->token = token;
@@ -350,6 +448,7 @@ bool Session::handle_capture_returns()
     bool last = false;
     while (auto returned = device_->dequeue_buffer(Queue::Capture)) {
         FrameRef frame = pool_.take_capture(returned->index);
+        const uint64_t slot_token = pool_.take_import_token(returned->index);
         const bool payload = returned->bytesused > returned->data_offset;
         if (returned->last()) {
             last = true;
@@ -387,6 +486,19 @@ bool Session::handle_capture_returns()
                 static_cast<unsigned long long>(returned->timestamp_us), returned->index, returned->flags);
             continue;
         }
+        if (pool_.capture_memory() == CaptureMemory::Import && slot_token != returned->timestamp_us) {
+            // The firmware wrote this picture into a buffer queued for a
+            // different token: the client's surface for this token holds
+            // someone else's pixels. Never report it as decoded.
+            target.pending = false;
+            target.error = true;
+            ++stats_.errors;
+            ++stats_.misplaced;
+            trace_("capture token=%llu index=%u flags=%#x publish=misplaced slot_token=%llu",
+                static_cast<unsigned long long>(returned->timestamp_us), returned->index, returned->flags,
+                static_cast<unsigned long long>(slot_token));
+            continue;
+        }
         frame->layout().data_offset = returned->data_offset;
         publish(target, frame, *returned);
         cold_ = false;
@@ -401,6 +513,17 @@ bool Session::handle_capture_returns()
 void Session::publish(Target& target, FrameRef frame, const Dequeued& completion)
 {
     const char* how = "direct";
+    if (pool_.capture_memory() == CaptureMemory::Import) {
+        // The firmware wrote straight into the client's buffer; the slot
+        // carried nothing of ours and is free once the ref drops.
+        how = "import";
+        target.publish = Publish::Import;
+        target.frame.reset();
+    } else if (target.publish == Publish::Import) {
+        // Asked for Import, got an Mmap pool: the client buffer exists, so
+        // fill it the Copy way. supports_import() tells the caller.
+        target.publish = Publish::Copy;
+    }
     if (target.publish == Publish::Copy) {
         require(target.destination != nullptr && copier_ != nullptr, "copy publish without a destination");
         try {
@@ -414,7 +537,7 @@ void Session::publish(Target& target, FrameRef frame, const Dequeued& completion
         how = copier_->name();
         // The slot goes back to the firmware as soon as `frame` drops.
         target.frame.reset();
-    } else {
+    } else if (target.publish == Publish::Direct) {
         target.frame = frame;
     }
     target.pending = false;
@@ -515,6 +638,10 @@ void Session::drain(const char* reason, bool wait_output)
     trace_("drain begin reason=%s pending=%zu", reason, pending_.size());
     state_ = SessionState::Draining;
     saw_last_ = false;
+    // LAST arrives on a buffer of its own; an Import pool has none queued
+    // beyond the pictures in flight, so lend the firmware a scratch one.
+    if (pool_.capture_memory() == CaptureMemory::Import)
+        pool_.queue_capture_scratch();
     require(device_->decoder_command(V4L2_DEC_CMD_STOP), "DECODER_CMD_STOP busy", VA_STATUS_ERROR_HW_BUSY);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kLastWaitMs);
     while (!saw_last_) {
@@ -650,10 +777,12 @@ void Session::finish()
         // fail() already ran.
     }
     state_ = state_ == SessionState::Failed ? SessionState::Failed : SessionState::Finished;
-    trace_("session finish submitted=%llu completed=%llu errors=%llu drops=%llu timeouts=%llu drains=%llu",
+    trace_("session finish submitted=%llu completed=%llu errors=%llu drops=%llu timeouts=%llu drains=%llu "
+           "misplaced=%llu",
         static_cast<unsigned long long>(stats_.submitted), static_cast<unsigned long long>(stats_.completed),
         static_cast<unsigned long long>(stats_.errors), static_cast<unsigned long long>(stats_.drops),
-        static_cast<unsigned long long>(stats_.timeouts), static_cast<unsigned long long>(stats_.drains));
+        static_cast<unsigned long long>(stats_.timeouts), static_cast<unsigned long long>(stats_.drains),
+        static_cast<unsigned long long>(stats_.misplaced));
 }
 
 void Session::fail(const char* what)

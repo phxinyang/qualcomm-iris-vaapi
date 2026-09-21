@@ -2,6 +2,8 @@
 
 #include "device.h"
 
+#include "alloc.h"
+
 #include "../util/error.h"
 
 #include <cerrno>
@@ -126,13 +128,14 @@ public:
         throw Error(VA_STATUS_ERROR_OPERATION_FAILED, std::string("S_CTRL: ") + std::strerror(errno));
     }
 
-    unsigned request_buffers(Queue queue, unsigned count) override
+    unsigned request_buffers(Queue queue, unsigned count, uint32_t memory = V4L2_MEMORY_MMAP) override
     {
         v4l2_requestbuffers request = {};
         request.type = buf_type(queue);
-        request.memory = V4L2_MEMORY_MMAP;
+        request.memory = memory;
         request.count = count;
         checked(fd_, VIDIOC_REQBUFS, &request, "REQBUFS");
+        memory_[queue == Queue::Output ? 0 : 1] = memory;
         return request.count;
     }
 
@@ -194,12 +197,35 @@ public:
         checked(fd_, VIDIOC_QBUF, &buffer, "QBUF");
     }
 
+    int allocate_dmabuf(unsigned size) override { return allocate_dma_heap(size); }
+
+    void queue_buffer_dmabuf(Queue queue, unsigned index, int dmabuf_fd, unsigned length,
+        unsigned bytesused, uint64_t timestamp_us, uint32_t flags) override
+    {
+        v4l2_plane plane = {};
+        v4l2_buffer buffer = {};
+        buffer.type = buf_type(queue);
+        buffer.index = index;
+        buffer.memory = V4L2_MEMORY_DMABUF;
+        buffer.length = 1;
+        buffer.m.planes = &plane;
+        buffer.field = V4L2_FIELD_NONE;
+        buffer.flags = flags;
+        plane.m.fd = dmabuf_fd;
+        plane.length = length;
+        plane.bytesused = bytesused;
+        plane.data_offset = 0;
+        buffer.timestamp.tv_sec = static_cast<time_t>(timestamp_us / 1000000);
+        buffer.timestamp.tv_usec = static_cast<suseconds_t>(timestamp_us % 1000000);
+        checked(fd_, VIDIOC_QBUF, &buffer, "QBUF DMABUF");
+    }
+
     std::optional<Dequeued> dequeue_buffer(Queue queue) override
     {
         v4l2_plane plane = {};
         v4l2_buffer buffer = {};
         buffer.type = buf_type(queue);
-        buffer.memory = V4L2_MEMORY_MMAP;
+        buffer.memory = memory_[queue == Queue::Output ? 0 : 1];
         buffer.length = 1;
         buffer.m.planes = &plane;
         if (call(fd_, VIDIOC_DQBUF, &buffer) < 0) {
@@ -278,6 +304,7 @@ private:
 
     std::string path_;
     int fd_;
+    uint32_t memory_[2] = { V4L2_MEMORY_MMAP, V4L2_MEMORY_MMAP };
 };
 
 bool is_iris_decoder(int fd)

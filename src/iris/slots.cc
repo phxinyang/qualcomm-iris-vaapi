@@ -29,6 +29,7 @@ Frame::~Frame()
 
 uint8_t* Frame::map()
 {
+    require(fd_ >= 0, "an Import slot has no memory of its own");
     if (!mapping_) {
         void* mapping = mmap(nullptr, length_, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
         require(mapping != MAP_FAILED, "mmap CAPTURE DMA-BUF");
@@ -41,17 +42,27 @@ SlotPool::~SlotPool()
 {
     for (auto& slot : output_)
         device_.unmap_buffer(slot.mapping, slot.length);
+    if (scratch_fd_ >= 0)
+        close(scratch_fd_);
 }
 
-void SlotPool::allocate_capture(unsigned count, const Layout& layout)
+void SlotPool::allocate_capture(unsigned count, const Layout& layout, CaptureMemory memory)
 {
     require(capture_.empty(), "CAPTURE pool already allocated");
-    const unsigned granted = device_.request_buffers(Queue::Capture, count);
+    const uint32_t v4l2_memory = memory == CaptureMemory::Import ? V4L2_MEMORY_DMABUF : V4L2_MEMORY_MMAP;
+    const unsigned granted = device_.request_buffers(Queue::Capture, count, v4l2_memory);
     require(granted > 0 && granted <= 64, "REQBUFS CAPTURE returned an unusable count",
         VA_STATUS_ERROR_ALLOCATION_FAILED);
     capture_layout_ = layout;
+    capture_memory_ = memory;
     capture_.reserve(granted);
     for (unsigned i = 0; i < granted; ++i) {
+        if (memory == CaptureMemory::Import) {
+            auto frame = std::make_shared<Frame>(device_, i, -1, layout.size);
+            frame->layout() = layout;
+            capture_.push_back(std::move(frame));
+            continue;
+        }
         const BufferInfo info = device_.query_buffer(Queue::Capture, i);
         const int fd = device_.export_buffer(Queue::Capture, i);
         auto frame = std::make_shared<Frame>(device_, i, fd, info.length);
@@ -82,7 +93,13 @@ void SlotPool::release_capture()
     for (const auto& frame : capture_)
         require(frame.use_count() == 1, "CAPTURE slot still held during release");
     capture_.clear();
-    device_.request_buffers(Queue::Capture, 0);
+    device_.request_buffers(Queue::Capture, 0,
+        capture_memory_ == CaptureMemory::Import ? V4L2_MEMORY_DMABUF : V4L2_MEMORY_MMAP);
+    capture_memory_ = CaptureMemory::Mmap;
+    if (scratch_fd_ >= 0) {
+        close(scratch_fd_);
+        scratch_fd_ = -1;
+    }
 }
 
 void SlotPool::release_output()
@@ -97,6 +114,8 @@ void SlotPool::release_output()
 
 unsigned SlotPool::requeue_capture()
 {
+    if (capture_memory_ == CaptureMemory::Import)
+        return 0;
     unsigned queued = 0;
     for (auto& frame : capture_) {
         if (frame->queued_ || frame.use_count() != 1)
@@ -106,6 +125,56 @@ unsigned SlotPool::requeue_capture()
         ++queued;
     }
     return queued;
+}
+
+std::optional<unsigned> SlotPool::queue_capture_import(int fd, unsigned length, uint64_t token)
+{
+    require(capture_memory_ == CaptureMemory::Import, "queue_capture_import on an Mmap pool");
+    Frame* chosen = nullptr;
+    for (auto& frame : capture_) {
+        if (frame->queued_)
+            continue;
+        if (frame->import_fd_ == fd) {
+            chosen = frame.get();
+            break;
+        }
+        if (!chosen)
+            chosen = frame.get();
+    }
+    if (!chosen)
+        return std::nullopt;
+    device_.queue_buffer_dmabuf(Queue::Capture, chosen->index_, fd, length, 0, 0, 0);
+    chosen->queued_ = true;
+    chosen->import_fd_ = fd;
+    chosen->import_token_ = token;
+    return chosen->index_;
+}
+
+uint64_t SlotPool::take_import_token(unsigned index)
+{
+    require(index < capture_.size(), "CAPTURE index out of range", VA_STATUS_ERROR_DECODING_ERROR);
+    const uint64_t token = capture_[index]->import_token_;
+    capture_[index]->import_token_ = 0;
+    return token;
+}
+
+void SlotPool::queue_capture_scratch()
+{
+    require(capture_memory_ == CaptureMemory::Import, "scratch on an Mmap pool");
+    if (scratch_fd_ < 0) {
+        scratch_fd_ = device_.allocate_dmabuf(capture_layout_.size);
+        require(scratch_fd_ >= 0, "allocate scratch CAPTURE buffer", VA_STATUS_ERROR_ALLOCATION_FAILED);
+    }
+    for (auto& frame : capture_) {
+        if (frame->queued_)
+            continue;
+        device_.queue_buffer_dmabuf(Queue::Capture, frame->index_, scratch_fd_, capture_layout_.size, 0, 0, 0);
+        frame->queued_ = true;
+        frame->import_fd_ = scratch_fd_;
+        frame->import_token_ = 0;
+        return;
+    }
+    require(false, "no free CAPTURE slot for the scratch buffer", VA_STATUS_ERROR_HW_BUSY);
 }
 
 FrameRef SlotPool::take_capture(unsigned index)
@@ -150,8 +219,10 @@ unsigned SlotPool::output_queued() const
 
 void SlotPool::mark_all_capture_returned()
 {
-    for (auto& frame : capture_)
+    for (auto& frame : capture_) {
         frame->queued_ = false;
+        frame->import_token_ = 0;
+    }
 }
 
 void SlotPool::mark_all_output_returned()

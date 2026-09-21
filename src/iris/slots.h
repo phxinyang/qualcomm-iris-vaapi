@@ -6,6 +6,12 @@
 //   1 and !queued -> free, requeued on the next service pass
 //   >1            -> held by a Surface or a copy engine view
 // There is no separate "held" flag to drift out of sync with reality.
+//
+// An Import pool (CaptureMemory::Import) owns no memory: every slot is a
+// vb2 index that carries whichever client DMA-BUF was queued into it for one
+// picture. Frames of such a pool have no fd of their own, are never
+// exported or held, and record the token they were queued for so the
+// completion can be checked against the buffer it landed in.
 
 #pragma once
 
@@ -13,9 +19,12 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace iris {
+
+enum class CaptureMemory { Mmap, Import };
 
 struct Layout {
     uint32_t fourcc = 0; // VA fourcc (NV12 / P010)
@@ -45,6 +54,10 @@ public:
     uint64_t id() const { return id_; }
     unsigned length() const { return length_; }
     bool queued() const { return queued_; }
+    // Import pools: the token whose picture this slot was queued for, and
+    // the client fd it carries. 0 / -1 when idle.
+    uint64_t import_token() const { return import_token_; }
+    int import_fd() const { return import_fd_; }
     const Layout& layout() const { return layout_; }
     Layout& layout() { return layout_; }
     // CPU view of the DMA-BUF, mapped on first use. Only the CPU copy
@@ -60,6 +73,8 @@ private:
     int fd_;
     unsigned length_;
     bool queued_ = false;
+    uint64_t import_token_ = 0;
+    int import_fd_ = -1;
     void* mapping_ = nullptr;
     Layout layout_;
 };
@@ -85,16 +100,30 @@ public:
     SlotPool(const SlotPool&) = delete;
     SlotPool& operator=(const SlotPool&) = delete;
 
-    // Allocate and export a CAPTURE pool. Every slot is exported once here;
-    // the fd lives as long as the Frame.
-    void allocate_capture(unsigned count, const Layout& layout);
+    // Allocate a CAPTURE pool. Mmap: every slot is exported once here and
+    // the fd lives as long as the Frame. Import: REQBUFS(DMABUF), no memory,
+    // slots are filled per picture by queue_capture_import().
+    void allocate_capture(unsigned count, const Layout& layout, CaptureMemory memory = CaptureMemory::Mmap);
+    CaptureMemory capture_memory() const { return capture_memory_; }
     void allocate_output(unsigned count);
     // REQBUFS(0) both queues; requires no Frame to be held (use count 1).
     void release_capture();
     void release_output();
 
-    // QBUF every free CAPTURE slot. Returns the number queued.
+    // QBUF every free CAPTURE slot. Returns the number queued. A no-op for
+    // an Import pool: its slots are queued by queue_capture_import() only.
     unsigned requeue_capture();
+    // Import pool: queue the client's DMA-BUF `fd` (of `length` bytes) into
+    // a free slot for the picture `token`. Prefers the slot that last
+    // carried this fd (vb2 keeps the attachment when the fd is unchanged).
+    // Returns the slot index, or nullopt when every slot is in flight.
+    std::optional<unsigned> queue_capture_import(int fd, unsigned length, uint64_t token);
+    // Import pool: the token slot `index` was queued for (0 for scratch or
+    // idle); clears it.
+    uint64_t take_import_token(unsigned index);
+    // Import pool: queue a driver-owned scratch buffer so the firmware has
+    // somewhere to put LAST. Allocated once, from the system DMA heap.
+    void queue_capture_scratch();
     // Called on CAPTURE DQBUF: mark the slot returned and hand out the ref.
     FrameRef take_capture(unsigned index);
     // The number of slots the firmware currently owns.
@@ -120,6 +149,8 @@ private:
     std::vector<FrameRef> capture_;
     std::vector<OutputSlot> output_;
     Layout capture_layout_;
+    CaptureMemory capture_memory_ = CaptureMemory::Mmap;
+    int scratch_fd_ = -1;
 };
 
 } // namespace iris

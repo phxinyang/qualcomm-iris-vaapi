@@ -47,6 +47,8 @@ Options Options::from_environment()
             options.publish = PublishOverride::Copy;
         else if (std::strcmp(publish, "direct") == 0)
             options.publish = PublishOverride::Direct;
+        else if (std::strcmp(publish, "import") == 0)
+            options.publish = PublishOverride::Import;
     }
     if (const char* dump = env("V4L2_VA_DUMP"))
         options.dump_dir = dump;

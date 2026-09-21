@@ -52,8 +52,8 @@ std::unique_ptr<iris::codec::Translator> make_translator(VAProfile profile)
 // publish policy from the surface's export history.
 void submit(DriverData& d, Context& c, Surface& s, const iris::codec::AccessUnit& au)
 {
-    s.target.publish = publish_policy(d, s);
-    if (s.target.publish == iris::Publish::Copy)
+    s.target.publish = publish_policy(d, s, *c.session);
+    if (s.target.publish != iris::Publish::Direct)
         s.target.destination = &ensure_stable(d, s);
     else
         s.target.destination = nullptr;

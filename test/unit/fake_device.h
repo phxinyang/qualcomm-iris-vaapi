@@ -63,6 +63,12 @@ public:
     void inject_capture_eio() { capture_eio_ = true; }
     // Stop completing until released (models a stalled reorder window).
     void stall(bool on) { stalled_ = on; }
+    // Complete the next N pictures into the second queued CAPTURE slot
+    // instead of the first (a firmware that ignores QBUF order).
+    void inject_misorder(unsigned count) { misorder_ = count; }
+    // The client fd last queued into a CAPTURE slot (DMABUF queues).
+    int capture_fd(unsigned index) const { return index < capture_fds_.size() ? capture_fds_[index] : -1; }
+    uint32_t capture_memory() const { return capture_memory_; }
     // By default every poll() completes one queued AU, modelling firmware
     // progress while the driver waits. Off = only explicit tick().
     void set_auto_tick(bool on) { auto_tick_ = on; }
@@ -90,13 +96,16 @@ public:
     bool format_supported(Queue, uint32_t) override { return true; }
     std::optional<int32_t> get_control(uint32_t id) override;
     bool set_control(uint32_t id, int32_t value) override;
-    unsigned request_buffers(Queue queue, unsigned count) override;
+    unsigned request_buffers(Queue queue, unsigned count, uint32_t memory = V4L2_MEMORY_MMAP) override;
     BufferInfo query_buffer(Queue queue, unsigned index) override;
     int export_buffer(Queue queue, unsigned index) override;
     void* map_buffer(Queue queue, const BufferInfo& info) override;
     void unmap_buffer(void* mapping, unsigned length) override;
     void queue_buffer(Queue queue, unsigned index, unsigned bytesused, uint64_t timestamp_us, uint32_t flags)
         override;
+    int allocate_dmabuf(unsigned size) override;
+    void queue_buffer_dmabuf(Queue queue, unsigned index, int dmabuf_fd, unsigned length,
+        unsigned bytesused, uint64_t timestamp_us, uint32_t flags) override;
     std::optional<Dequeued> dequeue_buffer(Queue queue) override;
     void stream(Queue queue, bool on) override;
     void subscribe(uint32_t) override { }
@@ -134,6 +143,9 @@ private:
     bool capture_eio_ = false;
     bool auto_tick_ = true;
     unsigned decoded_since_stream_ = 0;
+    uint32_t capture_memory_ = V4L2_MEMORY_MMAP;
+    std::vector<int> capture_fds_;
+    unsigned misorder_ = 0;
 };
 
 } // namespace iris::test

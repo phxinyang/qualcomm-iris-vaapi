@@ -48,7 +48,7 @@ Every switch the driver reads is listed here and read in exactly one place, `src
 | `V4L2_VA_TRACE` | off | Per-frame trace on stderr. Any value enables it. The record vocabulary is documented in `docs/architecture.md`. |
 | `V4L2_VA_SYNC_TIMEOUT_MS` | `2000` | Bounded `vaSyncSurface()` wait, `50..60000`. Without an override the first frame of a cold session may wait up to `30000` ms for firmware bring-up. |
 | `V4L2_VA_COPY` | `gpu` | Engine used to publish a frame into a surface the client exported before its first decode: `gpu` (EGL blit on Adreno) or `cpu`. |
-| `V4L2_VA_PUBLISH` | `auto` | Force `copy` or `direct` publication for every surface. Diagnostics only; `auto` picks per surface from the client's export behaviour. |
+| `V4L2_VA_PUBLISH` | `auto` | Force `copy`, `direct` or `import` publication for every surface. Diagnostics only; `auto` picks per surface from the client's export behaviour (Direct for post-decode exporters, Import for pre-exporters on a decode-order kernel, Copy otherwise). `import` degrades to `copy` where the session cannot honour it. |
 | `V4L2_VA_DUMP` | off | Directory to write every submitted access unit into. |
 | `V4L2_VA_EXPERIMENTAL_PROFILES` | off | Also advertise AV1. Qualification only; the launcher never sets it. |
 

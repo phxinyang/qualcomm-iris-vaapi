@@ -450,12 +450,176 @@ void test_visible_rectangle_prefers_kernel_compose_when_sane()
 
 void test_stable_layout()
 {
+    // iris_buffer.c: pitch to 128, luma rows to 32, chroma rows to 16,
+    // total to 4 KiB. 720x405 -> 768 x 416 luma, 768 x 208 chroma.
     const Layout l = stable_layout(VA_FOURCC_NV12, 720, 405);
     CHECK(l.stride == 768);
-    CHECK(l.chroma_offset() == 768 * 405);
-    CHECK(l.size == 768 * 405 + 768 * 203); // odd height rounds chroma up
+    CHECK(l.storage_height == 416);
+    CHECK(l.chroma_offset() == 768 * 416);
+    CHECK(l.size == ((768 * 416 + 768 * 208 + 4095) & ~4095u));
+    // 1080p: what the kernel reports as sizeimage for NV12.
+    const Layout f = stable_layout(VA_FOURCC_NV12, 1920, 1080);
+    CHECK(f.stride == 1920 && f.storage_height == 1088);
+    CHECK(f.size == 1920 * 1088 + 1920 * 544);
     const Layout p = stable_layout(VA_FOURCC_P010, 1920, 1080);
     CHECK(p.stride == 3840);
+    CHECK(p.storage_height == 1088);
+}
+
+// ---- Import publish (client-owned CAPTURE buffers) ----
+
+struct ClientBuffer {
+    int fd = -1;
+    std::unique_ptr<StableBuffer> stable;
+    explicit ClientBuffer(const Layout& layout)
+    {
+        fd = memfd_create("client", 0);
+        CHECK(fd >= 0 && ftruncate(fd, layout.size) == 0);
+        stable = std::make_unique<StableBuffer>(fd, layout.size, MemoryOrigin::DmaHeap, layout);
+    }
+};
+
+Layout capture_layout_of(const FakeConfig& fc)
+{
+    Layout l = stable_layout(VA_FOURCC_NV12, fc.coded_width, fc.coded_height);
+    return l;
+}
+
+void test_import_queues_client_buffer_per_picture()
+{
+    Harness h;
+    const Layout layout = capture_layout_of({});
+    ClientBuffer a(layout), b(layout);
+    Target ta, tb;
+    ta.publish = tb.publish = Publish::Import;
+    ta.destination = a.stable.get();
+    tb.destination = b.stable.get();
+    h.submit(ta);
+    CHECK(h.session->capture_memory() == CaptureMemory::Import);
+    CHECK(log_has(*h.fake, "REQBUFS CAPTURE 32 DMABUF"));
+    CHECK(h.fake->capture_memory() == V4L2_MEMORY_DMABUF);
+    // The first picture's buffer went in before CAPTURE streamed.
+    const std::string first_qbuf = "QBUF CAPTURE DMABUF 0 fd=" + std::to_string(a.fd);
+    CHECK(log_index(*h.fake, first_qbuf.c_str()) < log_index(*h.fake, "STREAMON CAPTURE"));
+    h.session->wait(ta);
+    CHECK(ta.completed && !ta.error && ta.frame == nullptr);
+    CHECK(h.fake->capture_fd(0) == a.fd);
+    h.submit(tb);
+    h.session->wait(tb);
+    CHECK(tb.completed && !tb.error);
+    CHECK(h.session->capture_held() == 0);
+    // Only the pictures in flight ever occupy slots: nothing is pre-queued.
+    CHECK(h.session->capture_queued() == 0);
+    CHECK(h.session->supports_import());
+    // Reusing a buffer picks the slot that already carries it.
+    h.submit(ta);
+    h.session->wait(ta);
+    CHECK(h.fake->capture_fd(0) == a.fd);
+    CHECK(h.session->stats().misplaced == 0);
+}
+
+void test_import_misplaced_completion_is_an_error()
+{
+    Harness h;
+    h.fake->set_auto_tick(false);
+    const Layout layout = capture_layout_of({});
+    ClientBuffer a(layout), b(layout);
+    Target ta, tb;
+    ta.publish = tb.publish = Publish::Import;
+    ta.destination = a.stable.get();
+    tb.destination = b.stable.get();
+    h.submit(ta);
+    h.submit(tb);
+    h.fake->inject_misorder(1);
+    h.fake->tick(2);
+    // Both pictures land in the other's buffer (the swap); neither may be
+    // reported complete: the client would show foreign pixels.
+    CHECK_THROWS(h.session->wait(ta), VA_STATUS_ERROR_DECODING_ERROR);
+    CHECK(ta.error && !ta.pending);
+    CHECK_THROWS(h.session->wait(tb), VA_STATUS_ERROR_DECODING_ERROR);
+    CHECK(tb.error && !tb.pending);
+    CHECK(h.session->stats().misplaced == 2);
+    CHECK(h.session->stats().completed == 0);
+}
+
+void test_import_rejected_on_display_order_kernel()
+{
+    FakeConfig fc;
+    fc.decode_order_control = false;
+    Harness h(fc);
+    const Layout layout = capture_layout_of(fc);
+    ClientBuffer a(layout);
+    Target ta;
+    ta.publish = Publish::Import;
+    ta.destination = a.stable.get();
+    CHECK(!h.session->supports_import());
+    h.submit(ta);
+    CHECK(h.session->capture_memory() == CaptureMemory::Mmap);
+    CHECK(log_has(*h.fake, "REQBUFS CAPTURE 32") && !log_has(*h.fake, "DMABUF"));
+    h.session->wait(ta);
+    // Degraded to Copy: the pixels reached the client buffer anyway.
+    CHECK(ta.completed && !ta.error && ta.publish == Publish::Copy && ta.frame == nullptr);
+}
+
+void test_import_rejected_on_layout_mismatch()
+{
+    Harness h;
+    Layout wrong = capture_layout_of({});
+    wrong.stride += 128; // a client whose pitch the firmware cannot write
+    wrong.size = wrong.stride * (wrong.storage_height + wrong.storage_height / 2);
+    ClientBuffer a(wrong);
+    Target ta;
+    ta.publish = Publish::Import;
+    ta.destination = a.stable.get();
+    h.submit(ta);
+    CHECK(h.session->capture_memory() == CaptureMemory::Mmap);
+    CHECK(!h.session->supports_import());
+    h.session->wait(ta);
+    CHECK(ta.completed && ta.publish == Publish::Copy);
+}
+
+void test_import_drain_lends_scratch_for_last()
+{
+    Harness h;
+    const Layout layout = capture_layout_of({});
+    ClientBuffer a(layout);
+    Target ta;
+    ta.publish = Publish::Import;
+    ta.destination = a.stable.get();
+    h.submit(ta);
+    h.session->wait(ta);
+    h.session->finish();
+    CHECK(h.session->state() == SessionState::Finished);
+    CHECK(log_has(*h.fake, "DECODER_CMD STOP"));
+    // LAST needed a buffer; the session lent one rather than a client's.
+    const int last_fd = h.fake->capture_fd(0);
+    CHECK(last_fd >= 0 && last_fd != a.fd);
+}
+
+void test_import_resolution_change_rebuilds_import_pool()
+{
+    Harness h;
+    const Layout layout = capture_layout_of({});
+    ClientBuffer a(layout);
+    Target ta;
+    ta.publish = Publish::Import;
+    ta.destination = a.stable.get();
+    h.submit(ta);
+    h.session->wait(ta);
+    h.fake->inject_resolution_change(1280, 720);
+    FakeConfig small;
+    small.coded_width = 1280;
+    small.coded_height = 720;
+    ClientBuffer b(capture_layout_of(small));
+    Target tb;
+    tb.publish = Publish::Import;
+    tb.destination = b.stable.get();
+    h.submit(tb);
+    h.session->wait(tb);
+    CHECK(tb.completed && !tb.error);
+    CHECK(h.session->stats().reconfigures == 1);
+    CHECK(h.session->capture_memory() == CaptureMemory::Import);
+    CHECK(log_has(*h.fake, "REQBUFS CAPTURE 0 DMABUF"));
 }
 
 } // namespace
@@ -486,6 +650,12 @@ int main()
         { "AU larger than slot is rejected", test_au_larger_than_slot_is_rejected },
         { "visible rectangle prefers sane kernel compose", test_visible_rectangle_prefers_kernel_compose_when_sane },
         { "stable layout", test_stable_layout },
+        { "import queues the client buffer per picture", test_import_queues_client_buffer_per_picture },
+        { "import misplaced completion is an error", test_import_misplaced_completion_is_an_error },
+        { "import rejected on a display-order kernel", test_import_rejected_on_display_order_kernel },
+        { "import rejected on a layout mismatch", test_import_rejected_on_layout_mismatch },
+        { "import drain lends a scratch buffer for LAST", test_import_drain_lends_scratch_for_last },
+        { "import resolution change rebuilds the import pool", test_import_resolution_change_rebuilds_import_pool },
     };
     int ran = 0;
     for (const auto& c : cases) {

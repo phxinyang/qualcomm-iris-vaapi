@@ -125,8 +125,8 @@ std::shared_ptr<Buffer> buffer(DriverData& d, VABufferID id);
 // Owning context of a surface, if any (for sync/export/derive).
 std::shared_ptr<Context> owner_of(DriverData& d, const Surface& surface);
 
-// Publish policy for the next picture on this surface.
-iris::Publish publish_policy(const DriverData& d, const Surface& surface);
+// Publish policy for the next picture on this surface through `session`.
+iris::Publish publish_policy(const DriverData& d, const Surface& surface, const iris::Session& session);
 // Allocate the surface's stable buffer if it has none.
 iris::StableBuffer& ensure_stable(DriverData& d, Surface& surface);
 

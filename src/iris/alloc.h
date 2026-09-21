@@ -48,10 +48,14 @@ private:
     void* mapping_ = nullptr;
 };
 
-// Compute the compact linear layout used for every stable buffer: 64-byte
-// aligned pitch (freedreno rejects linear R8/GR88 imports otherwise),
-// visible height, chroma directly after luma.
+// Compute the linear layout used for every stable buffer. It is the Iris
+// CAPTURE layout for the same geometry (128-byte pitch, 32-row luma,
+// 16-row chroma, 4 KiB total), so an Import session can hand the buffer to
+// the decoder unchanged; it also satisfies freedreno's linear import rules.
 Layout stable_layout(uint32_t fourcc, unsigned width, unsigned height);
+
+// One buffer from the system DMA heap; -1 on failure.
+int allocate_dma_heap(unsigned size);
 
 // render_fd < 0 skips the GEM attempts and goes straight to the DMA heap.
 std::unique_ptr<StableBuffer> allocate_stable(int render_fd, const Layout& layout);

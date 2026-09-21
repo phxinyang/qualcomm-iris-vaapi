@@ -55,18 +55,29 @@ uint8_t* StableBuffer::map()
 
 Layout stable_layout(uint32_t fourcc, unsigned width, unsigned height)
 {
-    constexpr unsigned alignment = 64;
-    const unsigned bytes_per_sample = fourcc == VA_FOURCC_P010 ? 2 : 1;
+    // The Iris CAPTURE layout (iris_buffer.c, iris_yuv_buffer_size_nv12 /
+    // _p010): luma pitch aligned to 128 (256 for P010), luma scanlines to
+    // 32, chroma pitch equal to luma, chroma scanlines to 16, chroma
+    // directly after the luma plane, total rounded up to 4 KiB. A stable
+    // buffer with this layout can be queued into CAPTURE as the client's
+    // own memory (Import publish); it also satisfies freedreno's linear
+    // import rules for the GPU copy.
+    const bool p010 = fourcc == VA_FOURCC_P010;
+    const unsigned bytes_per_sample = p010 ? 2 : 1;
+    const unsigned pitch_alignment = p010 ? 256 : 128;
+    const unsigned luma_rows = (height + 31) & ~31u;
+    const unsigned chroma_rows = (((height + 1) / 2) + 15) & ~15u;
     Layout layout;
     layout.fourcc = fourcc;
     layout.width = width;
     layout.height = height;
-    layout.stride = ((width * bytes_per_sample) + alignment - 1) & ~(alignment - 1);
-    layout.storage_height = height;
+    layout.stride = ((width * bytes_per_sample) + pitch_alignment - 1) & ~(pitch_alignment - 1);
+    layout.storage_height = luma_rows;
     layout.data_offset = 0;
-    const uint64_t chroma_rows = (height + 1) / 2;
-    const uint64_t total = static_cast<uint64_t>(layout.stride) * height
-        + static_cast<uint64_t>(layout.stride) * chroma_rows;
+    const uint64_t total = ((static_cast<uint64_t>(layout.stride) * luma_rows
+                                + static_cast<uint64_t>(layout.stride) * chroma_rows)
+                               + 4095)
+        & ~static_cast<uint64_t>(4095);
     require(width && height && total <= 0xffffffffu, "stable buffer geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
     layout.size = static_cast<unsigned>(total);
     return layout;
@@ -84,7 +95,9 @@ int allocate_msm(int render_fd, unsigned size, MemoryOrigin* origin)
     return fd;
 }
 
-int allocate_heap(unsigned size)
+} // namespace
+
+int allocate_dma_heap(unsigned size)
 {
     const int heap = open("/dev/dma_heap/system", O_RDONLY | O_CLOEXEC);
     if (heap < 0)
@@ -97,14 +110,12 @@ int allocate_heap(unsigned size)
     return result < 0 ? -1 : static_cast<int>(request.fd);
 }
 
-} // namespace
-
 std::unique_ptr<StableBuffer> allocate_stable(int render_fd, const Layout& layout)
 {
     MemoryOrigin origin = MemoryOrigin::DmaHeap;
     int fd = render_fd >= 0 ? allocate_msm(render_fd, layout.size, &origin) : -1;
     if (fd < 0) {
-        fd = allocate_heap(layout.size);
+        fd = allocate_dma_heap(layout.size);
         origin = MemoryOrigin::DmaHeap;
     }
     require(fd >= 0, "allocate stable surface memory", VA_STATUS_ERROR_ALLOCATION_FAILED);

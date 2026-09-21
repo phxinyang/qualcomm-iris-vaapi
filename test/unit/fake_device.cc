@@ -90,9 +90,12 @@ bool FakeDevice::set_control(uint32_t id, int32_t value)
     return false;
 }
 
-unsigned FakeDevice::request_buffers(Queue queue, unsigned count)
+unsigned FakeDevice::request_buffers(Queue queue, unsigned count, uint32_t memory)
 {
-    note("REQBUFS " + std::string(queue == Queue::Output ? "OUTPUT" : "CAPTURE") + " " + std::to_string(count));
+    note("REQBUFS " + std::string(queue == Queue::Output ? "OUTPUT" : "CAPTURE") + " " + std::to_string(count)
+        + (memory == V4L2_MEMORY_DMABUF ? " DMABUF" : ""));
+    if (queue == Queue::Capture)
+        capture_memory_ = memory;
     if (queue == Queue::Output) {
         require(output_format_set_, "fake: REQBUFS OUTPUT before S_FMT");
         output_count_ = count;
@@ -111,6 +114,7 @@ unsigned FakeDevice::request_buffers(Queue queue, unsigned count)
     capture_count_ = std::min(count, config_.capture_max);
     capture_queue_.clear();
     capture_done_.clear();
+    capture_fds_.assign(capture_count_, -1);
     return capture_count_;
 }
 
@@ -127,6 +131,7 @@ BufferInfo FakeDevice::query_buffer(Queue queue, unsigned index)
 int FakeDevice::export_buffer(Queue queue, unsigned index)
 {
     require(queue == Queue::Capture && index < capture_count_, "fake: EXPBUF");
+    require(capture_memory_ != V4L2_MEMORY_DMABUF, "fake: EXPBUF on a DMABUF queue");
     // An anonymous shared mapping stands in for the DMA-BUF; the Frame
     // closes it.
     const int fd = memfd_create("fake-capture", 0);
@@ -159,9 +164,33 @@ void FakeDevice::queue_buffer(Queue queue, unsigned index, unsigned bytesused, u
         return;
     }
     require(index < capture_count_, "fake: QBUF CAPTURE out of range");
+    require(capture_memory_ == V4L2_MEMORY_MMAP, "fake: MMAP QBUF on a DMABUF queue");
     for (unsigned queued : capture_queue_)
         require(queued != index, "fake: CAPTURE index queued twice");
     capture_queue_.push_back(index);
+}
+
+int FakeDevice::allocate_dmabuf(unsigned size)
+{
+    const int fd = memfd_create("fake-scratch", 0);
+    require(fd >= 0 && ftruncate(fd, size) == 0, "fake: scratch memfd");
+    note("ALLOC SCRATCH " + std::to_string(size));
+    return fd;
+}
+
+void FakeDevice::queue_buffer_dmabuf(Queue queue, unsigned index, int dmabuf_fd, unsigned length, unsigned,
+    uint64_t, uint32_t)
+{
+    require(queue == Queue::Capture, "fake: DMABUF QBUF only modelled for CAPTURE");
+    require(capture_memory_ == V4L2_MEMORY_DMABUF, "fake: DMABUF QBUF on an MMAP queue");
+    require(index < capture_count_, "fake: QBUF CAPTURE out of range");
+    require(dmabuf_fd >= 0 && length >= config_.stride * config_.coded_height * 3 / 2,
+        "fake: DMABUF too small for the CAPTURE format", VA_STATUS_ERROR_INVALID_PARAMETER);
+    for (unsigned queued : capture_queue_)
+        require(queued != index, "fake: CAPTURE index queued twice");
+    capture_fds_[index] = dmabuf_fd;
+    capture_queue_.push_back(index);
+    note("QBUF CAPTURE DMABUF " + std::to_string(index) + " fd=" + std::to_string(dmabuf_fd));
 }
 
 std::optional<Dequeued> FakeDevice::dequeue_buffer(Queue queue)
@@ -353,8 +382,15 @@ void FakeDevice::complete_one()
         return;
     }
     require(!capture_queue_.empty(), "fake: no free CAPTURE slot for completion");
-    const unsigned slot = capture_queue_.front();
-    capture_queue_.pop_front();
+    unsigned slot = capture_queue_.front();
+    if (misorder_ > 0 && capture_queue_.size() > 1) {
+        // Model a firmware that does not fill CAPTURE in QBUF order.
+        --misorder_;
+        slot = capture_queue_[1];
+        capture_queue_.erase(capture_queue_.begin() + 1);
+    } else {
+        capture_queue_.pop_front();
+    }
     Dequeued done;
     done.index = slot;
     done.timestamp_us = au.timestamp;

@@ -59,17 +59,23 @@ std::shared_ptr<Context> owner_of(DriverData& d, const Surface& surface)
     return it == d.contexts.end() ? nullptr : it->second;
 }
 
-iris::Publish publish_policy(const DriverData& d, const Surface& surface)
+iris::Publish publish_policy(const DriverData& d, const Surface& surface, const iris::Session& session)
 {
     switch (d.options.publish) {
     case iris::PublishOverride::Copy:
         return iris::Publish::Copy;
     case iris::PublishOverride::Direct:
         return iris::Publish::Direct;
+    case iris::PublishOverride::Import:
+        return session.supports_import() ? iris::Publish::Import : iris::Publish::Copy;
     case iris::PublishOverride::Auto:
         break;
     }
-    return surface.persistent_export ? iris::Publish::Copy : iris::Publish::Direct;
+    if (!surface.persistent_export)
+        return iris::Publish::Direct;
+    // A pre-exporting client (Chrome) gets its own buffer decoded into when
+    // the kernel and the session allow it, and the GPU copy otherwise.
+    return session.supports_import() ? iris::Publish::Import : iris::Publish::Copy;
 }
 
 iris::StableBuffer& ensure_stable(DriverData& d, Surface& surface)

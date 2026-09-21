@@ -38,7 +38,14 @@ enum class SessionState {
 };
 
 // What the caller wants done with a completed frame for one target.
-enum class Publish { Direct, Copy };
+//   Direct: the target takes the CAPTURE slot itself (zero copies).
+//   Copy:   the completion is copied into the target's StableBuffer.
+//   Import: the target's StableBuffer is queued into CAPTURE for this
+//           picture and the firmware decodes straight into it (zero copies
+//           for a client that pre-exports, like Chrome). Needs decode-order
+//           output and a pool in Import memory; the session degrades it to
+//           Copy when either is missing.
+enum class Publish { Direct, Copy, Import };
 
 // A decode target: one VA surface, as far as the session is concerned.
 struct Target {
@@ -49,7 +56,7 @@ struct Target {
     bool completed = false;
     bool error = false;
     Publish publish = Publish::Direct;
-    StableBuffer* destination = nullptr; // Copy: where pixels go
+    StableBuffer* destination = nullptr; // Copy / Import: where pixels go
     unsigned width = 0, height = 0;
     // VA fourcc of the target surface (NV12 or P010). The first submitted
     // target fixes the session's CAPTURE format: a VA client may create its
@@ -69,6 +76,8 @@ struct SessionConfig {
 
 struct SessionStats {
     uint64_t submitted = 0, completed = 0, errors = 0, drops = 0, timeouts = 0, drains = 0, reconfigures = 0;
+    // Import: a picture completed in a slot queued for another token.
+    uint64_t misplaced = 0;
 };
 
 class Session {
@@ -81,6 +90,10 @@ public:
 
     SessionMode mode() const { return mode_; }
     SessionState state() const { return state_; }
+    // Whether an Import target can still be honoured: decode-order output,
+    // and the CAPTURE pool (if built) is in Import memory.
+    bool supports_import() const;
+    CaptureMemory capture_memory() const { return pool_.capture_memory(); }
     const SessionStats& stats() const { return stats_; }
     const Layout& capture_layout() const { return pool_.capture_layout(); }
     unsigned width() const { return config_.width; }
@@ -127,6 +140,10 @@ private:
     void handle_output_returns();
     bool handle_capture_returns(); // returns true when LAST was seen
     void publish(Target& target, FrameRef frame, const Dequeued& completion);
+    // Import pools: queue `target`'s buffer for `token`, waiting (bounded)
+    // for a free slot. Throws on an incompatible or missing destination.
+    void queue_import(Target& target, uint64_t token, std::chrono::steady_clock::time_point deadline);
+    static bool import_compatible(const Layout& client, const Layout& capture);
     // wait_output: block until every pre-STOP OUTPUT is recycled, which a
     // following START requires; a resolution change keeps its new-stream
     // OUTPUT queued by design and skips it.
@@ -158,6 +175,10 @@ private:
     bool source_change_ = false;
     bool saw_last_ = false;
     bool cold_ = true; // no completion yet in this session
+    // The first pool was built in Mmap memory although an Import target
+    // asked for it (display-order kernel, or an incompatible client
+    // layout); every Import target is published as Copy from then on.
+    bool import_rejected_ = false;
     // Bumped on every completion and state transition. wait() measures its
     // bound from the last progress, not from the call: a drain or
     // reconfigure that took 500 ms is progress, not a stall.
