@@ -202,7 +202,11 @@ void FakeDevice::queue_buffer_dmabuf(Queue queue, unsigned index, int dmabuf_fd,
         "fake: DMABUF too small for the CAPTURE format", VA_STATUS_ERROR_INVALID_PARAMETER);
     for (unsigned queued : capture_queue_)
         require(queued != index, "fake: CAPTURE index queued twice");
-    capture_fds_[index] = dmabuf_fd;
+    // vb2 takes its own reference on QBUF, so a fake must too: the caller
+    // closes its descriptor as soon as the QBUF returns.
+    if (capture_fds_[index] >= 0)
+        close(capture_fds_[index]);
+    capture_fds_[index] = dup(dmabuf_fd);
     note("QBUF CAPTURE DMABUF " + std::to_string(index) + " fd=" + std::to_string(dmabuf_fd));
     if (last_pending_) {
         emit_last(index);

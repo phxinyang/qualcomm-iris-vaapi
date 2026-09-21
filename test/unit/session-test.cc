@@ -10,6 +10,10 @@
 
 #include <cstdio>
 #include <cstring>
+
+extern "C" {
+#include <sys/stat.h>
+}
 #include <functional>
 #include <string>
 #include <vector>
@@ -468,6 +472,14 @@ void test_stable_layout()
 
 // ---- Import publish (client-owned CAPTURE buffers) ----
 
+// The session duplicates the client fd before queueing it, so identity is
+// compared by the underlying object, not the descriptor number.
+bool same_buffer(int a, int b)
+{
+    struct stat sa = {}, sb = {};
+    return a >= 0 && b >= 0 && fstat(a, &sa) == 0 && fstat(b, &sb) == 0 && sa.st_ino == sb.st_ino;
+}
+
 struct ClientBuffer {
     int fd = -1;
     std::unique_ptr<StableBuffer> stable;
@@ -499,11 +511,10 @@ void test_import_queues_client_buffer_per_picture()
     CHECK(log_has(*h.fake, "REQBUFS CAPTURE 32 DMABUF"));
     CHECK(h.fake->capture_memory() == V4L2_MEMORY_DMABUF);
     // The first picture's buffer went in before CAPTURE streamed.
-    const std::string first_qbuf = "QBUF CAPTURE DMABUF 0 fd=" + std::to_string(a.fd);
-    CHECK(log_index(*h.fake, first_qbuf.c_str()) < log_index(*h.fake, "STREAMON CAPTURE"));
+    CHECK(h.fake->joined_log().find("QBUF CAPTURE DMABUF 0 fd=") < h.fake->joined_log().find("STREAMON CAPTURE"));
     h.session->wait(ta);
     CHECK(ta.completed && !ta.error && ta.frame == nullptr);
-    CHECK(h.fake->capture_fd(0) == a.fd);
+    CHECK(same_buffer(h.fake->capture_fd(0), a.fd));
     h.submit(tb);
     h.session->wait(tb);
     CHECK(tb.completed && !tb.error);
@@ -516,7 +527,7 @@ void test_import_queues_client_buffer_per_picture()
     // Reusing a buffer picks the slot that already carries it.
     h.submit(ta);
     h.session->wait(ta);
-    CHECK(h.fake->capture_fd(0) == a.fd);
+    CHECK(same_buffer(h.fake->capture_fd(0), a.fd));
     CHECK(h.session->stats().misplaced == 0);
 }
 
@@ -534,7 +545,7 @@ void test_import_misplaced_completion_is_an_error()
     h.submit(tb);
     // Lockstep: only the first picture's buffer is with the firmware.
     CHECK(h.session->capture_queued() == 1);
-    CHECK(h.fake->capture_fd(0) == a.fd);
+    CHECK(same_buffer(h.fake->capture_fd(0), a.fd));
     // The firmware finishes that buffer carrying the second AU's token: the
     // client's surface for b holds a's pixels. Never published.
     h.fake->inject_token_skew(1);

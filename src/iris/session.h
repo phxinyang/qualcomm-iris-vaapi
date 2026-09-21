@@ -182,9 +182,17 @@ private:
     // asked for it (display-order kernel, or an incompatible client
     // layout); every Import target is published as Copy from then on.
     bool import_rejected_ = false;
-    // Import: tokens whose client buffer has not been queued yet, in
-    // submission order.
-    std::deque<uint64_t> import_backlog_;
+    // Import: pictures whose client buffer has not been queued yet, in
+    // submission order. The fd is an owned duplicate: the entry outlives a
+    // released target, because its picture was already submitted to the
+    // OUTPUT queue and must still be given a buffer — a hole in the buffer
+    // sequence shifts every later picture into a neighbour's buffer.
+    struct ImportEntry {
+        uint64_t token = 0;
+        int fd = -1;
+    };
+    std::deque<ImportEntry> import_backlog_;
+    void clear_import_backlog();
     // Bumped on every completion and state transition. wait() measures its
     // bound from the last progress, not from the call: a drain or
     // reconfigure that took 500 ms is progress, not a stall.

@@ -14,6 +14,10 @@
 // get no client buffer, modelling a client that released the surface.
 //
 // Usage: iris-import-probe <node> <stream.264> [surfaces=N] [skip=K1,K2]
+//        [expect=FILE]   one expected grey per access unit, in decode order
+//                        (compute with ffprobe packet order); without it the
+//                        stream must be B-free so that decode order equals
+//                        display order.
 
 #include <algorithm>
 #include <chrono>
@@ -106,6 +110,8 @@ int main(int argc, char** argv)
     }
     unsigned surfaces = 8;
     std::vector<unsigned> holes;
+    std::vector<int> expected_grey;
+    std::string dump_path;
     for (int i = 3; i < argc; ++i) {
         if (std::sscanf(argv[i], "surfaces=%u", &surfaces) == 1)
             continue;
@@ -115,6 +121,20 @@ int main(int argc, char** argv)
                 holes.push_back(std::strtoul(p, &end, 10));
                 p = (*end == ',') ? end + 1 : end;
             }
+        if (std::strncmp(argv[i], "dump=", 5) == 0) {
+            dump_path = argv[i] + 5;
+            continue;
+        }
+        if (std::strncmp(argv[i], "expect=", 7) == 0) {
+            std::ifstream exp(argv[i] + 7);
+            if (!exp) {
+                std::fprintf(stderr, "cannot open %s\n", argv[i] + 7);
+                return 2;
+            }
+            int v;
+            while (exp >> v)
+                expected_grey.push_back(v);
+        }
     }
     std::ifstream input(argv[2], std::ios::binary);
     if (!input) {
@@ -227,17 +247,23 @@ int main(int argc, char** argv)
             mmap(nullptr, sizeimage, PROT_READ | PROT_WRITE, MAP_SHARED, client[i], 0));
         std::memset(client_map[i], 0xEE, sizeimage);
     }
+    // Fill the free list so that back() is always the LOWEST free index:
+    // the driver queues client buffers into the lowest free slot, and this
+    // probe must reproduce that to test whether the firmware consumes the
+    // queue in index order or in QBUF order.
     std::vector<unsigned> free_slots;
     for (unsigned i = kCaptureSlots; i-- > 0;)
-        free_slots.push_back(i);
+        free_slots.push_back(kCaptureSlots - 1 - i);
     std::vector<int> slot_fd(kCaptureSlots, -1);
     std::vector<uint64_t> slot_token(kCaptureSlots, 0);
+    std::vector<bool> surface_busy(surfaces, false);
+    unsigned max_in_flight = 0, in_flight = 0;
 
     // The driver queues the first pictures' buffers, then streams CAPTURE on.
     auto queue_client_for = [&](unsigned k) -> bool {
         if (is_hole(k))
             return true;
-        if (free_slots.empty())
+        if (free_slots.empty() || surface_busy[k % surfaces])
             return false;
         const unsigned slot = free_slots.back();
         free_slots.pop_back();
@@ -248,6 +274,9 @@ int main(int argc, char** argv)
         }
         slot_fd[slot] = fd;
         slot_token[slot] = k;
+        surface_busy[k % surfaces] = true;
+        ++in_flight;
+        max_in_flight = std::max(max_in_flight, in_flight);
         return true;
     };
     if (!is_hole(0) && !queue_client_for(0))
@@ -257,6 +286,8 @@ int main(int argc, char** argv)
         return 2;
 
     unsigned next_au = 1, next_out = 1, completed = 0, misplaced = 0, unwritten = 0, holes_skipped = 0;
+    unsigned assoc_wrong = 0, content_wrong = 0;
+    std::vector<int> shift_hist;
     std::vector<unsigned> completed_tokens;
     const uint64_t deadline = static_cast<uint64_t>(units.size()) * 200; // ms budget
     const auto start = std::chrono::steady_clock::now();
@@ -266,8 +297,9 @@ int main(int argc, char** argv)
 
     unsigned free_out = kOutputSlots - 1; // AU 0 is in flight
     while (completed < units.size() - holes.size() && elapsed_ms() < static_cast<int64_t>(deadline)) {
-        while (free_out > 0 && next_au < units.size() && free_slots.size() > 0) {
-            // Queue the client buffer for this AU first, then the bitstream.
+        while (free_out > 0 && next_au < units.size()) {
+            // Queue the client buffer for this AU first, then the bitstream;
+            // the same surface cannot be queued twice at once.
             if (is_hole(next_au))
                 ++holes_skipped;
             else if (!queue_client_for(next_au))
@@ -305,19 +337,36 @@ int main(int argc, char** argv)
             }
             ++completed;
             completed_tokens.push_back(static_cast<unsigned>(token));
-            const int expected = 16 + 2 * static_cast<int>(token % 100);
-            if (grey < 0 || std::abs(grey - expected) > 4) {
+            const int expected = expected_grey.empty()
+                ? -1
+                : (token < expected_grey.size() ? expected_grey[token] : -1);
+            const bool assoc_bad = slot_token[idx] != token;
+            const bool content_bad = expected >= 0 && (grey < 0 || std::abs(grey - expected) > 6);
+            if (!dump_path.empty())
+                std::printf("%llu %u %d\n", static_cast<unsigned long long>(token), idx, grey);
+            if (assoc_bad)
+                ++assoc_wrong;
+            if (content_bad)
+                ++content_wrong;
+            if ((assoc_bad || content_bad) && misplaced < 16) {
                 ++misplaced;
-                if (misplaced <= 12)
-                    std::printf("  MISPLACED completion token=%llu buffer=%u (queued for %llu) grey=%d expected=%d\n",
-                        static_cast<unsigned long long>(token), idx,
-                        static_cast<unsigned long long>(slot_token[idx]), grey, expected);
-            } else if (grey == 0xEE) {
-                ++unwritten;
+                std::printf("  BAD completion token=%llu buffer=%u queued_for=%llu grey=%d expected=%d%s%s\n",
+                    static_cast<unsigned long long>(token), idx,
+                    static_cast<unsigned long long>(slot_token[idx]), grey, expected,
+                    assoc_bad ? " [association]" : "", content_bad ? " [content]" : "");
+            } else if (assoc_bad || content_bad) {
+                ++misplaced;
             }
+            shift_hist.push_back(static_cast<int>(slot_token[idx]) - static_cast<int>(token));
+            if (fd >= 0) {
+                const unsigned si = static_cast<unsigned>(std::find(client.begin(), client.end(), fd) - client.begin());
+                if (si < surfaces)
+                    surface_busy[si] = false;
+            }
+            --in_flight;
             slot_fd[idx] = -1;
             slot_token[idx] = 0;
-            free_slots.push_back(idx);
+            free_slots.insert(free_slots.begin(), idx); // keep back() = lowest
         }
         // Recycle OUTPUT slots.
         for (;;) {
@@ -337,9 +386,24 @@ int main(int argc, char** argv)
     for (size_t i = 1; i < completed_tokens.size(); ++i)
         if (completed_tokens[i] < completed_tokens[i - 1])
             ordered = false;
-    std::printf("completions=%u misplaced=%u unwritten=%u holes=%u tokens_in_order=%s elapsed=%lldms\n",
-        completed, misplaced, unwritten, holes_skipped, ordered ? "yes" : "no",
+    std::printf("completions=%u misplaced=%u assoc_wrong=%u content_wrong=%u holes=%u max_in_flight=%u "
+                "tokens_in_order=%s elapsed=%lldms\n",
+        completed, misplaced, assoc_wrong, content_wrong, holes_skipped, max_in_flight, ordered ? "yes" : "no",
         static_cast<long long>(elapsed_ms()));
+    {
+        int hist[9] = {};
+        int other = 0;
+        for (int d : shift_hist)
+            if (d >= -4 && d <= 4)
+                ++hist[d + 4];
+            else
+                ++other;
+        std::printf("slot_token - token: ");
+        for (int d = -4; d <= 4; ++d)
+            if (hist[d + 4])
+                std::printf("%+d:%d ", d, hist[d + 4]);
+        std::printf("other:%d\n", other);
+    }
     if (!completed_tokens.empty())
         std::printf("first completions: ");
     for (size_t i = 0; i < std::min<size_t>(completed_tokens.size(), 24); ++i)
@@ -348,7 +412,7 @@ int main(int argc, char** argv)
     xioctl(vfd, VIDIOC_STREAMOFF, &cap_type, "STREAMOFF CAPTURE");
     xioctl(vfd, VIDIOC_STREAMOFF, &out_type, "STREAMOFF OUTPUT");
     const unsigned expected_completions = static_cast<unsigned>(units.size());
-    if (misplaced || completed < expected_completions)
+    if (assoc_wrong || content_wrong || completed < expected_completions)
         return 1;
     return 0;
 }
