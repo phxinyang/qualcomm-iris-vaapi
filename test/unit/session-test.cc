@@ -508,8 +508,10 @@ void test_import_queues_client_buffer_per_picture()
     h.session->wait(tb);
     CHECK(tb.completed && !tb.error);
     CHECK(h.session->capture_held() == 0);
-    // Only the pictures in flight ever occupy slots: nothing is pre-queued.
+    // Only the picture in flight ever occupies a slot: nothing is
+    // pre-queued and the firmware never has two buffers to choose from.
     CHECK(h.session->capture_queued() == 0);
+    CHECK(h.session->stats().misplaced == 0);
     CHECK(h.session->supports_import());
     // Reusing a buffer picks the slot that already carries it.
     h.submit(ta);
@@ -530,16 +532,22 @@ void test_import_misplaced_completion_is_an_error()
     tb.destination = b.stable.get();
     h.submit(ta);
     h.submit(tb);
-    h.fake->inject_misorder(1);
-    h.fake->tick(2);
-    // Both pictures land in the other's buffer (the swap); neither may be
-    // reported complete: the client would show foreign pixels.
-    CHECK_THROWS(h.session->wait(ta), VA_STATUS_ERROR_DECODING_ERROR);
-    CHECK(ta.error && !ta.pending);
+    // Lockstep: only the first picture's buffer is with the firmware.
+    CHECK(h.session->capture_queued() == 1);
+    CHECK(h.fake->capture_fd(0) == a.fd);
+    // The firmware finishes that buffer carrying the second AU's token: the
+    // client's surface for b holds a's pixels. Never published.
+    h.fake->inject_token_skew(1);
+    h.fake->tick(1);
     CHECK_THROWS(h.session->wait(tb), VA_STATUS_ERROR_DECODING_ERROR);
     CHECK(tb.error && !tb.pending);
-    CHECK(h.session->stats().misplaced == 2);
+    // The buffer's owner is compromised too: it holds foreign pixels.
+    CHECK_THROWS(h.session->wait(ta), VA_STATUS_ERROR_DECODING_ERROR);
+    CHECK(ta.error && !ta.pending);
+    CHECK(h.session->stats().misplaced == 1);
+    CHECK(h.session->stats().errors == 2);
     CHECK(h.session->stats().completed == 0);
+    CHECK(h.session->state() == SessionState::Streaming); // the session itself goes on
 }
 
 void test_import_rejected_on_display_order_kernel()

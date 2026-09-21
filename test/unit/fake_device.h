@@ -66,6 +66,9 @@ public:
     // Complete the next N pictures into the second queued CAPTURE slot
     // instead of the first (a firmware that ignores QBUF order).
     void inject_misorder(unsigned count) { misorder_ = count; }
+    // Complete the next picture carrying the timestamp of the AU after it
+    // (a firmware whose output does not follow the OUTPUT it consumed).
+    void inject_token_skew(unsigned count) { token_skew_ = count; }
     // The client fd last queued into a CAPTURE slot (DMABUF queues).
     int capture_fd(unsigned index) const { return index < capture_fds_.size() ? capture_fds_[index] : -1; }
     uint32_t capture_memory() const { return capture_memory_; }
@@ -146,6 +149,11 @@ private:
     uint32_t capture_memory_ = V4L2_MEMORY_MMAP;
     std::vector<int> capture_fds_;
     unsigned misorder_ = 0;
+    unsigned token_skew_ = 0;
+    // STOP finished with no CAPTURE slot for LAST: the next queued slot
+    // returns LAST at once (iris_vb2_buf_queue does the same).
+    bool last_pending_ = false;
+    void emit_last(unsigned slot);
 };
 
 } // namespace iris::test

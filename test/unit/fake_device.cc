@@ -167,7 +167,21 @@ void FakeDevice::queue_buffer(Queue queue, unsigned index, unsigned bytesused, u
     require(capture_memory_ == V4L2_MEMORY_MMAP, "fake: MMAP QBUF on a DMABUF queue");
     for (unsigned queued : capture_queue_)
         require(queued != index, "fake: CAPTURE index queued twice");
+    if (last_pending_) {
+        emit_last(index);
+        return;
+    }
     capture_queue_.push_back(index);
+}
+
+void FakeDevice::emit_last(unsigned slot)
+{
+    last_pending_ = false;
+    Dequeued last;
+    last.index = slot;
+    last.flags = V4L2_BUF_FLAG_LAST;
+    last.bytesused = 0;
+    capture_done_.push_back(last);
 }
 
 int FakeDevice::allocate_dmabuf(unsigned size)
@@ -189,8 +203,12 @@ void FakeDevice::queue_buffer_dmabuf(Queue queue, unsigned index, int dmabuf_fd,
     for (unsigned queued : capture_queue_)
         require(queued != index, "fake: CAPTURE index queued twice");
     capture_fds_[index] = dmabuf_fd;
-    capture_queue_.push_back(index);
     note("QBUF CAPTURE DMABUF " + std::to_string(index) + " fd=" + std::to_string(dmabuf_fd));
+    if (last_pending_) {
+        emit_last(index);
+        return;
+    }
+    capture_queue_.push_back(index);
 }
 
 std::optional<Dequeued> FakeDevice::dequeue_buffer(Queue queue)
@@ -239,6 +257,7 @@ void FakeDevice::stream(Queue queue, bool on)
         capture_done_.clear();
         reorder_hold_.clear();
         decoded_since_stream_ = 0;
+        last_pending_ = false;
     }
 }
 
@@ -276,14 +295,12 @@ bool FakeDevice::decoder_command(uint32_t cmd)
             }
             complete_one();
         }
-        if (!capture_queue_.empty()) {
+        if (!capture_queue_.empty() && (output_queue_.empty() || drc_blocked_) && reorder_hold_.empty()) {
             const unsigned slot = capture_queue_.front();
             capture_queue_.pop_front();
-            Dequeued last;
-            last.index = slot;
-            last.flags = V4L2_BUF_FLAG_LAST;
-            last.bytesused = 0;
-            capture_done_.push_back(last);
+            emit_last(slot);
+        } else {
+            last_pending_ = true;
         }
         return true;
     }
@@ -394,11 +411,20 @@ void FakeDevice::complete_one()
     Dequeued done;
     done.index = slot;
     done.timestamp_us = au.timestamp;
+    if (token_skew_ > 0 && !output_queue_.empty()) {
+        --token_skew_;
+        done.timestamp_us = output_queue_.front().timestamp;
+    }
     done.bytesused = config_.stride * config_.coded_height * 3 / 2;
     capture_done_.push_back(done);
     // CAPTURE returns before OUTPUT on Iris.
     output_done_.push_back(au.index);
     output_done_flags_.push_back(0);
+    if (stopped_ && last_pending_ && (output_queue_.empty() || drc_blocked_) && !capture_queue_.empty()) {
+        const unsigned next = capture_queue_.front();
+        capture_queue_.pop_front();
+        emit_last(next);
+    }
 }
 
 void FakeDevice::tick(unsigned n)

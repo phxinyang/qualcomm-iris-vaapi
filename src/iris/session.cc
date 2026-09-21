@@ -234,24 +234,13 @@ void Session::configure_capture()
 void Session::enter_streaming()
 {
     if (pool_.capture_memory() == CaptureMemory::Import) {
-        // The pictures already submitted (the first AU, or the one that
-        // announced a resolution change) get their buffers now, in token
-        // order, so the firmware fills them in the order it decodes.
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kImportFenceMs);
-        for (auto it = pending_.begin(); it != pending_.end();) {
-            Target& target = *it->second;
-            const uint64_t token = it->first;
-            ++it;
-            try {
-                queue_import(target, token, deadline);
-            } catch (const Error& error) {
-                trace_("import token=%llu failed: %s", static_cast<unsigned long long>(token), error.what());
-                pending_.erase(token);
-                target.pending = false;
-                target.error = true;
-                ++stats_.errors;
-            }
-        }
+        // Pictures already submitted (the first AU, or the one that
+        // announced a resolution change) wait in the backlog; the first
+        // gets its buffer now, the rest follow one completion at a time.
+        for (const auto& [token, target] : pending_)
+            if (std::find(import_backlog_.begin(), import_backlog_.end(), token) == import_backlog_.end())
+                import_backlog_.push_back(token);
+        queue_import_next();
     } else {
         pool_.requeue_capture();
     }
@@ -261,23 +250,47 @@ void Session::enter_streaming()
     state_ = SessionState::Streaming;
 }
 
-void Session::queue_import(Target& target, uint64_t token, std::chrono::steady_clock::time_point deadline)
+void Session::queue_import_next()
 {
-    require(target.publish != Publish::Direct, "an Import session needs an exported surface for every picture",
-        VA_STATUS_ERROR_INVALID_SURFACE);
-    require(target.destination != nullptr, "Import target without a client buffer", VA_STATUS_ERROR_INVALID_SURFACE);
-    require(import_compatible(target.destination->layout(), pool_.capture_layout()),
-        "client buffer layout does not match the CAPTURE layout", VA_STATUS_ERROR_INVALID_SURFACE);
+    if (pool_.capture_memory() != CaptureMemory::Import || import_backlog_.empty() || pool_.capture_queued() > 0)
+        return;
+    const uint64_t token = import_backlog_.front();
+    auto it = pending_.find(token);
+    if (it == pending_.end()) {
+        // Released while waiting; nothing to decode into.
+        import_backlog_.pop_front();
+        queue_import_next();
+        return;
+    }
+    Target& target = *it->second;
+    const char* why = nullptr;
+    if (target.publish == Publish::Direct || target.destination == nullptr)
+        why = "an Import session needs an exported surface for every picture";
+    else if (!import_compatible(target.destination->layout(), pool_.capture_layout()))
+        // The first picture of a resolution change: its buffer fits the
+        // geometry the firmware is about to announce, not the current one.
+        // Leave it at the head; enter_streaming() queues it after the pool
+        // is rebuilt. If no change follows, the picture completes into
+        // whatever is queued next and is reported misplaced.
+        return;
+    if (why) {
+        import_backlog_.pop_front();
+        pending_.erase(it);
+        target.pending = false;
+        target.error = true;
+        ++stats_.errors;
+        trace_("import token=%llu failed: %s", static_cast<unsigned long long>(token), why);
+        queue_import_next();
+        return;
+    }
     // The compositor may still be sampling the previous picture from this
     // buffer; the firmware must not write under it.
     wait_dma_buf(target.destination->fd(), true, kImportFenceMs);
-    std::optional<unsigned> slot;
-    while (!(slot = pool_.queue_capture_import(target.destination->fd(), target.destination->size(), token))) {
-        require(!expired(deadline), "every CAPTURE slot is in flight", VA_STATUS_ERROR_TIMEDOUT);
-        pump(20);
-    }
-    trace_("import token=%llu index=%u fd=%d", static_cast<unsigned long long>(token), *slot,
-        target.destination->fd());
+    const auto slot = pool_.queue_capture_import(target.destination->fd(), target.destination->size(), token);
+    require(slot.has_value(), "no free CAPTURE slot with nothing in flight");
+    import_backlog_.pop_front();
+    trace_("import token=%llu index=%u fd=%d backlog=%zu", static_cast<unsigned long long>(token), *slot,
+        target.destination->fd(), import_backlog_.size());
 }
 
 // ---------------------------------------------------------------------------
@@ -325,19 +338,6 @@ void Session::submit(const uint8_t* data, size_t size, Target& target)
         std::fflush(static_cast<FILE*>(dump_));
     }
     const uint64_t token = next_token_++;
-    if (pool_.capture_memory() == CaptureMemory::Import) {
-        // The client's buffer goes in before the bitstream so it is the next
-        // one the firmware picks up when it decodes this picture. A buffer
-        // of another geometry cannot be written by the current CAPTURE
-        // format: it is the first picture of a resolution change and gets
-        // queued when the pool is rebuilt (enter_streaming). If no change
-        // follows, the completion lands elsewhere and is reported misplaced.
-        if (target.destination && import_compatible(target.destination->layout(), pool_.capture_layout()))
-            queue_import(target, token, deadline);
-        else
-            trace_("import token=%llu deferred: geometry differs from the CAPTURE format",
-                static_cast<unsigned long long>(token));
-    }
     device_->queue_buffer(Queue::Output, slot->index, static_cast<unsigned>(size), token, 0);
     slot->queued = true;
     slot->token = token;
@@ -348,6 +348,12 @@ void Session::submit(const uint8_t* data, size_t size, Target& target)
     target.frame.reset();
     pending_[token] = &target;
     ++stats_.submitted;
+    if (pool_.capture_memory() == CaptureMemory::Import) {
+        // The bitstream may run ahead; the client's buffer goes in only
+        // when the firmware has nothing else to write into.
+        import_backlog_.push_back(token);
+        queue_import_next();
+    }
     trace_("submit token=%llu bytes=%zu output=%u", static_cast<unsigned long long>(token), size, slot->index);
 
     if (state_ == SessionState::Configured) {
@@ -450,6 +456,8 @@ bool Session::handle_capture_returns()
         FrameRef frame = pool_.take_capture(returned->index);
         const uint64_t slot_token = pool_.take_import_token(returned->index);
         const bool payload = returned->bytesused > returned->data_offset;
+        if (state_ == SessionState::Streaming)
+            queue_import_next();
         if (returned->last()) {
             last = true;
             saw_last_ = true;
@@ -488,12 +496,22 @@ bool Session::handle_capture_returns()
         }
         if (pool_.capture_memory() == CaptureMemory::Import && slot_token != returned->timestamp_us) {
             // The firmware wrote this picture into a buffer queued for a
-            // different token: the client's surface for this token holds
-            // someone else's pixels. Never report it as decoded.
+            // different token. Neither surface can be trusted: the one this
+            // token belongs to got nothing, the one the buffer belongs to
+            // got foreign pixels. Fail both; never publish either.
             target.pending = false;
             target.error = true;
             ++stats_.errors;
             ++stats_.misplaced;
+            if (auto owner = pending_.find(slot_token); owner != pending_.end()) {
+                owner->second->pending = false;
+                owner->second->error = true;
+                ++stats_.errors;
+                pending_.erase(owner);
+            }
+            if (auto b = std::find(import_backlog_.begin(), import_backlog_.end(), slot_token);
+                b != import_backlog_.end())
+                import_backlog_.erase(b);
             trace_("capture token=%llu index=%u flags=%#x publish=misplaced slot_token=%llu",
                 static_cast<unsigned long long>(returned->timestamp_us), returned->index, returned->flags,
                 static_cast<unsigned long long>(slot_token));
@@ -611,6 +629,9 @@ void Session::release_locked(Target& target)
     if (target.pending) {
         pending_.erase(target.token);
         target.pending = false;
+        if (auto it = std::find(import_backlog_.begin(), import_backlog_.end(), target.token);
+            it != import_backlog_.end())
+            import_backlog_.erase(it);
     }
     target.frame.reset();
     target.completed = false;
@@ -638,10 +659,6 @@ void Session::drain(const char* reason, bool wait_output)
     trace_("drain begin reason=%s pending=%zu", reason, pending_.size());
     state_ = SessionState::Draining;
     saw_last_ = false;
-    // LAST arrives on a buffer of its own; an Import pool has none queued
-    // beyond the pictures in flight, so lend the firmware a scratch one.
-    if (pool_.capture_memory() == CaptureMemory::Import)
-        pool_.queue_capture_scratch();
     require(device_->decoder_command(V4L2_DEC_CMD_STOP), "DECODER_CMD_STOP busy", VA_STATUS_ERROR_HW_BUSY);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kLastWaitMs);
     while (!saw_last_) {
@@ -649,7 +666,18 @@ void Session::drain(const char* reason, bool wait_output)
             fail("no LAST after STOP");
             throw Error(VA_STATUS_ERROR_DECODING_ERROR, "decoder did not drain");
         }
-        pool_.requeue_capture();
+        if (pool_.capture_memory() == CaptureMemory::Import) {
+            // Pictures still owed get their buffers one at a time. LAST
+            // arrives on a buffer of its own, so whenever the firmware has
+            // nothing to write into (backlog empty, or its head is the
+            // picture of a new geometry that waits for the rebuilt pool)
+            // lend it a scratch one.
+            queue_import_next();
+            if (pool_.capture_queued() == 0)
+                pool_.queue_capture_scratch();
+        } else {
+            pool_.requeue_capture();
+        }
         device_->poll(POLLIN | POLLPRI, 5);
         handle_events();
         handle_output_returns();
@@ -756,6 +784,8 @@ void Session::fail_unrecoverable_tokens()
         it->second->error = true;
         ++stats_.errors;
         trace_("drain lost token=%llu", static_cast<unsigned long long>(it->first));
+        if (auto b = std::find(import_backlog_.begin(), import_backlog_.end(), it->first); b != import_backlog_.end())
+            import_backlog_.erase(b);
         it = pending_.erase(it);
     }
 }
@@ -801,6 +831,7 @@ void Session::fail_all_pending()
         target->error = true;
     }
     pending_.clear();
+    import_backlog_.clear();
 }
 
 } // namespace iris

@@ -17,6 +17,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -140,9 +141,11 @@ private:
     void handle_output_returns();
     bool handle_capture_returns(); // returns true when LAST was seen
     void publish(Target& target, FrameRef frame, const Dequeued& completion);
-    // Import pools: queue `target`'s buffer for `token`, waiting (bounded)
-    // for a free slot. Throws on an incompatible or missing destination.
-    void queue_import(Target& target, uint64_t token, std::chrono::steady_clock::time_point deadline);
+    // Import pools: hand the firmware the next client buffer from the
+    // backlog when none is in flight. The firmware picks any queued buffer
+    // for the picture it finishes, so it is never given more than one to
+    // pick from: lockstep is what makes token and buffer agree.
+    void queue_import_next();
     static bool import_compatible(const Layout& client, const Layout& capture);
     // wait_output: block until every pre-STOP OUTPUT is recycled, which a
     // following START requires; a resolution change keeps its new-stream
@@ -179,6 +182,9 @@ private:
     // asked for it (display-order kernel, or an incompatible client
     // layout); every Import target is published as Copy from then on.
     bool import_rejected_ = false;
+    // Import: tokens whose client buffer has not been queued yet, in
+    // submission order.
+    std::deque<uint64_t> import_backlog_;
     // Bumped on every completion and state transition. wait() measures its
     // bound from the last progress, not from the call: a drain or
     // reconfigure that took 500 ms is progress, not a stall.
