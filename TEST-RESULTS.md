@@ -1240,14 +1240,29 @@ the Iris node, boot unchanged):
 | Frame-index 1080p30 B-frames | 1125 | 0 | 0 |
 | HEVC Main 1080p24 B-frames | 905 | 0 | 0 |
 | HEVC Main10 1080p24 B-frames | 907 | 0 | 0 |
-| VP9 1080p24 alt-ref | 127 of 720 pictures, then `no LAST after STOP` | — | stall |
+| VP9 1080p24 alt-ref | not enabled (Copy) | — | see below |
 
 FFmpeg through Import decodes bit-exactly (`framemd5` identical to the
 software decoder, H.264 and HEVC); the 6-switch dynamic-resolution suite
 passes in Import mode.
 
+VP9 under Import was chased to its mechanism on 2026-09-22 and stays
+excluded:
+
+- a one-buffer window stalls Chrome's VP9 session ~500 ms on every alt-ref
+  access unit (the superframe decodes as two pictures and the second has no
+  buffer to land in); measured gaps of 477-500 ms at tokens 14, 28, 55, 77,
+  ... and a drain failure at teardown; FFmpeg's VP9 through Import is
+  unaffected (204/204, `framemd5` identical, 1.7 s wall for 8 s of video).
+- a two-buffer window removes the stall (714/719 frames in 30 s) but
+  reintroduces the firmware's own buffer choice: 153/609 and 159/599
+  misplaced in two runs, matching the probe's finding that association is
+  only determined when the firmware has no choice.
+- the fix therefore belongs in the VP9 translator (one access unit per
+  picture instead of an alt-ref superframe), not in the session.
+
 Verdict: the policy exists, with the two rules enforced in the session and
 the misplaced-completion check (both surfaces involved are failed, never
 published) as the fail-closed backstop. `V4L2_VA_PUBLISH=import` forces it;
 `auto` selects it for H.264/HEVC/Main10 on a decode-order kernel and keeps
-Copy for VP9 (the stall above) and for display-order kernels.
+Copy for VP9 and for display-order kernels.

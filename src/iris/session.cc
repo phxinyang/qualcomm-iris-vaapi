@@ -111,15 +111,21 @@ bool Session::supports_import() const
 {
     if (mode_ != SessionMode::DecodeOrder || import_rejected_)
         return false;
+    // VP9 stays on Copy until the translator submits one AU per picture: a
+    // VP9 access unit can carry an alt-ref and its visible frame, the
+    // firmware decodes both, and a one-buffer window stalls it ~500 ms per
+    // alt-ref while a two-buffer window reintroduces misplacement
+    // (TEST-RESULTS.md, 2026-09-22). H.264/HEVC/Main10 are exact.
+    if (config_.codec_pixelformat == V4L2_PIX_FMT_VP9)
+        return false;
     return pool_.capture_count() == 0 || pool_.capture_memory() == CaptureMemory::Import;
 }
 
 unsigned Session::import_window() const
 {
-    // A VP9 access unit may carry an alt-ref and its visible frame, which
-    // the firmware decodes as two pictures; a one-buffer window stalls it
-    // ~500 ms per alt-ref (measured in Chrome, 2026-09-22).
-    return config_.codec_pixelformat == V4L2_PIX_FMT_VP9 ? 2 : 1;
+    // Measured: two buffers in flight reintroduce the firmware's own buffer
+    // choice (153/609 misplaced in Chrome VP9), so the window stays one.
+    return 1;
 }
 
 bool Session::import_compatible(const Layout& client, const Layout& capture)
