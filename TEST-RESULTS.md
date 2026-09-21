@@ -1131,6 +1131,69 @@ from the installed package, packaged defaults, boot ID unchanged:
 | HEVC Main10 1080p24 B-frames | `VaapiVideoDecoder`, platform=true | 720 / 3 |
 
 A full-duration (2 h per scenario) `iris-concurrency-soak.sh` against the
-installed driver was started after this table; its log is
-`~/Lab/iris-vaapi-lab/artifacts/final-soak-2h-20260921.log` on the target
-and its result is not yet recorded here.
+installed driver, started after this table on the same boot (`4944865b…`),
+passed: `dual-h264` 172800 + 172800 frames and `mixed` H.264 172800 +
+HEVC 172800 frames, `teardown_timeouts=0`, `stateful_drain_complete=1` on
+all four contexts, hottest zone 57.6 °C, boot ID unchanged. Log:
+`~/Lab/iris-vaapi-lab/artifacts/final-soak-2h-20260921.log`.
+
+## Kernel 7.2.6 and the re-applied decode-order module (2026-09-22)
+
+On 2026-09-21 the target moved from the self-built `7.2.2-sm8550-gad75da3-pr4+`
+kernel to the packaged `kernel-sheng-7.2.6-1`
+(`7.2.6-sm8550-g42f3b40c702a`). That package ships the stock Iris module, so
+the decode-order patch from Phase 1 was gone: no `display_delay` control,
+the driver fell back to display-order mode. Every result above this heading
+was produced on the patched 7.2.2 kernel.
+
+The two strongtz patches were rebased onto the 7.2.6 tree
+(`packaging/kernel/0001-media-iris-decode-order-output-and-64-capture-buffers.patch`;
+one enum hunk had to be placed by hand, the fuzzy apply put
+`DISPLAY_DELAY*` into `platform_inst_fw_cap_flags` instead of
+`platform_inst_fw_cap_type`) and only the `qcom-iris` module rebuilt. Two
+things bit on the way and are recorded so nobody repeats them:
+
+- The kernel is built with `CONFIG_ARM64_BTI_KERNEL`. Kconfig silently
+  drops that option under clang 22 (`CLANG_VERSION < 210000` guard), so a
+  module built from the same `.config` lacks BTI landing pads and the first
+  instruction of `init_module` oopses (`Oops - BTI`). Building with
+  `KCFLAGS=-mbranch-protection=pac-ret+bti` fixes it; check with
+  `llvm-readelf -n qcom-iris.ko` (`aarch64 feature: BTI, PAC`).
+- After the oops the module is stuck in `initstate=coming` and
+  `modprobe -r` hangs in `iris_vpu_power_off → disable_irq`; the same hang
+  happens on any `modprobe -r` while the VPU is powered. Swap the file and
+  reboot instead of reloading. `ROLLBACK.sh` under
+  `~/Lab/iris-vaapi-lab/kernel-rollback-20260921-7.2.6/` does exactly that.
+
+Installed module sha `86e5e49aec0d…` (stock `548170065d83…` kept beside
+it). After a clean boot (`0bdad14e…`) `/dev/video7` exposes
+`display_delay` / `display_delay_enable`, `min_number_of_capture_buffers`
+max 32.
+
+### Installed package on kernel 7.2.6 (2026-09-22)
+
+Unchanged installed driver `579d1bc1fa18…` (RPM `libva-v4l2-iris-0.1.0-1`),
+Chrome 152 through the packaged launcher, 30 s windows, boot ID unchanged
+throughout:
+
+| Clip | Decoder | Frames / dropped |
+| --- | --- | --- |
+| H.264 1080p24 B-frames | `VaapiVideoDecoder`, platform=true | 719 / 18, then 718 / 0 and 719 / 0 |
+| HEVC Main 1080p24 B-frames | `VaapiVideoDecoder`, platform=true | 718 / 0 |
+| VP9 1080p24 alt-ref | `VaapiVideoDecoder`, platform=true | 720 / 6, then 719 / 0 |
+| HEVC Main10 1080p24 B-frames | `VaapiVideoDecoder`, platform=true | 720 / 0 |
+
+The two non-zero drop counts were the first runs after the reboot (load
+average above 10 for the first minutes); the immediate reruns were clean.
+
+### Target cleanup (2026-09-22)
+
+The pre-RPM install path had left five desktop entries under
+`/usr/local/share/applications` (two Chromium ones whose `TryExec` pointed
+at a browser that is not installed, the Vulkan/WebGPU experiments, a
+Chromium 154 entry for a build that no longer exists) and a stale driver at
+`/usr/local/lib64/dri/v4l2_drv_video.so`. They were moved to
+`~/Lab/iris-vaapi-lab/residue-backup-20260922/`, not deleted. What remains:
+the RPM's `google-chrome-iris-v4l2.desktop`, the user-level
+`google-chrome.desktop` override that routes the plain Chrome icon through
+`iris-vaapi-browser`, and Fedora's own `chromium-browser.desktop`.

@@ -36,7 +36,7 @@ The project is packaged for Fedora and Arch Linux (`packaging/fedora/libva-v4l2-
 
 The driver owns one model with two publish policies chosen per surface automatically. It owns the CAPTURE pool. A surface either takes the completed CAPTURE slot itself (Direct path for FFmpeg, GStreamer, mpv, offering true zero-copy), or, if the client exported it before its first decode (like Chrome), the frame is blitted on the GPU (EGL, Adreno) into a stable buffer whose file descriptor never changes (Copy path). CPU memcpy is the fallback engine.
 
-The driver requires two Iris kernel patches from strongtz/libva-v4l2 applied to the self-built kernel module: decode-order output (via the display-delay control) and 64-buffer CAPTURE max. The driver probes for the control and falls back to display-order behaviour (bounded sync wait plus one STOP/LAST/START drain on timeout) on a stock kernel.
+The driver wants two Iris kernel patches from strongtz/libva-v4l2 applied to the self-built kernel module: decode-order output (via the display-delay control) and 64-buffer CAPTURE max. `packaging/kernel/` carries them rebased onto the `sheng-7.2.6` tree, with build notes for rebuilding only the `qcom-iris` module. The driver probes for the control and falls back to display-order behaviour (bounded sync wait plus one STOP/LAST/START drain on timeout) on a stock kernel.
 
 ## Environment variables
 
