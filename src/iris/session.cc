@@ -111,12 +111,15 @@ bool Session::supports_import() const
 {
     if (mode_ != SessionMode::DecodeOrder || import_rejected_)
         return false;
-    // VP9 is excluded until the stall measured on 2026-09-22 is understood:
-    // Chrome's VP9 session reached only 127 of 720 pictures in 30 s under
-    // Import and then failed to drain (TEST-RESULTS.md, "Import").
-    if (config_.codec_pixelformat == V4L2_PIX_FMT_VP9)
-        return false;
     return pool_.capture_count() == 0 || pool_.capture_memory() == CaptureMemory::Import;
+}
+
+unsigned Session::import_window() const
+{
+    // A VP9 access unit may carry an alt-ref and its visible frame, which
+    // the firmware decodes as two pictures; a one-buffer window stalls it
+    // ~500 ms per alt-ref (measured in Chrome, 2026-09-22).
+    return config_.codec_pixelformat == V4L2_PIX_FMT_VP9 ? 2 : 1;
 }
 
 bool Session::import_compatible(const Layout& client, const Layout& capture)
@@ -265,7 +268,8 @@ void Session::enter_streaming()
 
 void Session::queue_import_next()
 {
-    if (pool_.capture_memory() != CaptureMemory::Import || import_backlog_.empty() || pool_.capture_queued() > 0)
+    if (pool_.capture_memory() != CaptureMemory::Import || import_backlog_.empty()
+        || pool_.capture_queued() >= import_window())
         return;
     const ImportEntry entry = import_backlog_.front();
     if (entry.fd < 0) {

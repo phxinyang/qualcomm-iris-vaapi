@@ -94,6 +94,7 @@ public:
     // Whether an Import target can still be honoured: decode-order output,
     // and the CAPTURE pool (if built) is in Import memory.
     bool supports_import() const;
+    unsigned import_window() const;
     CaptureMemory capture_memory() const { return pool_.capture_memory(); }
     const SessionStats& stats() const { return stats_; }
     const Layout& capture_layout() const { return pool_.capture_layout(); }
