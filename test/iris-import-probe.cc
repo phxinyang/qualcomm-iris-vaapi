@@ -43,7 +43,7 @@ int xioctl(int fd, unsigned long request, void* arg, const char* name)
     do {
         r = ioctl(fd, request, arg);
     } while (r == -1 && errno == EINTR);
-    if (r == -1)
+    if (r == -1 && errno != EAGAIN)
         std::fprintf(stderr, "ioctl %s: %s\n", name, std::strerror(errno));
     return r;
 }
@@ -237,11 +237,11 @@ int main(int argc, char** argv)
         return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
     };
 
+    unsigned free_out = kOutputSlots - 1; // AU 0 is in flight
     while (completed < units.size() - holes.size() && elapsed_ms() < static_cast<int64_t>(deadline)) {
-        bool fed = false;
-        if (next_au < units.size() && free_slots.size() > 1) {
+        while (free_out > 0 && next_au < units.size() && free_slots.size() > 0) {
             // Queue the client buffer for this AU first, then the bitstream.
-            if (!is_hole(next_au) && next_out - next_au < kOutputSlots) {
+            if (!is_hole(next_au)) {
                 const unsigned slot = free_slots.back();
                 free_slots.pop_back();
                 const int fd = client[next_au % surfaces];
@@ -250,23 +250,21 @@ int main(int argc, char** argv)
                     slot_token[slot] = next_au;
                 } else {
                     free_slots.push_back(slot);
+                    break;
                 }
-            } else if (is_hole(next_au)) {
+            } else {
                 ++holes_skipped;
             }
-            if (next_out - next_au < kOutputSlots) {
-                const unsigned oslot = next_out % kOutputSlots;
-                std::memcpy(out_map[oslot], stream.data() + units[next_au].first, units[next_au].second);
-                if (qbuf(vfd, out_req.type, oslot, V4L2_MEMORY_MMAP, -1, 0, units[next_au].second, next_au) == 0)
-                    ++next_out;
-                fed = true;
-            }
+            const unsigned oslot = next_out % kOutputSlots;
+            std::memcpy(out_map[oslot], stream.data() + units[next_au].first, units[next_au].second);
+            if (qbuf(vfd, out_req.type, oslot, V4L2_MEMORY_MMAP, -1, 0, units[next_au].second, next_au) != 0)
+                break;
+            ++next_out;
             ++next_au;
+            --free_out;
         }
-        if (!fed) {
-            pollfd pfd = { vfd, POLLIN | POLLPRI | POLLOUT, 0 };
-            poll(&pfd, 1, 20);
-        }
+        pollfd pfd = { vfd, POLLIN | POLLPRI | POLLOUT, 0 };
+        poll(&pfd, 1, 10);
         // Drain completions.
         for (;;) {
             v4l2_plane plane = {};
@@ -314,7 +312,9 @@ int main(int argc, char** argv)
             b.m.planes = &plane;
             if (xioctl(vfd, VIDIOC_DQBUF, &b, "DQBUF OUTPUT") < 0)
                 break;
+            ++free_out;
         }
+        std::fflush(stdout);
     }
     bool ordered = true;
     for (size_t i = 1; i < completed_tokens.size(); ++i)
