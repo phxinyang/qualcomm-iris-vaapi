@@ -43,7 +43,7 @@ int xioctl(int fd, unsigned long request, void* arg, const char* name)
     do {
         r = ioctl(fd, request, arg);
     } while (r == -1 && errno == EINTR);
-    if (r == -1 && errno != EAGAIN)
+    if (r == -1 && errno != EAGAIN && errno != ENOENT && errno != ENODATA)
         std::fprintf(stderr, "ioctl %s: %s\n", name, std::strerror(errno));
     return r;
 }
@@ -176,15 +176,24 @@ int main(int argc, char** argv)
             return 2;
         out_map[i] = mmap(nullptr, plane.length, PROT_READ | PROT_WRITE, MAP_SHARED, vfd, plane.m.mem_offset);
     }
-    std::memcpy(out_map[0], stream.data() + units[0].first, units[0].second);
-    if (qbuf(vfd, out_req.type, 0, V4L2_MEMORY_MMAP, -1, 0, units[0].second, 1) < 0)
+    uint32_t out_type = out_req.type;
+    if (xioctl(vfd, VIDIOC_STREAMON, &out_type, "STREAMON OUTPUT") < 0)
         return 2;
-    for (int i = 0; i < 500; ++i) {
+    // First AU: raises SOURCE_CHANGE once the OUTPUT queue is live.
+    std::memcpy(out_map[0], stream.data() + units[0].first, units[0].second);
+    if (qbuf(vfd, out_req.type, 0, V4L2_MEMORY_MMAP, -1, 0, units[0].second, 0) < 0)
+        return 2;
+    bool saw_source_change = false;
+    for (int i = 0; i < 500 && !saw_source_change; ++i) {
         v4l2_event event = {};
         if (xioctl(vfd, VIDIOC_DQEVENT, &event, "DQEVENT") == 0 && event.type == V4L2_EVENT_SOURCE_CHANGE)
-            break;
-        usleep(10000);
+            saw_source_change = true;
+        else
+            usleep(10000);
     }
+    std::printf("source change: %s\n", saw_source_change ? "yes" : "NO");
+    if (!saw_source_change)
+        return 2;
 
     v4l2_format cap = {};
     cap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
@@ -224,9 +233,27 @@ int main(int argc, char** argv)
     std::vector<int> slot_fd(kCaptureSlots, -1);
     std::vector<uint64_t> slot_token(kCaptureSlots, 0);
 
-    uint32_t out_type = out_req.type, cap_type = cap_req.type;
-    if (xioctl(vfd, VIDIOC_STREAMON, &out_type, "STREAMON OUTPUT") < 0
-        || xioctl(vfd, VIDIOC_STREAMON, &cap_type, "STREAMON CAPTURE") < 0)
+    // The driver queues the first pictures' buffers, then streams CAPTURE on.
+    auto queue_client_for = [&](unsigned k) -> bool {
+        if (is_hole(k))
+            return true;
+        if (free_slots.empty())
+            return false;
+        const unsigned slot = free_slots.back();
+        free_slots.pop_back();
+        const int fd = client[k % surfaces];
+        if (qbuf(vfd, cap_req.type, slot, V4L2_MEMORY_DMABUF, fd, sizeimage, 0, 0) != 0) {
+            free_slots.push_back(slot);
+            return false;
+        }
+        slot_fd[slot] = fd;
+        slot_token[slot] = k;
+        return true;
+    };
+    if (!is_hole(0) && !queue_client_for(0))
+        return 2;
+    uint32_t cap_type = cap_req.type;
+    if (xioctl(vfd, VIDIOC_STREAMON, &cap_type, "STREAMON CAPTURE") < 0)
         return 2;
 
     unsigned next_au = 1, next_out = 1, completed = 0, misplaced = 0, unwritten = 0, holes_skipped = 0;
@@ -241,20 +268,10 @@ int main(int argc, char** argv)
     while (completed < units.size() - holes.size() && elapsed_ms() < static_cast<int64_t>(deadline)) {
         while (free_out > 0 && next_au < units.size() && free_slots.size() > 0) {
             // Queue the client buffer for this AU first, then the bitstream.
-            if (!is_hole(next_au)) {
-                const unsigned slot = free_slots.back();
-                free_slots.pop_back();
-                const int fd = client[next_au % surfaces];
-                if (qbuf(vfd, cap_req.type, slot, V4L2_MEMORY_DMABUF, fd, sizeimage, 0, 0) == 0) {
-                    slot_fd[slot] = fd;
-                    slot_token[slot] = next_au;
-                } else {
-                    free_slots.push_back(slot);
-                    break;
-                }
-            } else {
+            if (is_hole(next_au))
                 ++holes_skipped;
-            }
+            else if (!queue_client_for(next_au))
+                break;
             const unsigned oslot = next_out % kOutputSlots;
             std::memcpy(out_map[oslot], stream.data() + units[next_au].first, units[next_au].second);
             if (qbuf(vfd, out_req.type, oslot, V4L2_MEMORY_MMAP, -1, 0, units[next_au].second, next_au) != 0)
@@ -330,5 +347,8 @@ int main(int argc, char** argv)
     std::printf("\n");
     xioctl(vfd, VIDIOC_STREAMOFF, &cap_type, "STREAMOFF CAPTURE");
     xioctl(vfd, VIDIOC_STREAMOFF, &out_type, "STREAMOFF OUTPUT");
-    return misplaced == 0 ? 0 : 1;
+    const unsigned expected_completions = static_cast<unsigned>(units.size());
+    if (misplaced || completed < expected_completions)
+        return 1;
+    return 0;
 }
