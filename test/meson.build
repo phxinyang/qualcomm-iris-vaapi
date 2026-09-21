@@ -7,6 +7,15 @@ session_test = executable(
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('session', session_test)
 
+# Hardware probe (not a meson test: needs a decode-order Iris node). Proves
+# by content that picture k lands in the k-th queued client DMA-BUF; the
+# acceptance test docs/architecture.md §9 requires for the Import policy.
+import_probe = executable(
+  'iris-import-probe',
+  'iris-import-probe.cc',
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+test('import-probe-built', import_probe)  # presence only; the run needs hardware
+
 # Parameter-set bitstream round trips for the HEVC translator.
 hevc_parameter_sets_test = executable(
   'hevc-parameter-sets-test',

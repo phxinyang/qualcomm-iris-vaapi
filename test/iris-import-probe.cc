@@ -1,0 +1,334 @@
+// SPDX-License-Identifier: MIT
+//
+// Standalone probe (hardware only): does the Iris CAPTURE queue deliver
+// picture k into the k-th queued DMA-BUF? This is the acceptance test
+// docs/architecture.md §9 requires before the Import policy may exist.
+//
+// The input is an H.264 Annex-B stream in which every picture's luma is a
+// flat grey encoding its position in decode order (value = 16 + 2*(k%100));
+// the probe splits the stream on AUD NALs, queues one client DMA-BUF per
+// access unit *before* the unit (the order the driver uses), rotates over
+// `surfaces` buffers like a browser pool, and reads the grey back out of
+// every completed buffer. A completion whose timestamp does not match the
+// grey in its buffer is a misplacement. `skip=` punches holes: AUs that
+// get no client buffer, modelling a client that released the surface.
+//
+// Usage: iris-import-probe <node> <stream.264> [surfaces=N] [skip=K1,K2]
+
+#include <algorithm>
+#include <chrono>
+#include <cerrno>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <vector>
+
+extern "C" {
+#include <fcntl.h>
+#include <linux/dma-heap.h>
+#include <linux/videodev2.h>
+#include <poll.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+}
+
+namespace {
+
+int xioctl(int fd, unsigned long request, void* arg, const char* name)
+{
+    int r;
+    do {
+        r = ioctl(fd, request, arg);
+    } while (r == -1 && errno == EINTR);
+    if (r == -1)
+        std::fprintf(stderr, "ioctl %s: %s\n", name, std::strerror(errno));
+    return r;
+}
+
+int allocate_heap(uint32_t size)
+{
+    const int heap = open("/dev/dma_heap/system", O_RDONLY | O_CLOEXEC);
+    if (heap < 0)
+        return -1;
+    dma_heap_allocation_data data = {};
+    data.len = size;
+    data.fd_flags = O_RDWR | O_CLOEXEC;
+    const int r = ioctl(heap, DMA_HEAP_IOCTL_ALLOC, &data);
+    close(heap);
+    return r < 0 ? -1 : static_cast<int>(data.fd);
+}
+
+std::vector<std::pair<size_t, size_t>> split_access_units(const std::vector<uint8_t>& bytes)
+{
+    std::vector<size_t> starts;
+    for (size_t i = 0; i + 3 < bytes.size(); ++i)
+        if (bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 1 && (bytes[i + 3] & 0x1f) == 9)
+            starts.push_back(i);
+    std::vector<std::pair<size_t, size_t>> units;
+    for (size_t i = 0; i < starts.size(); ++i) {
+        const size_t end = i + 1 < starts.size() ? starts[i + 1] : bytes.size();
+        units.emplace_back(starts[i], end - starts[i]);
+    }
+    return units;
+}
+
+int qbuf(int vfd, uint32_t type, unsigned index, uint32_t memory, int fd, unsigned length,
+    unsigned bytesused, uint64_t timestamp_us)
+{
+    v4l2_plane plane = {};
+    v4l2_buffer buffer = {};
+    buffer.type = type;
+    buffer.index = index;
+    buffer.memory = memory;
+    buffer.field = V4L2_FIELD_NONE;
+    buffer.length = 1;
+    buffer.m.planes = &plane;
+    plane.bytesused = bytesused;
+    if (memory == V4L2_MEMORY_DMABUF) {
+        plane.m.fd = fd;
+        plane.length = length;
+    }
+    buffer.timestamp.tv_sec = static_cast<time_t>(timestamp_us / 1000000);
+    buffer.timestamp.tv_usec = static_cast<suseconds_t>(timestamp_us % 1000000);
+    return xioctl(vfd, VIDIOC_QBUF, &buffer, "QBUF");
+}
+
+} // namespace
+
+int main(int argc, char** argv)
+{
+    if (argc < 3) {
+        std::fprintf(stderr, "usage: %s <node> <stream.264> [surfaces=N] [skip=K1,K2]\n", argv[0]);
+        return 2;
+    }
+    unsigned surfaces = 8;
+    std::vector<unsigned> holes;
+    for (int i = 3; i < argc; ++i) {
+        if (std::sscanf(argv[i], "surfaces=%u", &surfaces) == 1)
+            continue;
+        if (std::strncmp(argv[i], "skip=", 5) == 0)
+            for (const char* p = argv[i] + 5; *p;) {
+                char* end = nullptr;
+                holes.push_back(std::strtoul(p, &end, 10));
+                p = (*end == ',') ? end + 1 : end;
+            }
+    }
+    std::ifstream input(argv[2], std::ios::binary);
+    if (!input) {
+        std::fprintf(stderr, "cannot open %s\n", argv[2]);
+        return 2;
+    }
+    const std::vector<uint8_t> stream((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    const auto units = split_access_units(stream);
+    std::printf("access units: %zu surfaces=%u holes=%zu\n", units.size(), surfaces, holes.size());
+    if (units.size() < 8)
+        return 2;
+    auto is_hole = [&](unsigned k) { return std::find(holes.begin(), holes.end(), k) != holes.end(); };
+
+    const int vfd = open(argv[1], O_RDWR | O_CLOEXEC | O_NONBLOCK);
+    if (vfd < 0) {
+        std::fprintf(stderr, "open: %s\n", std::strerror(errno));
+        return 2;
+    }
+    v4l2_event_subscription sub = {};
+    sub.type = V4L2_EVENT_SOURCE_CHANGE;
+    xioctl(vfd, VIDIOC_SUBSCRIBE_EVENT, &sub, "SUBSCRIBE_EVENT");
+
+    v4l2_format out = {};
+    out.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+    out.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_H264;
+    out.fmt.pix_mp.width = 1920;
+    out.fmt.pix_mp.height = 1080;
+    out.fmt.pix_mp.num_planes = 1;
+    out.fmt.pix_mp.plane_fmt[0].sizeimage = 2 * 1024 * 1024;
+    if (xioctl(vfd, VIDIOC_S_FMT, &out, "S_FMT OUTPUT") < 0)
+        return 2;
+    v4l2_control delay = { V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY, 0 };
+    v4l2_control delay_on = { V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE, 1 };
+    const bool decode_order = xioctl(vfd, VIDIOC_S_CTRL, &delay, "S_CTRL delay") == 0
+        && xioctl(vfd, VIDIOC_S_CTRL, &delay_on, "S_CTRL delay_on") == 0;
+    std::printf("decode-order control: %s\n", decode_order ? "yes" : "NO");
+    if (!decode_order) {
+        std::fprintf(stderr, "this probe requires a decode-order kernel module\n");
+        return 2;
+    }
+
+    constexpr unsigned kOutputSlots = 4;
+    v4l2_requestbuffers out_req = {};
+    out_req.count = kOutputSlots;
+    out_req.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+    out_req.memory = V4L2_MEMORY_MMAP;
+    if (xioctl(vfd, VIDIOC_REQBUFS, &out_req, "REQBUFS OUTPUT") < 0)
+        return 2;
+    std::vector<void*> out_map(kOutputSlots);
+    for (unsigned i = 0; i < kOutputSlots; ++i) {
+        v4l2_plane plane = {};
+        v4l2_buffer b = {};
+        b.type = out_req.type;
+        b.memory = V4L2_MEMORY_MMAP;
+        b.index = i;
+        b.length = 1;
+        b.m.planes = &plane;
+        if (xioctl(vfd, VIDIOC_QUERYBUF, &b, "QUERYBUF OUTPUT") < 0)
+            return 2;
+        out_map[i] = mmap(nullptr, plane.length, PROT_READ | PROT_WRITE, MAP_SHARED, vfd, plane.m.mem_offset);
+    }
+    std::memcpy(out_map[0], stream.data() + units[0].first, units[0].second);
+    if (qbuf(vfd, out_req.type, 0, V4L2_MEMORY_MMAP, -1, 0, units[0].second, 1) < 0)
+        return 2;
+    for (int i = 0; i < 500; ++i) {
+        v4l2_event event = {};
+        if (xioctl(vfd, VIDIOC_DQEVENT, &event, "DQEVENT") == 0 && event.type == V4L2_EVENT_SOURCE_CHANGE)
+            break;
+        usleep(10000);
+    }
+
+    v4l2_format cap = {};
+    cap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    if (xioctl(vfd, VIDIOC_G_FMT, &cap, "G_FMT CAPTURE") < 0)
+        return 2;
+    cap.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12;
+    cap.fmt.pix_mp.num_planes = 1;
+    if (xioctl(vfd, VIDIOC_S_FMT, &cap, "S_FMT CAPTURE") < 0)
+        return 2;
+    const unsigned width = cap.fmt.pix_mp.width, height = cap.fmt.pix_mp.height;
+    const unsigned stride = cap.fmt.pix_mp.plane_fmt[0].bytesperline;
+    const unsigned sizeimage = cap.fmt.pix_mp.plane_fmt[0].sizeimage;
+    std::printf("capture %ux%u stride=%u size=%u\n", width, height, stride, sizeimage);
+
+    constexpr unsigned kCaptureSlots = 16;
+    v4l2_requestbuffers cap_req = {};
+    cap_req.count = kCaptureSlots;
+    cap_req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    cap_req.memory = V4L2_MEMORY_DMABUF;
+    if (xioctl(vfd, VIDIOC_REQBUFS, &cap_req, "REQBUFS CAPTURE DMABUF") < 0) {
+        std::fprintf(stderr, "kernel refused a DMABUF CAPTURE queue\n");
+        return 2;
+    }
+    std::vector<int> client(surfaces, -1);
+    std::vector<uint8_t*> client_map(surfaces, nullptr);
+    for (unsigned i = 0; i < surfaces; ++i) {
+        client[i] = allocate_heap(sizeimage);
+        if (client[i] < 0)
+            return 2;
+        client_map[i] = static_cast<uint8_t*>(
+            mmap(nullptr, sizeimage, PROT_READ | PROT_WRITE, MAP_SHARED, client[i], 0));
+        std::memset(client_map[i], 0xEE, sizeimage);
+    }
+    std::vector<unsigned> free_slots;
+    for (unsigned i = kCaptureSlots; i-- > 0;)
+        free_slots.push_back(i);
+    std::vector<int> slot_fd(kCaptureSlots, -1);
+    std::vector<uint64_t> slot_token(kCaptureSlots, 0);
+
+    uint32_t out_type = out_req.type, cap_type = cap_req.type;
+    if (xioctl(vfd, VIDIOC_STREAMON, &out_type, "STREAMON OUTPUT") < 0
+        || xioctl(vfd, VIDIOC_STREAMON, &cap_type, "STREAMON CAPTURE") < 0)
+        return 2;
+
+    unsigned next_au = 1, next_out = 1, completed = 0, misplaced = 0, unwritten = 0, holes_skipped = 0;
+    std::vector<unsigned> completed_tokens;
+    const uint64_t deadline = static_cast<uint64_t>(units.size()) * 200; // ms budget
+    const auto start = std::chrono::steady_clock::now();
+    auto elapsed_ms = [&] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    };
+
+    while (completed < units.size() - holes.size() && elapsed_ms() < static_cast<int64_t>(deadline)) {
+        bool fed = false;
+        if (next_au < units.size() && free_slots.size() > 1) {
+            // Queue the client buffer for this AU first, then the bitstream.
+            if (!is_hole(next_au) && next_out - next_au < kOutputSlots) {
+                const unsigned slot = free_slots.back();
+                free_slots.pop_back();
+                const int fd = client[next_au % surfaces];
+                if (qbuf(vfd, cap_req.type, slot, V4L2_MEMORY_DMABUF, fd, sizeimage, 0, 0) == 0) {
+                    slot_fd[slot] = fd;
+                    slot_token[slot] = next_au;
+                } else {
+                    free_slots.push_back(slot);
+                }
+            } else if (is_hole(next_au)) {
+                ++holes_skipped;
+            }
+            if (next_out - next_au < kOutputSlots) {
+                const unsigned oslot = next_out % kOutputSlots;
+                std::memcpy(out_map[oslot], stream.data() + units[next_au].first, units[next_au].second);
+                if (qbuf(vfd, out_req.type, oslot, V4L2_MEMORY_MMAP, -1, 0, units[next_au].second, next_au) == 0)
+                    ++next_out;
+                fed = true;
+            }
+            ++next_au;
+        }
+        if (!fed) {
+            pollfd pfd = { vfd, POLLIN | POLLPRI | POLLOUT, 0 };
+            poll(&pfd, 1, 20);
+        }
+        // Drain completions.
+        for (;;) {
+            v4l2_plane plane = {};
+            v4l2_buffer b = {};
+            b.type = cap_req.type;
+            b.memory = V4L2_MEMORY_DMABUF;
+            b.length = 1;
+            b.m.planes = &plane;
+            if (xioctl(vfd, VIDIOC_DQBUF, &b, "DQBUF CAPTURE") < 0)
+                break;
+            const unsigned idx = b.index;
+            const uint64_t token = b.timestamp.tv_sec * 1000000ull + b.timestamp.tv_usec;
+            const int fd = slot_fd[idx];
+            int grey = -1;
+            if (fd >= 0) {
+                const unsigned ci = static_cast<unsigned>(std::find(client.begin(), client.end(), fd) - client.begin());
+                if (ci < surfaces) {
+                    const uint8_t* p = client_map[ci];
+                    grey = p[(height / 2) * stride + (width / 2)];
+                }
+            }
+            ++completed;
+            completed_tokens.push_back(static_cast<unsigned>(token));
+            const int expected = 16 + 2 * static_cast<int>(token % 100);
+            if (grey < 0 || std::abs(grey - expected) > 4) {
+                ++misplaced;
+                if (misplaced <= 12)
+                    std::printf("  MISPLACED completion token=%llu buffer=%u (queued for %llu) grey=%d expected=%d\n",
+                        static_cast<unsigned long long>(token), idx,
+                        static_cast<unsigned long long>(slot_token[idx]), grey, expected);
+            } else if (grey == 0xEE) {
+                ++unwritten;
+            }
+            slot_fd[idx] = -1;
+            slot_token[idx] = 0;
+            free_slots.push_back(idx);
+        }
+        // Recycle OUTPUT slots.
+        for (;;) {
+            v4l2_plane plane = {};
+            v4l2_buffer b = {};
+            b.type = out_req.type;
+            b.memory = V4L2_MEMORY_MMAP;
+            b.length = 1;
+            b.m.planes = &plane;
+            if (xioctl(vfd, VIDIOC_DQBUF, &b, "DQBUF OUTPUT") < 0)
+                break;
+        }
+    }
+    bool ordered = true;
+    for (size_t i = 1; i < completed_tokens.size(); ++i)
+        if (completed_tokens[i] < completed_tokens[i - 1])
+            ordered = false;
+    std::printf("completions=%u misplaced=%u unwritten=%u holes=%u tokens_in_order=%s elapsed=%lldms\n",
+        completed, misplaced, unwritten, holes_skipped, ordered ? "yes" : "no",
+        static_cast<long long>(elapsed_ms()));
+    if (!completed_tokens.empty())
+        std::printf("first completions: ");
+    for (size_t i = 0; i < std::min<size_t>(completed_tokens.size(), 24); ++i)
+        std::printf("%u ", completed_tokens[i]);
+    std::printf("\n");
+    xioctl(vfd, VIDIOC_STREAMOFF, &cap_type, "STREAMOFF CAPTURE");
+    xioctl(vfd, VIDIOC_STREAMOFF, &out_type, "STREAMOFF OUTPUT");
+    return misplaced == 0 ? 0 : 1;
+}
