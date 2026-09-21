@@ -297,7 +297,14 @@ void Session::queue_import_next()
         return;
     // The compositor may still be sampling the previous picture from this
     // buffer; the firmware must not write under it.
+    const auto fence_start = std::chrono::steady_clock::now();
     wait_dma_buf(entry.fd, true, kImportFenceMs);
+    const auto fence_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - fence_start)
+                              .count();
+    if (fence_ms >= 20)
+        trace_("import fence token=%llu fd=%d waited=%lldms", static_cast<unsigned long long>(entry.token),
+            entry.fd, static_cast<long long>(fence_ms));
     const auto slot = pool_.queue_capture_import(entry.fd, pool_.capture_layout().size, entry.token);
     require(slot.has_value(), "no free CAPTURE slot with nothing in flight");
     import_backlog_.pop_front();
