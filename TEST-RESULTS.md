@@ -1266,3 +1266,18 @@ the misplaced-completion check (both surfaces involved are failed, never
 published) as the fail-closed backstop. `V4L2_VA_PUBLISH=import` forces it;
 `auto` selects it for H.264/HEVC/Main10 on a decode-order kernel and keeps
 Copy for VP9 and for display-order kernels.
+
+## Merge gate: the trunk with the Import policy (2026-09-22)
+
+Branch `iris/rebuild` at `6dd8bd2` (the zero-copy work merged), driver
+`f9f4e423050f…` built clean on the target (`ldd -r` reports no undefined
+symbols), boot ID `5a337970…` unchanged through every run.
+
+| Gate | Result |
+| --- | --- |
+| Codec matrix | 15 PASS, 0 FAIL: H.264 / VP9 / HEVC 48/48 frames each, exact frame MD5 against the native V4L2 decoders, AV1 lane included |
+| Structure matrix | pass |
+| Dynamic resolution (H.264, 100 switches) | pass, 101 fresh contexts, no timeout |
+| Chrome 152, auto policy | H.264 902 import, HEVC 905 import, Main10 898 import, VP9 908 copy-gpu; 0 misplaced, 0 decode errors, all platform decoder with the GPU process holding the Iris node |
+
+Chrome's own dropped-frame counts in those 30 s windows were 2, 2, 1 and 0.
