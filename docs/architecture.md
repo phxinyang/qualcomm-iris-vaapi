@@ -1,7 +1,7 @@
 # Architecture
 
 This document is the contract for the rebuild started on 2026-09-20 (tag
-`pre-rebuild-20260920`, branch `iris/rebuild`). Every later phase, every
+`pre-rebuild-20260920`, branch `main`). Every later phase, every
 review and every task handed to a worker agent is scoped against it. When
 code and this document disagree, one of them is wrong and the disagreement
 is a bug to file, not a detail to paper over.

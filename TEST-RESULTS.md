@@ -927,7 +927,7 @@ in the pre-rebuild baseline:
 
 ## Phase 3: rebuilt driver on the new core (2026-09-20)
 
-Source commit range `1f1f2fa..f6642b1` on `iris/rebuild`; the driver is now
+Source commit range `1f1f2fa..f6642b1` on `main`; the driver is now
 `src/va` on `src/iris` with `src/codec` translators (docs/architecture.md).
 Target as in Phase 1, patched `qcom-iris` module (`1c1a4ef9…`), decode-order
 mode active. The tablet rebooted at 14:12 local by a clean `systemd-reboot`
@@ -1269,7 +1269,7 @@ Copy for VP9 and for display-order kernels.
 
 ## Merge gate: the trunk with the Import policy (2026-09-22)
 
-Branch `iris/rebuild` at `6dd8bd2` (the zero-copy work merged), driver
+Branch `main` at `6dd8bd2` (the zero-copy work merged), driver
 `f9f4e423050f…` built clean on the target (`ldd -r` reports no undefined
 symbols), boot ID `5a337970…` unchanged through every run.
 
