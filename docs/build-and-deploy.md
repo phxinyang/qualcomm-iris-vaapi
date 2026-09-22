@@ -30,7 +30,8 @@ gates the resulting shared object with `ldd -r`. It rejects absolute,
 dot-relative, parent-relative, whitespace-containing and shell-active
 `IRIS_REMOTE_ROOT` values before the `rsync --delete` command can contact the
 target. The remote lab directory is durable and defaults to
-`~/Lab/iris-vaapi-lab`; downloaded Fluster resources and Qualcomm test tools
+`$HOME/iris-vaapi-lab` (`IRIS_LAB_ROOT` overrides it); downloaded Fluster
+resources and Qualcomm test tools
 stay there rather than under a disposable scratch directory.
 
 Every successful deployment also writes
@@ -47,7 +48,7 @@ record accidentally.
 To re-check a deployed artifact later:
 
 ```sh
-cd ~/Lab/iris-vaapi-lab/src
+cd "$HOME/iris-vaapi-lab/src"
 python3 test/remote/provenance.py verify \
   --manifest build/iris-vaapi-provenance.json \
   --artifact build/src/v4l2_drv_video.so
@@ -70,7 +71,7 @@ resolved node for a run with `LIBVA_V4L2_VIDEO_PATH`.
 After deployment, run the short positive oracle before external corpora:
 
 ```sh
-ssh "$IRIS_REMOTE_HOST" 'cd ~/Lab/iris-vaapi-lab/src && \
+ssh "$IRIS_REMOTE_HOST" 'cd "$HOME/iris-vaapi-lab/src" && \
   . ./test/lib/iris-env.sh && device=$(iris_resolve_device) && \
   LIBVA_DRIVER_NAME=v4l2 \
   LIBVA_DRIVERS_PATH=$PWD/build/src \
@@ -90,7 +91,7 @@ configured system driver directory together with the process-scoped browser
 launcher and desktop entries:
 
 ```sh
-cd ~/Lab/iris-vaapi-lab/src
+cd "$HOME/iris-vaapi-lab/src"
 sudo ./scripts/install-system.sh build
 ```
 

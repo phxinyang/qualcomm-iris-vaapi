@@ -6,7 +6,7 @@
 set -eu
 
 root=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
-scratch_base=${IRIS_TEST_SCRATCH_ROOT:-$HOME/Lab/Bridge/tmp/trash}
+scratch_base=${IRIS_TEST_SCRATCH_ROOT:-${TMPDIR:-/tmp}}
 mkdir -p "$scratch_base"
 scratch=$(mktemp -d "$scratch_base/iris-eos-check-self-test.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM

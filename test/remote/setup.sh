@@ -12,7 +12,11 @@
 #
 # Environment:
 #   IRIS_REMOTE_HOST   ssh destination   (required)
-#   IRIS_LAB_ROOT      remote lab root   (default ~/Lab/iris-vaapi-lab)
+#   IRIS_LAB_ROOT      remote lab root, relative to the remote home
+#                      (default iris-vaapi-lab)
+#   IRIS_LEGACY_TOOLS  optional existing tools directory on the remote host
+#                      whose v4l-video-test-app / fluster checkouts are moved
+#                      into the lab instead of cloned again
 
 set -eu
 
@@ -21,7 +25,7 @@ if [ -z "$host" ]; then
     echo 'FAIL IRIS_REMOTE_HOST is required for remote setup' >&2
     exit 2
 fi
-lab_root=${IRIS_LAB_ROOT:-Lab/iris-vaapi-lab}
+lab_root=${IRIS_LAB_ROOT:-iris-vaapi-lab}
 fail_lab_root() {
     echo "FAIL unsafe IRIS_LAB_ROOT: '$lab_root'" >&2
     exit 1
@@ -30,10 +34,6 @@ case "$lab_root" in
     ''|.|..|-*|/*|./*|../*|*/./*|*/.|*/../*|*/..|*//*|*/|*[!A-Za-z0-9_./-]*)
         fail_lab_root
         ;;
-esac
-case "$lab_root" in
-    Lab/*) ;;
-    *) fail_lab_root ;;
 esac
 # The lab-root whitelist above makes this deliberate local interpolation safe.
 # shellcheck disable=SC2087
@@ -52,17 +52,17 @@ if [ -n "\$missing" ]; then
 fi
 echo "PASS toolchain present"
 
-# Adopt existing checkouts from the scratch directory instead of cloning
-# again. The Fluster resources tree alone is >100 MB of downloaded conformance
-# vectors and this device runs close to full, so a move (same filesystem, no
-# copy) is the only affordable migration.
+# Adopt existing checkouts from IRIS_LEGACY_TOOLS instead of cloning again:
+# the Fluster resources tree alone is >100 MB of downloaded conformance
+# vectors, so a move (same filesystem, no copy) is cheaper than a fresh
+# clone, and the caller may already have them somewhere durable.
 adopt() {
     name=\$1
-    legacy="\$HOME/Lab/Bridge/tmp/trash/\$name"
+    legacy="\$IRIS_LEGACY_TOOLS/\$name"
     target="\$lab/tools/\$name"
-    if [ ! -e "\$target" ] && [ -d "\$legacy" ]; then
+    if [ -n "\$IRIS_LEGACY_TOOLS" ] && [ ! -e "\$target" ] && [ -d "\$legacy" ]; then
         mv "\$legacy" "\$target"
-        printf 'PASS adopted %s from scratch directory\n' "\$name"
+        printf 'PASS adopted %s from legacy tools directory\n' "\$name"
     fi
 }
 adopt v4l-video-test-app

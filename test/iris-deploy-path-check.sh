@@ -7,7 +7,7 @@ set -eu
 
 root=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
 deploy="$root/test/remote/deploy.sh"
-scratch_base=${IRIS_TEST_SCRATCH_ROOT:-$HOME/Lab/Bridge/tmp/trash}
+scratch_base=${IRIS_TEST_SCRATCH_ROOT:-${TMPDIR:-/tmp}}
 mkdir -p "$scratch_base"
 scratch=$(mktemp -d "$scratch_base/iris-deploy-path-check.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
@@ -50,8 +50,8 @@ assert_rejected dotdot '..'
 assert_rejected option-like '-delete-target'
 assert_rejected absolute '/home/user/Lab/iris'
 assert_rejected parent-prefix '../Lab/iris'
-assert_rejected parent-middle 'Lab/../iris'
-assert_rejected parent-suffix 'Lab/iris/..'
+assert_rejected parent-middle 'iris/../tools'
+assert_rejected parent-suffix 'iris/tools/..'
 assert_rejected dot-middle 'Lab/./iris'
 assert_rejected double-slash 'Lab//iris'
 assert_rejected trailing-slash 'Lab/iris/'
@@ -59,13 +59,12 @@ assert_rejected single-quote "Lab/iris'bad"
 assert_rejected double-quote 'Lab/iris"bad'
 assert_rejected whitespace 'Lab/iris bad'
 assert_rejected newline "$(printf 'Lab/iris\nbad')"
-assert_rejected outside-lab 'Projects/iris-vaapi'
-assert_rejected lab-root-only 'Lab'
+assert_rejected single-segment '.'
 
 : >"$calls"
 if PATH="$scratch/bin:$PATH" \
     IRIS_REMOTE_HOST=shim \
-    IRIS_REMOTE_ROOT='Lab/iris-vaapi-lab/src' \
+    IRIS_REMOTE_ROOT='Projects/iris-vaapi-lab/src' \
     IRIS_SOURCE_COMMIT=0000000000000000000000000000000000000000 \
     IRIS_TRACKED_SOURCE_SHA256=1111111111111111111111111111111111111111111111111111111111111111 \
     sh "$deploy" \

@@ -13,7 +13,8 @@
 #
 # Environment:
 #   IRIS_REMOTE_HOST   ssh destination                (required)
-#   IRIS_REMOTE_ROOT   remote checkout directory      (default ~/Lab/iris-vaapi-lab/src)
+#   IRIS_REMOTE_ROOT   remote checkout directory, relative to the
+#                      remote home (default iris-vaapi-lab/src)
 #   IRIS_DEPLOY_INCREMENTAL=1  skip the clean step (still refreshes mtimes)
 #   IRIS_SOURCE_COMMIT full source object id (required only without local .git)
 
@@ -27,7 +28,7 @@ fi
 if [ "${IRIS_REMOTE_ROOT+x}" = x ]; then
     remote_root=$IRIS_REMOTE_ROOT
 else
-    remote_root=Lab/iris-vaapi-lab/src
+    remote_root=iris-vaapi-lab/src
 fi
 local_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 
@@ -43,10 +44,6 @@ case "$remote_root" in
     ''|.|..|-*|/*|./*|../*|*/./*|*/.|*/../*|*/..|*//*|*/|*[!A-Za-z0-9_./-]*)
         fail_remote_root
         ;;
-esac
-case "$remote_root" in
-    Lab/*) ;;
-    *) fail_remote_root ;;
 esac
 
 for tool in rsync sha256sum python3; do

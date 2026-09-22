@@ -255,10 +255,10 @@ This follow-up is recorded on branch `test/iris-stateful-followup` in commits
 
 ## Dedicated hardware suite (2026-08-30, `/dev/video0`)
 
-The complete hardware plan from the earlier Claude investigation was run on
+The complete hardware plan from the earlier investigation was run on
 the Fedora 44 ARM64 SM8550 tablet. The repeatable entry
 point is `test/iris-hardware-suite.sh`; its logs and generated media are kept
-under `~/Lab/Bridge/tmp/trash` and are not repository inputs.
+under a local scratch directory and are not repository inputs.
 
 Qualcomm's upstream `v4l-video-test-app` (`b1f1a04`) was built natively with
 shared Fedora FFmpeg/JsonCpp libraries (the upstream CMake file requests static
@@ -290,7 +290,7 @@ validator diagnostics rather than Iris pixel failures.
 
 Fluster corpus results were completed with the GStreamer V4L2 decoders. The
 JSON reports are retained in the tablet scratch directory
-`~/Lab/Bridge/tmp/trash/iris-hw-suite-20260830`:
+`$IRIS_LAB_ROOT/iris-hw-suite-20260830`:
 
 | Suite / decoder | Total | Passed | Error/Fail/Timeout | Interpretation |
 | --- | ---: | ---: | ---: | --- |
@@ -324,9 +324,9 @@ between codec correctness, V4L2 contract checks, and firmware capability
 boundaries. It does not change the production driver based on external-tool
 diagnostics.
 
-## Codex follow-up (2026-08-30, `codex/claude-followup`, secondary target)
+## Follow-up investigation (2026-08-30, branch `codex/claude-followup`, secondary target)
 
-The latest Claude route was continued on a durable secondary lab. Local
+The follow-up route was continued on a durable secondary lab. Local
 `bash test/run-static-checks.sh` and `ninja -C build-local` passed. The remote
 deployment performed the content sync, clean rebuild and `ldd -r` gate with no
 undefined symbols; the resulting driver SHA-256 was
@@ -374,9 +374,9 @@ backpressure records, but its frame hashes still differed from software. These
 are open surface/firmware interaction diagnostics, not grounds for another
 unverified production patch.
 
-## Codex dynamic-resolution follow-up (2026-08-30, `codex/claude-followup`, primary target)
+## Dynamic-resolution follow-up (2026-08-30, branch `codex/claude-followup`, primary target)
 
-The next Claude investigation item was completed against the current Iris node
+The next investigation item was completed against the current Iris node
 `/dev/video4` on the SM8550 tablet. `VIDIOC_ENUM_FRAMESIZES` reports the NV12
 capture range `96x96 - 8192x8192`; the VA runtime probe returned the same
 `MinWidth=96`, `MaxWidth=8192`, `MinHeight=96`, and `MaxHeight=8192` values.
@@ -397,9 +397,9 @@ recorded as deterministic firmware behavior rather than a VA-driver mismatch.
 The backend now also drains and rebuilds stateful V4L2 queues when a VA client
 reuses one context for a surface with a new geometry.
 
-## Codex zero-copy experiment (2026-08-30, `codex/claude-followup`, primary target)
+## Zero-copy experiment (2026-08-30, branch `codex/claude-followup`, primary target)
 
-The current Claude route was extended with an opt-in `V4L2_VA_ZERO_COPY=1`
+The same route was extended with an opt-in `V4L2_VA_ZERO_COPY=1`
 path. Stateful single-plane NV12 CAPTURE buffers can now import the per-surface
 DMA-BUF directly; the V4L2 `Buffer` owns a duplicated fd and no longer maps a
 kernel MMAP slot. Surface reuse requeues the imported buffer, while setup or
@@ -572,8 +572,8 @@ capture mode and no VA decode errors.
 Two 1080p samples were excluded before aggregation because their pre/post
 baseline gap was about 7.4 W, a power-management transition unrelated to the
 decoder. The raw CSV files and logs remain in
-`~/Lab/iris-vaapi-lab/artifacts/power-compare-20260830/` on the tablet (and
-the copied analysis inputs are under `~/Lab/Bridge/tmp/trash/power-compare-20260830/`).
+`$IRIS_LAB_ROOT/artifacts/power-compare-20260830/` on the tablet (and
+the copied analysis inputs are under a scratch directory).
 
 This measurement does not demonstrate a statistically significant battery
 advantage for the experimental zero-copy path over the native or VA-copy
@@ -686,7 +686,7 @@ came online in any sample.
 
 Driver `f879e5ea417c770a`, source commit `0ced73ee3f3b`, clean tree, kernel
 `7.2.2-sm8550-gad75da3`, decoder node `/dev/video0`. The artifacts are under
-`~/Lab/iris-vaapi-lab/artifacts/power-browser-20260902b/` on the tablet, with
+`$IRIS_LAB_ROOT/artifacts/power-browser-20260902b/` on the tablet, with
 `report.json` holding the full per-run record.
 
 ### Runtime translation
@@ -892,7 +892,7 @@ zero-copy refresh in `05964d5` did not change the default path. This is the
 first tracked HEVC-in-Chrome frame evidence; earlier HEVC browser results
 lived only in an untracked log.
 
-Artifacts: `~/Lab/iris-vaapi-lab/artifacts/browser-acceptance/baseline-*`
+Artifacts: `$IRIS_LAB_ROOT/artifacts/browser-acceptance/baseline-*`
 on the target (cdp.json, summary.json, browser.log, iris-node-holders.txt).
 
 ## Phase 1: decode-order Iris kernel module (2026-09-20)
@@ -907,7 +907,7 @@ instead of `enum platform_inst_fw_cap_type`; they were moved by hand to the
 end of the type enum. Only the `qcom-iris` module was rebuilt (`make LLVM=1
 M=drivers/media/platform/qcom/iris modules`, zero warnings) and installed in
 place; the previous module, the full local kernel diff and a `ROLLBACK.sh`
-are kept under `~/Lab/iris-vaapi-lab/kernel-rollback-20260920/`.
+are kept under `$IRIS_LAB_ROOT/kernel-rollback-20260920/`.
 
 | | before | after |
 | --- | --- | --- |
@@ -1135,7 +1135,7 @@ installed driver, started after this table on the same boot (`4944865b…`),
 passed: `dual-h264` 172800 + 172800 frames and `mixed` H.264 172800 +
 HEVC 172800 frames, `teardown_timeouts=0`, `stateful_drain_complete=1` on
 all four contexts, hottest zone 57.6 °C, boot ID unchanged. Log:
-`~/Lab/iris-vaapi-lab/artifacts/final-soak-2h-20260921.log`.
+`$IRIS_LAB_ROOT/artifacts/final-soak-2h-20260921.log`.
 
 ## Kernel 7.2.6 and the re-applied decode-order module (2026-09-22)
 
@@ -1163,7 +1163,7 @@ things bit on the way and are recorded so nobody repeats them:
   `modprobe -r` hangs in `iris_vpu_power_off → disable_irq`; the same hang
   happens on any `modprobe -r` while the VPU is powered. Swap the file and
   reboot instead of reloading. `ROLLBACK.sh` under
-  `~/Lab/iris-vaapi-lab/kernel-rollback-20260921-7.2.6/` does exactly that.
+  `$IRIS_LAB_ROOT/kernel-rollback-20260921-7.2.6/` does exactly that.
 
 Installed module sha `86e5e49aec0d…` (stock `548170065d83…` kept beside
 it). After a clean boot (`0bdad14e…`) `/dev/video7` exposes
@@ -1193,7 +1193,7 @@ The pre-RPM install path had left five desktop entries under
 at a browser that is not installed, the Vulkan/WebGPU experiments, a
 Chromium 154 entry for a build that no longer exists) and a stale driver at
 `/usr/local/lib64/dri/v4l2_drv_video.so`. They were moved to
-`~/Lab/iris-vaapi-lab/residue-backup-20260922/`, not deleted. What remains:
+`$IRIS_LAB_ROOT/residue-backup-20260922/`, not deleted. What remains:
 the RPM's `google-chrome-iris-v4l2.desktop`, the user-level
 `google-chrome.desktop` override that routes the plain Chrome icon through
 `iris-vaapi-browser`, and Fedora's own `chromium-browser.desktop`.

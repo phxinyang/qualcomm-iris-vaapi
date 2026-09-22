@@ -323,10 +323,12 @@ holes). Results and the VP9 open failure: TEST-RESULTS.md.
 
 ## 11. How work is divided
 
-Claude owns this document, the `iris/` core, the session state machine and
-every gate decision. Worker agents (`agy`) receive bounded tasks with a file
-allowlist, a do/don't list and the exact verification command; they work in
-a worktree, never commit, never deploy to the target, and every diff is
-reviewed against §3 to §10 before it lands. Factual claims from a worker
-(kernel behaviour, Chromium behaviour, upstream status) are re-verified
-before being relied on.
+The `iris/` core, the session state machine and every gate decision live in
+this tree and change only with the verification contract in `AGENTS.md`:
+each change carries the command that proves it, and the records in
+`TEST-RESULTS.md` are updated in the same commit. Work handed to another
+implementer (human or tool) is bounded by a written scope with a file
+allowlist, a do/don't list and the exact verification command; every diff
+is reviewed against §3 to §10 before it lands, and factual claims about
+kernel or client behaviour are re-verified on the target before they are
+relied on.

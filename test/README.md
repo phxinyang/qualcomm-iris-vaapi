@@ -20,7 +20,7 @@ On the tablet, run the following verification gates:
 The repeatable matrix (media generation, VA-API decode through FFmpeg, EOS
 oracle and per-frame MD5 against software) is `test/iris-matrix.sh`. Every
 script resolves the Iris node by driver name through `test/lib/iris-env.sh`
-and keeps artifacts under `~/Lab/iris-vaapi-lab/artifacts/` by default:
+and keeps artifacts under `$IRIS_LAB_ROOT/artifacts/` by default:
 
 ```
 LIBVA_DRIVERS_PATH=$PWD/build/src ./test/iris-matrix.sh
@@ -81,10 +81,10 @@ Qualcomm `v4l-video-test-app`, and optional Fluster conformance runs. It is
 device-agnostic, probes for `iris_driver`, and fails rather than guessing a
 node; set `V4L2_DEVICE` (or `LIBVA_V4L2_VIDEO_PATH`) for an inspected override.
 All logs and generated media stay
-under `$HOME/Lab/Bridge/tmp/trash`:
+under a scratch directory (`$IRIS_TEST_SCRATCH_ROOT`, default `${TMPDIR:-/tmp}`):
 
 ```
-IRIS_HARDWARE_SUITE_DIR=$HOME/Lab/Bridge/tmp/trash/iris-hardware-suite \
+IRIS_HARDWARE_SUITE_DIR=/tmp/iris-hardware-suite \
 ./test/iris-hardware-suite.sh
 ```
 
@@ -97,7 +97,7 @@ To add Fluster, set `FLUSTER_DIR`,
 `IRIS_FLUSTER_SUITES` and `IRIS_FLUSTER_DECODERS`, for example:
 
 ```
-FLUSTER_DIR=$HOME/Lab/iris-vaapi-lab/tools/fluster \
+FLUSTER_DIR=$HOME/iris-vaapi-lab/tools/fluster \
 IRIS_FLUSTER_SUITES='JVT-AVC_V1 JCT-VC-HEVC_V1 VP9-TEST-VECTORS AV1-TEST-VECTORS' \
 IRIS_FLUSTER_DECODERS='GStreamer-H.264-V4L2' \
 ./test/iris-hardware-suite.sh
@@ -108,7 +108,7 @@ characterises firmware capabilities without loading this VA-API driver. To
 exercise this repository's code, select the matching `FFmpeg-*-VAAPI` decoder:
 
 ```
-FLUSTER_DIR=$HOME/Lab/iris-vaapi-lab/tools/fluster \
+FLUSTER_DIR=$HOME/iris-vaapi-lab/tools/fluster \
 IRIS_FLUSTER_SUITES='JVT-AVC_V1' \
 IRIS_FLUSTER_DECODERS='FFmpeg-H.264-VAAPI' \
 V4L2_VA_SYNC_TIMEOUT_MS=100 \

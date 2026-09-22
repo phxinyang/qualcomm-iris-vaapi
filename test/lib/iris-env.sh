@@ -42,6 +42,6 @@ iris_resolve_device() {
 
 # iris_artifact_dir <name>: echo a durable directory for logs and media.
 iris_artifact_dir() {
-    lab=${IRIS_LAB_ROOT:-$HOME/Lab/iris-vaapi-lab}
+    lab=${IRIS_LAB_ROOT:-$HOME/iris-vaapi-lab}
     printf '%s/artifacts/%s\n' "$lab" "$1"
 }

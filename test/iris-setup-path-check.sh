@@ -6,7 +6,7 @@ set -eu
 
 root=${1:-$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)}
 setup="$root/test/remote/setup.sh"
-scratch_base=${IRIS_TEST_SCRATCH_ROOT:-$HOME/Lab/Bridge/tmp/trash}
+scratch_base=${IRIS_TEST_SCRATCH_ROOT:-${TMPDIR:-/tmp}}
 mkdir -p "$scratch_base"
 scratch=$(mktemp -d "$scratch_base/iris-setup-path-check.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
@@ -38,16 +38,15 @@ assert_rejected() {
         || { echo "FAIL unsafe lab root had the wrong error: $label" >&2; exit 1; }
 }
 
-assert_rejected absolute '/home/user/Lab/iris'
-assert_rejected parent '../Lab/iris'
-assert_rejected traversal 'Lab/../iris'
-assert_rejected whitespace 'Lab/iris bad'
-assert_rejected shell 'Lab/iris;touch-pwned'
-assert_rejected outside 'Projects/iris'
+assert_rejected absolute '/home/user/iris'
+assert_rejected parent '../iris'
+assert_rejected traversal 'iris/../tools'
+assert_rejected whitespace 'iris/iris bad'
+assert_rejected shell 'iris/iris;touch-pwned'
 
 : >"$calls"
 if PATH="$scratch/bin:$PATH" IRIS_REMOTE_HOST=shim \
-    IRIS_LAB_ROOT='Lab/iris-vaapi-lab' sh "$setup" \
+    IRIS_LAB_ROOT='Projects/iris-vaapi-lab' sh "$setup" \
     >"$scratch/out" 2>"$scratch/err"; then
     echo 'FAIL command shim unexpectedly let setup complete' >&2
     exit 1

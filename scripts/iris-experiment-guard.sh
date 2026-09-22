@@ -15,7 +15,7 @@ usage() {
 shift
 [ "$#" -gt 0 ] || usage
 
-root=${IRIS_EXPERIMENT_DIR:-$HOME/Lab/Bridge/tmp/trash/iris-experiment}
+root=${IRIS_EXPERIMENT_DIR:-${TMPDIR:-/tmp}/iris-experiment}
 guard_file=${IRIS_EXPERIMENT_GUARD_FILE:-$root/guard.state}
 max_seconds=${IRIS_EXPERIMENT_TIMEOUT_SECONDS:-7200}
 interval=${IRIS_EXPERIMENT_TEMPERATURE_INTERVAL_SECONDS:-30}

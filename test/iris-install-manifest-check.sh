@@ -6,7 +6,7 @@
 set -eu
 
 root=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
-scratch_base=${IRIS_TEST_TMP_DIR:-$HOME/Lab/Bridge/tmp/trash}
+scratch_base=${IRIS_TEST_TMP_DIR:-${TMPDIR:-/tmp}}
 mkdir -p "$scratch_base"
 work=$(mktemp -d "$scratch_base/iris-install-manifest-check.XXXXXX")
 trap 'rm -rf "$work"' 0 1 2 15
