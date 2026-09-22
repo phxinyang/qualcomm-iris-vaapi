@@ -1,5 +1,5 @@
 From 423e8ad47a06f64669b2d41df07977f1eb30328c Mon Sep 17 00:00:00 2001
-From: xinyang <xinyangmn@gmail.com>
+From: phxinyang <phxinyang@users.noreply.github.com>
 Date: Mon, 21 Sep 2026 23:46:19 +0800
 Subject: [PATCH] media: iris: decode-order output + 64 CAPTURE buffers
  (strongtz patches rebased onto sheng-7.2.6)
