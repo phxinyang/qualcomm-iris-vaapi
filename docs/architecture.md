@@ -33,8 +33,10 @@ with a self-built kernel from `ianchb/sm8550-mainline` (Iris is the
 `qcom-iris` module, HFI gen2). Because the kernel is self-built, kernel-side
 fixes are in scope.
 
-Two Iris kernel changes from `strongtz/libva-v4l2` (Radxa, Xilin Wu) apply
-to `sheng-7.2.2` with fuzz and are adopted as part of the target:
+Two Iris kernel changes from `strongtz/libva-v4l2` (Radxa, Xilin Wu) are
+adopted as part of the target. They were first applied to a `sheng-7.2.2`
+tree; after the target moved to `kernel-sheng-7.2.6-1` the rebased patch and
+the module-only build recipe live in `packaging/kernel/`:
 
 | Patch | What it changes | Why the driver needs it |
 | --- | --- | --- |
@@ -68,9 +70,12 @@ chosen per surface from observed client behaviour.
 ```
 Session (one per VA context, one fd)
   owns  OUTPUT pool   : 4 MMAP slots, one access unit each
-  owns  CAPTURE pool  : N MMAP slots, N = clamp(surfaces + 4, 32, kernel max)
-                        every slot EXPBUF'd once at allocation -> Frame
-  owns  pending map   : token -> Surface (token = strictly increasing
+  owns  CAPTURE pool  : N slots, N = clamp(surfaces + 4, 32, kernel max).
+                        MMAP (default): every slot EXPBUF'd once -> Frame.
+                        DMABUF (Import): slot i carries the client buffer
+                        queued for one picture; nothing is pre-queued and
+                        the backlog decides what goes in (3.3)
+  owns  pending map   : token -> Target (token = strictly increasing
                         CLOCK_MONOTONIC-shaped timestamp copied by the kernel
                         from OUTPUT to CAPTURE; the only association key)
 
@@ -92,7 +97,8 @@ use count, not a flag:
 | 1 (pool only), not `queued` | Free | will be QBUF'd on the next service pass |
 | > 1 | Held | a Surface (or a GPU-copy view) is using its pixels |
 
-`Session::requeue()` QBUFs every Free slot. A Surface that adopts a Frame
+`SlotPool::requeue_capture()` QBUFs every Free slot of an MMAP pool (an
+Import pool queues nothing on its own; §3.3). A Surface that adopts a Frame
 holds it until the surface is reused (`vaBeginPicture` on it), destroyed,
 or the client releases its exported handle. There is no "requeue predicate":
 releasing the reference is the requeue.
@@ -127,16 +133,26 @@ When a CAPTURE completion arrives with a token that has a pending Surface:
 
 `persistent_export` is set by `vaExportSurfaceHandle`, `vaAcquireBufferHandle`
 or a `DRM_PRIME_2` import when the surface has no token yet. It is never set
-by an environment variable. `V4L2_VA_PUBLISH=copy|direct` exists only to
-force a policy in diagnostics and is not read on the hot path.
+by an environment variable. `V4L2_VA_PUBLISH=copy|direct|import` exists only
+to force a policy in diagnostics and is not read on the hot path.
+
+Whether Import is even offered comes from one place,
+`data/iris-codec-capabilities.json` (`publish_import` per codec), enforced
+against `src/va/driver.cc` by `test/iris-codec-matrix-check.sh`; the session
+carries the resulting flag in its config and never guesses from the fourcc.
 
 ### 3.4 Stable buffers
 
-Persistent-export surfaces need memory that the GPU can sample and Iris can
-be copied from. Allocation order: MSM GEM cached-coherent, MSM GEM
-write-combined, system DMA heap. NV12 (or P010 for 10-bit), 64-byte-aligned
-pitch, one object, two layers, linear modifier. The fd, pitch and offsets
-never change for the surface's lifetime.
+Persistent-export surfaces need memory that the GPU can sample, Iris can be
+copied from, and (for Import) the firmware can write into unchanged.
+Allocation order: MSM GEM cached-coherent, MSM GEM write-combined, system
+DMA heap. The layout is the kernel's CAPTURE layout for the same geometry
+(`iris_yuv_buffer_size_nv12`/`_p010`): pitch aligned to 128 (256 for P010),
+luma rows to 32, chroma rows to 16, chroma after luma, total rounded to
+4 KiB. That makes an exported buffer bit-compatible with what the firmware
+writes and also satisfies freedreno's linear import rules. One object, two
+layers, linear modifier; the fd, pitch and offsets never change for the
+surface's lifetime.
 
 ### 3.5 What is gone
 
@@ -197,10 +213,12 @@ src/
   iris/               the only code that touches /dev/videoN
     device.{h,cc}     Device interface (ioctl/poll/mmap virtuals) + real implementation;
                       discovery by `iris_driver` QUERYCAP name, decoder node only
-    session.{h,cc}    Session: the only ioctl sequencer (state machine of §4)
-    slots.{h,cc}      Frame + pool helpers (allocate, export, requeue)
-    publish.{h,cc}    PublishPolicy: Direct | Copy(engine)
-    gpu_copy.{h,cc}   EGL/GLES blit, weak view cache keyed by Frame*
+    session.{h,cc}    Session: the only ioctl sequencer (state machine of §4),
+                      publish dispatch, Import backlog
+    slots.{h,cc}      Frame + SlotPool: allocate, export, requeue, and the
+                      Import queue (queue_capture_import, one window slot)
+    publish.{h,cc}    CopyEngine interface + CPU engine
+    gpu_copy.{h,cc}   EGL/GLES blit on one worker thread, view cache by Frame id
     alloc.{h,cc}      StableBuffer allocation (MSM GEM -> dma-heap)
   codec/              VA parameters -> bytestream the firmware accepts; pure functions
     bitwriter.h
@@ -210,13 +228,14 @@ src/
     av1.cc av1_obu.cc VA tiles -> OBU temporal unit
   util/
     options.{h,cc}    every environment variable, read once at init
-    trace.{h,cc}      stable trace vocabulary (§8)
+    trace.h           stable trace vocabulary (§8); every record ends ` t=<ms>`
     error.h
 test/
   unit/               host-only: slot lifetime, publish policy with FakeDevice, session ordering
-                      with scripted DQBUF/event sequences, codec golden bitstreams, options
-  hardware/           tablet: matrix (framemd5), structure matrix, DRC, soak, browser acceptance,
-                      zero-copy trace audit
+                      with scripted DQBUF/event sequences, codec golden bitstreams
+  iris-*.sh           tablet gates: matrix (framemd5), structure matrix, DRC, soak,
+                      browser acceptance, concurrency soak; test/iris-import-probe.cc
+                      is the client-owned-buffer acceptance program (§9)
   remote/             deploy, provenance, cdp
 ```
 
@@ -235,10 +254,11 @@ Read once in `VA_DRIVER_INIT_FUNC`, stored in `Options`, passed down.
 | `V4L2_VA_TRACE` | off | Trace to stderr. |
 | `V4L2_VA_SYNC_TIMEOUT_MS` | `2000` | Bounded `vaSyncSurface` wait; first frame of a cold session gets `30000`. |
 | `V4L2_VA_COPY` | `gpu` | Copy engine for persistent exports: `gpu` or `cpu`. |
-| `V4L2_VA_PUBLISH` | `auto` | Force `copy` or `direct` for diagnostics. |
+| `V4L2_VA_PUBLISH` | `auto` | Force `copy`, `direct` or `import` for diagnostics. |
 | `V4L2_VA_DUMP` | off | Directory for submitted access units. |
+| `V4L2_VA_EXPERIMENTAL_PROFILES` | off | Also advertise AV1 (qualification runs only). |
 
-Six switches, down from eighteen. `test/iris-env-doc-check.sh` keeps README
+Seven switches, down from eighteen. `test/iris-env-doc-check.sh` keeps README
 and `options.cc` in sync by name, not by sentence.
 
 ## 7. Threading and locking
@@ -247,9 +267,12 @@ and `options.cc` in sync by name, not by sentence.
   held across a wait, a drain or an ioctl that can block.
 - `Session::mutex` serialises submit/service/sync/finish for one context.
   `sync` releases it while polling the fd.
-- No background threads in the driver. `querySurfaceStatus` and
-  `syncSurface` drive the service pass (`pump`); a client that never calls
-  either never needs completions.
+- The driver spawns no timers and no watchdog threads. `querySurfaceStatus`
+  and `syncSurface` drive the service pass (`pump`); a client that never
+  calls either never needs completions. The GPU copy engine owns exactly
+  one worker thread because all EGL state lives on it (arbitrary VA entry
+  points arrive from several client threads); it is joined in the engine's
+  destructor.
 - VA entry points are reentrant per context from different threads only in
   the way libva already allows; `beginPicture..endPicture` state lives in the
   Context, not in thread-local storage.
@@ -257,24 +280,46 @@ and `options.cc` in sync by name, not by sentence.
 ## 8. Trace vocabulary
 
 Hardware checkers (`iris-eos-check.sh`, `iris-ending-check.sh`,
-`iris-context-retirement-check.sh`, `iris-zero-copy-suite.sh`) parse trace
-lines. These records are an API; renaming one requires updating its
-consumer in the same commit:
+`iris-context-retirement-check.sh`, `iris-zero-copy-suite.sh`,
+`iris-concurrency-soak.sh`) parse trace lines. These records are an API;
+renaming one requires updating its consumer in the same commit. Every
+record ends with ` t=<ms>` since the first record of the process.
 
 ```
-session open node=<path> mode=decode-order|display-order caps=<N>
+session open node=<path> mode=decode-order|display-order codec=<fourcc> <w>x<h> au=<n> output=<n>
 submit token=<n> bytes=<n> output=<i>
-capture token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu|drop
-capture error token=<n> index=<i>                (never published)
+capture configure <w>x<h> stride=<n> size=<n> visible=<w>x<h> pool=<n> memory=mmap|import firmware-min=<n>
+capture token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu|import
+capture token=<n> index=<i> flags=<hex> publish=drop                 (released target; not published)
+capture token=<n> index=<i> flags=<hex> publish=error                (firmware error; not published)
+capture token=<n> index=<i> flags=<hex> publish=misplaced slot_token=<n>
+                                                                     (Import: buffer was queued for
+                                                                      another token; both surfaces fail)
+capture error index=<i> flags=<hex>                                  (error marker, no token)
+capture empty index=<i> flags=<hex> last=0|1
 capture last
-drain begin reason=eos|timeout|drc|finish
-drain complete last=1
-sync timeout token=<n> pending=<n> queued=<n> held=<n>
-session reconfigure <w>x<h> -> <w>x<h>
-session failed errno=<n> op=<ioctl>
-va create_context id=<n>
+capture format rejected wanted=<fourcc> granted=<fourcc> planes=<n> <w>x<h>
+drain begin reason=eos|timeout|drc|finish pending=<n>
+drain complete last=1 output_queued=<n>
+drain lost token=<n>
+restart
+sync timeout token=<n> pending=<n> queued=<n> held=<n> action=drain|fail
+session reconfigure <w>x<h> ->
+session reconfigure deferred held=<n>
+session reconfigure -> <w>x<h>
+session failed: <reason>
+session finish submitted=<n> completed=<n> errors=<n> drops=<n> timeouts=<n> drains=<n> misplaced=<n>
+event source-change state=<n>
+output error token=<n> output=<i>
+import token=<n> index=<i> fd=<n> backlog=<n> abandoned=0|1
+import rejected: <why> (client stride=<n> chroma=<n> size=<n>; capture stride=<n> chroma=<n> size=<n>)
+import fence token=<n> fd=<n> waited=<n>ms          (only when the wait exceeds 20 ms)
+import token=<n> failed: no client buffer
+va create_context id=<n> profile=<id> <w>x<h> targets=<n> mode=<name>
 va destroy_context id=<n> pending=<n>
-va export_surface id=<n> persistent=0|1
+va begin_picture ctx=<n> surface=<n>
+va end_picture ctx=<n> surface=<n> bytes=<n> seq_start=0|1
+va export_surface id=<n> persistent=0|1 source=frame|stable fd=<n> pitch=<n>
 ```
 
 ## 9. Phases and gates
@@ -285,7 +330,7 @@ ends with a tag. Gates are commands, not opinions.
 | Phase | Deliverable | Gate | Tag |
 | --- | --- | --- | --- |
 | 0 | Branch layout, baseline, acceptance script, this document, tests unpinned from source text | static checks; driver bytes identical; baseline in `TEST-RESULTS.md` | `pre-rebuild-20260920` |
-| 1 | Kernel: both Iris patches on `sheng-7.2.2`, `qcom-iris.ko` rebuilt and installed with rollback kept | `display_delay*` controls present; acceptance H.264+HEVC on the unchanged driver; boot ID unchanged | (module only; `ROLLBACK.sh` under the lab dir) |
+| 1 | Kernel: both Iris patches on `sheng-7.2.2`, `qcom-iris.ko` rebuilt and installed with rollback kept (rebased onto `sheng-7.2.6` later; `packaging/kernel/`) | `display_delay*` controls present; acceptance H.264+HEVC on the unchanged driver; boot ID unchanged | (module only; `ROLLBACK.sh` under the lab dir) |
 | 2 | `src/iris/` core with the FakeDevice unit suite | `meson test` green on host | (in `phase-3-core-rewired`) |
 | 3 | VA glue on the core for H.264 + HEVC, GPU blit engine, old tree deleted | host units; matrix 48/48 both codecs; structure matrix; DRC; 120 s soak; Chrome both codecs; FFmpeg `publish=direct` | `phase-3-core-rewired` |
 | 5 | VP9 qualified and advertised; AV1 OBU rebuild bit-exact but opt-in (firmware returns no CAPTURE for hidden frames) | VP9: matrix, 100 context recreations, 100 DRC switches, Chrome with alt-ref, all guarded | `phase-5-vp9-qualified` |
@@ -320,6 +365,10 @@ holes). Results and the VP9 open failure: TEST-RESULTS.md.
 7. Every environment variable is read exactly once, in one file.
 8. A firmware error marker (ERROR flag, zero timestamp, or empty payload)
    is never published.
+9. Import keeps exactly one client buffer with the firmware at a time, and
+   every submitted picture gets its buffer even after its surface was
+   released; a completion whose token does not match its buffer's token
+   fails both surfaces and is counted as `misplaced`.
 
 ## 11. How work is divided
 

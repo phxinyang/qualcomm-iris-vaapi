@@ -278,7 +278,7 @@ validate_job() {
         echo "FAIL $validate_name trace does not prove the stateful driver ran" >&2
         return 1
     fi
-    if grep -Eqi 'publish=drop|publish=error|capture error index=|sync timeout token=|session failed|undefined symbol' "$validate_trace"; then
+    if grep -Eqi 'publish=drop|publish=error|publish=misplaced|capture error index=|sync timeout token=|session failed|undefined symbol' "$validate_trace"; then
         echo "FAIL $validate_name trace contains a stateful decode error" >&2
         return 1
     fi

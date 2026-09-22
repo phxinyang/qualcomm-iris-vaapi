@@ -4,7 +4,8 @@
   "policy": {
     "production_va_requires_exact_evidence": true,
     "unknown_codec_action": "software-fallback",
-    "evidence": "TEST-RESULTS.md (Phase 3, 5, 7 sections)"
+    "import_requires_exact_evidence": true,
+    "evidence": "TEST-RESULTS.md (Phase 3, 5, 7 sections; Import gate 2026-09-22)"
   },
   "codecs": [
     {
@@ -27,6 +28,7 @@
         "interlaced",
         "non-8-bit or non-4:2:0"
       ],
+      "publish_import": "qualified",
       "experimental": []
     },
     {
@@ -49,6 +51,7 @@
         "interlaced",
         "12-bit"
       ],
+      "publish_import": "qualified",
       "experimental": []
     },
     {
@@ -71,6 +74,8 @@
         "12-bit",
         "RGB"
       ],
+      "publish_import": "fallback",
+      "import_note": "an alt-ref access unit decodes as two pictures: a one-buffer window stalls ~500 ms per alt-ref, a two-buffer window lets the firmware choose the buffer (153/609 misplaced). Copy until the translator submits one AU per picture",
       "experimental": []
     },
     {
@@ -89,6 +94,7 @@
         "film grain",
         "large-scale tile"
       ],
+      "publish_import": "fallback",
       "experimental": [
         "V4L2_VA_EXPERIMENTAL_PROFILES=1 advertises AV1Profile0; the OBU rebuild is bit-exact under test/av1-obu-roundtrip.sh but VA clients time out on hidden frames"
       ]

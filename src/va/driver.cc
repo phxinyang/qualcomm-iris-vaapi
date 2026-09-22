@@ -104,6 +104,15 @@ Capabilities probe_capabilities(const iris::Options& options)
         caps.profiles.insert(VAProfileH264Main);
         caps.profiles.insert(VAProfileH264High);
     }
+    // import-qualified-begin
+    if (caps.output_formats.count(V4L2_PIX_FMT_H264) && caps.nv12)
+        caps.import_formats.insert(V4L2_PIX_FMT_H264);
+    if (caps.output_formats.count(V4L2_PIX_FMT_HEVC) && caps.nv12)
+        caps.import_formats.insert(V4L2_PIX_FMT_HEVC);
+    // import-qualified-end
+    // VP9 is deliberately absent: an alt-ref access unit decodes as two
+    // pictures and a one-buffer Import window stalls the firmware, while two
+    // buffers let it choose the buffer (TEST-RESULTS.md, 2026-09-22).
     if (caps.output_formats.count(V4L2_PIX_FMT_HEVC) && caps.nv12) {
         caps.profiles.insert(VAProfileHEVCMain);
         if (caps.p010)

@@ -89,6 +89,10 @@ struct Context {
 struct Capabilities {
     std::string node;
     std::set<uint32_t> output_formats; // V4L2 compressed fourccs
+    // Codecs whose Import policy is qualified on hardware
+    // (data/iris-codec-capabilities.json, "publish_import"); the session
+    // falls back to Copy for anything else.
+    std::set<uint32_t> import_formats;
     bool nv12 = false, p010 = false;
     unsigned min_width = 96, min_height = 96, max_width = 8192, max_height = 8192;
     std::set<VAProfile> profiles;

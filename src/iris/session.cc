@@ -30,6 +30,11 @@ constexpr int kSourceChangeWaitMs = 5000;
 // Bound on the client buffer's implicit fence before it is handed to the
 // firmware: the compositor may still be sampling the previous picture.
 constexpr int kImportFenceMs = 2000;
+// One client buffer with the firmware at a time. Measured: with several it
+// picks its own buffer for each picture (246/360 wrong in the cleanest
+// probe run; TEST-RESULTS.md 2026-09-22), so only an empty choice is a
+// determined one.
+constexpr unsigned kImportWindow = 1;
 
 // Compressed AU capacity when the caller has no better estimate: Chromium
 // and GStreamer both size the OUTPUT plane from the coded area with a floor.
@@ -109,24 +114,15 @@ bool Session::expired(std::chrono::steady_clock::time_point deadline) const
 
 bool Session::supports_import() const
 {
-    if (mode_ != SessionMode::DecodeOrder || import_rejected_)
-        return false;
-    // VP9 stays on Copy until the translator submits one AU per picture: a
-    // VP9 access unit can carry an alt-ref and its visible frame, the
-    // firmware decodes both, and a one-buffer window stalls it ~500 ms per
-    // alt-ref while a two-buffer window reintroduces misplacement
-    // (TEST-RESULTS.md, 2026-09-22). H.264/HEVC/Main10 are exact.
-    if (config_.codec_pixelformat == V4L2_PIX_FMT_VP9)
+    // The codec qualification comes from the capability table, never from a
+    // local guess; see data/iris-codec-capabilities.json ("publish_import")
+    // and the note there for why VP9 is a fallback.
+    if (!config_.import_allowed || mode_ != SessionMode::DecodeOrder || import_rejected_)
         return false;
     return pool_.capture_count() == 0 || pool_.capture_memory() == CaptureMemory::Import;
 }
 
-unsigned Session::import_window() const
-{
-    // Measured: two buffers in flight reintroduce the firmware's own buffer
-    // choice (153/609 misplaced in Chrome VP9), so the window stays one.
-    return 1;
-}
+
 
 bool Session::import_compatible(const Layout& client, const Layout& capture)
 {
@@ -218,7 +214,9 @@ void Session::configure_capture()
     if (!pending_.empty() && pending_.begin()->second->publish == Publish::Import) {
         const Target& first = *pending_.begin()->second;
         const char* why = nullptr;
-        if (mode_ != SessionMode::DecodeOrder)
+        if (!config_.import_allowed)
+            why = "codec not qualified in the capability table";
+        else if (mode_ != SessionMode::DecodeOrder)
             why = "display-order output";
         else if (!first.destination)
             why = "no client buffer";
@@ -275,7 +273,7 @@ void Session::enter_streaming()
 void Session::queue_import_next()
 {
     if (pool_.capture_memory() != CaptureMemory::Import || import_backlog_.empty()
-        || pool_.capture_queued() >= import_window())
+        || pool_.capture_queued() >= kImportWindow)
         return;
     const ImportEntry entry = import_backlog_.front();
     if (entry.fd < 0) {

@@ -92,6 +92,7 @@ VAStatus createContext(VADriverContextP ctx, VAConfigID config, int width, int h
         sc.width = c->width;
         sc.height = c->height;
         sc.surface_count = static_cast<unsigned>(std::max(count, 0));
+        sc.import_allowed = d.capabilities.import_formats.count(sc.codec_pixelformat) != 0;
         // Opening the node and OUTPUT STREAMON happen here, outside the
         // table lock. SOURCE_CHANGE and CAPTURE follow the first AU.
         c->session = std::make_shared<iris::Session>(iris::open_device(d.options.video_path), sc, d.options,

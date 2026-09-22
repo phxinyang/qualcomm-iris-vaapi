@@ -70,6 +70,9 @@ SessionConfig config(unsigned surfaces = 16)
     c.width = 1920;
     c.height = 1080;
     c.surface_count = surfaces;
+    // The VA layer sets this from the capability table; the scripted cases
+    // exercise the session's own rules.
+    c.import_allowed = true;
     return c;
 }
 
@@ -580,6 +583,22 @@ void test_import_rejected_on_display_order_kernel()
     CHECK(ta.completed && !ta.error && ta.publish == Publish::Copy && ta.frame == nullptr);
 }
 
+void test_import_rejected_for_an_unqualified_codec()
+{
+    Harness h;
+    h.session->set_import_allowed_for_test(false);
+    const Layout layout = capture_layout_of({});
+    ClientBuffer a(layout);
+    Target ta;
+    ta.publish = Publish::Import;
+    ta.destination = a.stable.get();
+    CHECK(!h.session->supports_import());
+    h.submit(ta);
+    CHECK(h.session->capture_memory() == CaptureMemory::Mmap);
+    h.session->wait(ta);
+    CHECK(ta.completed && ta.publish == Publish::Copy);
+}
+
 void test_import_rejected_on_layout_mismatch()
 {
     Harness h;
@@ -672,6 +691,7 @@ int main()
         { "import queues the client buffer per picture", test_import_queues_client_buffer_per_picture },
         { "import misplaced completion is an error", test_import_misplaced_completion_is_an_error },
         { "import rejected on a display-order kernel", test_import_rejected_on_display_order_kernel },
+        { "import rejected for an unqualified codec", test_import_rejected_for_an_unqualified_codec },
         { "import rejected on a layout mismatch", test_import_rejected_on_layout_mismatch },
         { "import drain lends a scratch buffer for LAST", test_import_drain_lends_scratch_for_last },
         { "import resolution change rebuilds the import pool", test_import_resolution_change_rebuilds_import_pool },

@@ -73,6 +73,10 @@ struct SessionConfig {
     unsigned surface_count = 0; // the client's pool size, for CAPTURE sizing
     unsigned output_slots = 4;
     unsigned au_capacity = 0; // bytes per OUTPUT slot; 0 = derive from geometry
+    // Whether the Import publish policy is qualified for this codec
+    // (data/iris-codec-capabilities.json); the VA layer sets it from the
+    // driver's capability probe, the session never guesses from the fourcc.
+    bool import_allowed = false;
 };
 
 struct SessionStats {
@@ -94,7 +98,12 @@ public:
     // Whether an Import target can still be honoured: decode-order output,
     // and the CAPTURE pool (if built) is in Import memory.
     bool supports_import() const;
-    unsigned import_window() const;
+    // Scripted tests only: pretend the codec is not in the capability table.
+    void set_import_allowed_for_test(bool allowed)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        config_.import_allowed = allowed;
+    }
     CaptureMemory capture_memory() const { return pool_.capture_memory(); }
     const SessionStats& stats() const { return stats_; }
     const Layout& capture_layout() const { return pool_.capture_layout(); }
