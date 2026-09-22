@@ -1281,3 +1281,18 @@ symbols), boot ID `5a337970…` unchanged through every run.
 | Chrome 152, auto policy | H.264 902 import, HEVC 905 import, Main10 898 import, VP9 908 copy-gpu; 0 misplaced, 0 decode errors, all platform decoder with the GPU process holding the Iris node |
 
 Chrome's own dropped-frame counts in those 30 s windows were 2, 2, 1 and 0.
+
+### Merge gate continued: soak, package, installed acceptance (2026-09-22)
+
+- Bounded soak on the merged trunk: `dual-h264`, 120 s per context, 2880
+  frames each, `teardown_timeouts=0`, `stateful_drain_complete=1`, hottest
+  zone 43 °C, boot ID unchanged.
+- RPM rebuilt from the merged tree (`source_commit=18be55a`, tracked-source
+  hash recorded in the install manifest), reinstalled; `rpm -V` clean. The
+  installed ELF hash differs from the build tree by design: the spec
+  post-processes the staged runtime module (see the spec header).
+- Installed-package acceptance, no `--driver` override, auto policy:
+  H.264 902 import, HEVC 906 import, Main10 898 import, VP9 915 copy-gpu;
+  0 misplaced, 0 decode errors, `VaapiVideoDecoder`, GPU process holding
+  the node, boot unchanged. The Import path is now the shipped default
+  where the evidence allows it.
