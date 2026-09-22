@@ -1,5 +1,24 @@
-# V4L2 libVA Backend
-This libVA backend is designed to work with the [Video for Linux Memory-To-Memory API](https://www.kernel.org/doc/html/latest/userspace-api/media/v4l/dev-mem2mem.html) that is used by a number of video codecs drivers, in particular SoCs found on SBCs.
+# Qualcomm Iris V4L2/libVA backend
+
+A libva driver for the stateful V4L2 decoder that Qualcomm's Iris VPU exposes
+on SM8550 and related SoCs. It exists for the clients that have no other
+hardware path: Google Chrome, Electron and Firefox on ARM64 Linux, where
+VA-API is the only entry point to the video decoder. FFmpeg, GStreamer and
+mpv use the same driver but have native V4L2 paths of their own.
+
+This is a fork of [mxsrc/libva-v4l2](https://github.com/mxsrc/libva-v4l2)
+(MIT / LGPL-2.1, see [License and credits](#license-and-credits)). Everything
+below the fork point was rebuilt around one ownership model; the stateful
+Iris path, the browser acceptance gates and the Fedora/Arch packaging are
+this fork's work. Development targets a Snapdragon SM8550 tablet (Xiaomi Pad
+6S Pro, device codename `sheng`) on Fedora 44 with a self-built kernel.
+
+Qualification status lives in [TEST-RESULTS.md](TEST-RESULTS.md), with the
+boot ID, kernel, module hash and driver hash of every recorded run. In short:
+H.264, HEVC Main, HEVC Main10 and VP9 Profile 0/2 decode in hardware with
+exact bitstream-level verification; Chrome reaches the hardware decoder for
+all of them; AV1 is opt-in because the firmware returns no CAPTURE buffer for
+hidden frames.
 
 ## Building
 The project is built using meson:
@@ -34,9 +53,42 @@ The project is packaged for Fedora and Arch Linux (`packaging/fedora/libva-v4l2-
 
 ## How it decodes
 
-The driver owns one model with two publish policies chosen per surface automatically. It owns the CAPTURE pool. A surface either takes the completed CAPTURE slot itself (Direct path for FFmpeg, GStreamer, mpv, offering true zero-copy), or, if the client exported it before its first decode (like Chrome), the frame is blitted on the GPU (EGL, Adreno) into a stable buffer whose file descriptor never changes (Copy path). CPU memcpy is the fallback engine.
+The driver owns one model with three publish policies chosen per surface
+automatically. It owns the CAPTURE pool.
+
+- A surface that is exported or mapped only after its decode (FFmpeg,
+  GStreamer, mpv) takes the completed CAPTURE slot itself: **Direct**, true
+  zero-copy.
+- A surface the client exported *before* its first decode (Chrome
+  pre-exports its whole surface pool) is either decoded into directly
+  (**Import**) or filled by a GPU blit (**Copy**). Import queues the client's
+  buffer into the CAPTURE queue for exactly that picture, which needs
+  decode-order output and gives Chrome a path with no copy at all; it is
+  selected per codec from the measured evidence (H.264, HEVC, Main10) and
+  falls back to Copy for VP9 and on stock kernels. Copy blits on the Adreno
+  GPU (EGL) into a stable buffer whose file descriptor never changes; CPU
+  memcpy is the fallback engine.
+
+Import is only exact when the session keeps one client buffer in flight and
+never skips a submitted picture; both are enforced in the session, and a
+completion that lands in a neighbour's buffer fails both surfaces instead of
+publishing. The measurements behind the policy are in TEST-RESULTS.md.
 
 The driver wants two Iris kernel patches from strongtz/libva-v4l2 applied to the self-built kernel module: decode-order output (via the display-delay control) and 64-buffer CAPTURE max. `packaging/kernel/` carries them rebased onto the `sheng-7.2.6` tree, with build notes for rebuilding only the `qcom-iris` module. The driver probes for the control and falls back to display-order behaviour (bounded sync wait plus one STOP/LAST/START drain on timeout) on a stock kernel.
+
+## License and credits
+
+The driver is distributed under the same terms as upstream: MIT, with the
+LGPL-2.1-covered parts, see `COPYING`, `COPYING.MIT` and `COPYING.LGPL`.
+
+- The stateful Iris implementation in `src/` is this fork's work; the VA and
+  V4L2 scaffolding descends from [mxsrc/libva-v4l2](https://github.com/mxsrc/libva-v4l2).
+- `include/linux/` vendors the kernel UAPI headers, each carrying its own
+  SPDX tag (`GPL-2.0+ WITH Linux-syscall-note OR BSD-3-Clause`).
+- `packaging/kernel/` carries the two Iris kernel patches from
+  [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2) (Radxa)
+  rebased onto the current kernel tree. That patch touches GPL-2.0 kernel
+  code and carries that license, not the driver's.
 
 ## Environment variables
 

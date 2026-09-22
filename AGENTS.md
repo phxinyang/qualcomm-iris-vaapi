@@ -12,8 +12,12 @@ safe fallback, not merely successful playback.
   VP9 is qualified. AV1 is opt-in because the firmware returns no CAPTURE buffer
   for hidden frames. Keep software/native fallback explicit in docs and tests.
 - The default path is Wayland + VA-API.
-- The Direct path (zero-copy) is automatic where applicable; there is no
-  environment variable switch for zero-copy.
+- Zero-copy is automatic where the evidence allows it: the Direct path for
+  post-decode exporters, the Import path for pre-exporters on a decode-order
+  kernel. No environment variable turns it on; `V4L2_VA_PUBLISH` is a
+  diagnostic override only. Import keeps one client buffer in flight and
+  never skips a submitted picture; those two rules are load-bearing
+  (TEST-RESULTS.md, "Client-owned CAPTURE buffers").
 - A browser counts as hardware-decoder compatible only when a real media surface
   reports the selected decoder and frame/drop evidence. GPU-process startup or
   libva mapping alone is insufficient.

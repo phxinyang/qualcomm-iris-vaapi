@@ -1,10 +1,15 @@
 # Iris kernel module patch
 
 `0001-media-iris-decode-order-output-and-64-capture-buffers.patch` is the
-two strongtz/libva-v4l2 Iris patches (decode-order output through
+two [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2) (Radxa)
+Iris patches (decode-order output through
 `V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY{,_ENABLE}`, CAPTURE pool up to 64)
 rebased onto `ianchb/sm8550-mainline` branch `sheng-7.2.6`
-(commit `42f3b40c702a`). The driver works without it (display-order
+(commit `42f3b40c702a`).
+
+The patch modifies GPL-2.0 kernel code (`drivers/media/platform/qcom/iris/`)
+and is therefore GPL-2.0, unlike the driver itself; the upstream author is
+credited in the patch subject and in the driver's README. The driver works without it (display-order
 fallback) but Chrome zero-copy and the VP9 dynamic-resolution qualification
 need it.
 
