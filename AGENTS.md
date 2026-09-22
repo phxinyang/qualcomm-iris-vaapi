@@ -1,33 +1,34 @@
-# Project execution contract
+# Agent contract
 
-This repository targets Qualcomm Iris V4L2/libVA decoding on ARM64 Fedora
-devices. The original product goal is verifiable browser hardware decode with
-safe fallback, not merely successful playback.
+This file is the working contract for automated coding agents in this
+repository. It is not user documentation: README.md, CONTRIBUTING.md and
+docs/architecture.md are. Read docs/architecture.md before changing anything
+under `src/`.
 
-## Non-obvious constraints
+## Hard rules
 
-- Resolve Iris decoder nodes by the `iris_driver` name at runtime. Never encode
-  `/dev/video0`, `/dev/video17`, or any other boot-specific number.
-- Production VA exposure is limited to the profiles proven by the target matrix.
-  VP9 is qualified. AV1 is opt-in because the firmware returns no CAPTURE buffer
-  for hidden frames. Keep software/native fallback explicit in docs and tests.
-- The default path is Wayland + VA-API.
-- Zero-copy is automatic where the evidence allows it: the Direct path for
-  post-decode exporters, the Import path for pre-exporters on a decode-order
-  kernel. No environment variable turns it on; `V4L2_VA_PUBLISH` is a
-  diagnostic override only. Import keeps one client buffer in flight and
-  never skips a submitted picture; those two rules are load-bearing
-  (TEST-RESULTS.md, "Client-owned CAPTURE buffers").
-- A browser counts as hardware-decoder compatible only when a real media surface
-  reports the selected decoder and frame/drop evidence. GPU-process startup or
-  libva mapping alone is insufficient.
-- Dynamic-resolution experiments can reset firmware. Use a bounded remote command,
-  record boot ID and temperature, and stop after a reset; do not immediately chain
-  another experiment.
+- Find the decoder node by its `iris_driver` QUERYCAP name at runtime. No
+  `/dev/videoN` literal anywhere in code, launcher or packaging.
+- One source of truth per fact, updated in the same commit as the change:
+  codec capability and publish-policy qualification live in
+  `data/iris-codec-capabilities.json`; the environment surface lives in
+  `README.md`; the trace vocabulary lives in `docs/architecture.md` §8.
+  Checks enforce the first two; nothing enforces the third, which is exactly
+  why it drifts.
+- Evidence before capability. A codec, profile or publish policy is
+  advertised only after its hardware gate passed and TEST-RESULTS.md records
+  the run (docs/architecture.md §9). The Import policy additionally keeps one
+  client buffer in flight and never skips a submitted picture; both rules are
+  load-bearing, and a completion that lands in a neighbour's buffer must fail
+  both surfaces, never publish.
+- VA profiles are exposed only for codecs the capability table marks
+  `production: supported`.
+- Do not edit the vendored UAPI headers in `include/linux/`.
+- A browser decode counts as hardware only when a media surface reports the
+  selected decoder with frame and drop evidence. A mapped node, a running GPU
+  process or a started pipeline proves nothing.
 
-## Verification contract
-
-Before claiming a change is complete, run the relevant local gates:
+## Verification before a completion claim
 
 ```sh
 sh test/run-static-checks.sh
@@ -35,15 +36,17 @@ meson test -C build-local --print-errorlogs
 git diff --check
 ```
 
-For a target claim, also record the exact source commit, driver hash, resolved
-node, boot ID, decoder name, decoded/dropped frames, and whether the runtime
-uses the system-installed driver or a build-tree override. Do not claim a
-system install from a `DESTDIR` staging run.
+For a claim about the target, record the source commit, driver hash, resolved
+node, boot ID, decoder name, frame and drop counts, and whether the runtime
+used the installed package or a build-tree override. A `DESTDIR` staging run
+is not an installation.
 
-## Worktree and release safety
+## Boundaries
 
-Preserve user-owned untracked artifacts. Do not run `git clean`, destructive
-reset, or push unless the user explicitly asks for it. Keep one-off traces and
-large generated media outside the repository when possible. A release claim
-requires source, installed runtime, package contents, and rollback state to be
-checked separately.
+- Preserve untracked user files. Never `git clean`, reset destructively, or
+  push unless the user asked for that action in this turn.
+- Keep traces, media and build trees out of the repository; large lab
+  artifacts belong on the target, not in git.
+- Experiments that can reset firmware follow the guard procedure in
+  docs/build-and-deploy.md. A reset or a thermal breach is a failed
+  experiment, not evidence of codec support.
