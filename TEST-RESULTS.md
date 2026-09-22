@@ -640,7 +640,9 @@ from `file://` in kiosk mode on the tablet's own panel, with hardware VA-API
 decode measured against Chrome's software decoder.
 
 `test/iris-power-compare.sh` produced the collection and
-`test/remote/power-analyze.py` aggregated it. Five interleaved ABBA blocks, ten
+`test/remote/power-analyze.py` aggregated it (both were removed from the tree
+in the Phase 6 trim, commit `41ef499`; the numbers below stand as recorded
+and cannot be reproduced from the current tree). Five interleaved ABBA blocks, ten
 runs; each run is a 300-second measurement window after 20 seconds of warmup,
 bracketed by 60-second idle baselines with a 30-second gap between runs. The
 arms differ by one switch: the software arm adds
