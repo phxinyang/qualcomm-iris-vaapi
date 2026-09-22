@@ -18,6 +18,16 @@ Rebuild only the module, on the target, against the running kernel:
 ```sh
 git clone --depth 1 -b sheng-7.2.6 https://github.com/ianchb/sm8550-mainline linux
 cd linux && git am ../0001-*.patch
+```
+
+`git am` applies cleanly on `sheng-7.2.6`. On any other Iris tree expect
+fuzz, and check one hunk by hand before building: the two new capability
+IDs `DISPLAY_DELAY_ENABLE` and `DISPLAY_DELAY` belong at the end of
+`enum platform_inst_fw_cap_type` in `iris_platform_common.h`. A fuzzy apply
+has put them into the neighbouring `enum platform_inst_fw_cap_flags`
+instead (seen on `sheng-7.2.2`); move them into the type enum.
+
+```sh
 cp /boot/config-$(uname -r) .config
 export LOCALVERSION=""                      # keep the "+" off the release string
 make ARCH=arm64 LLVM=1 olddefconfig modules_prepare
