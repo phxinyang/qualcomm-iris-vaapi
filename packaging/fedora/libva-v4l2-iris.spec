@@ -112,7 +112,7 @@ sh scripts/refresh-install-manifest.sh \
 
 %files
 %license COPYING COPYING.LGPL COPYING.MIT
-%doc README.md AUTHORS CREDITS
+%doc README.md README.zh-CN.md AUTHORS CREDITS
 %{_libdir}/dri/v4l2_drv_video.so
 %{_bindir}/iris-vaapi-browser
 %{_datadir}/applications/google-chrome-iris-v4l2.desktop

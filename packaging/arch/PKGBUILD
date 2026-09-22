@@ -75,4 +75,5 @@ package() {
     install -Dm644 COPYING.LGPL "$pkgdir/usr/share/licenses/$pkgname/COPYING.LGPL"
     install -Dm644 COPYING.MIT "$pkgdir/usr/share/licenses/$pkgname/COPYING.MIT"
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 README.zh-CN.md "$pkgdir/usr/share/doc/$pkgname/README.zh-CN.md"
 }

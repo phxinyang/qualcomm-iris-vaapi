@@ -1,98 +1,199 @@
 # Qualcomm Iris V4L2/libVA backend
 
+**English** | [中文](README.zh-CN.md)
+
 A libva driver for the stateful V4L2 decoder that Qualcomm's Iris VPU exposes
-on SM8550 and related SoCs. It exists for the clients that have no other
-hardware path: Google Chrome, Electron and Firefox on ARM64 Linux, where
-VA-API is the only entry point to the video decoder. FFmpeg, GStreamer and
-mpv use the same driver but have native V4L2 paths of their own.
+on SM8550 and related SoCs. It gives Google Chrome, Electron and Firefox on
+ARM64 Linux a hardware video decoder, and on the qualified target the frames
+go from the firmware into Chrome's own buffers with no copy in between.
 
-This is a fork of [mxsrc/libva-v4l2](https://github.com/mxsrc/libva-v4l2)
-(MIT / LGPL-2.1, see [License and credits](#license-and-credits)). Everything
-below the fork point was rebuilt around one ownership model; the stateful
-Iris path, the browser acceptance gates and the Fedora/Arch packaging are
-this fork's work. Development targets a Snapdragon SM8550 tablet (Xiaomi Pad
-6S Pro, device codename `sheng`) on Fedora 44 with a self-built kernel.
+## Why this exists
 
-Qualification status lives in [TEST-RESULTS.md](TEST-RESULTS.md), with the
-boot ID, kernel, module hash and driver hash of every recorded run. In short:
-H.264, HEVC Main, HEVC Main10 and VP9 Profile 0/2 decode in hardware with
-exact bitstream-level verification; Chrome reaches the hardware decoder for
-all of them; AV1 is opt-in because the firmware returns no CAPTURE buffer for
-hidden frames.
+Stock Google Chrome on arm64 Linux is built with `use_vaapi=true` and
+`use_v4l2_codec=false`: the only hardware decode entry point compiled into the
+binary is libva. The same is true of every prebuilt Electron application and
+of Firefox's FFmpeg hwaccel. Without a VA-API driver those clients decode on
+the CPU, and a 1080p HEVC stream on a tablet is a fan-and-battery problem.
 
-## Building
-The project is built using meson:
-```
-meson setup build
-meson compile -Cbuild
-```
+Iris is a *stateful* V4L2 decoder: the firmware parses the bitstream itself
+and the interface is an OUTPUT queue, a CAPTURE queue and a few controls.
+Nobody had written the libva backend that turns VA-API decode calls into
+Iris sessions. This repository is that backend. Chrome is the acceptance
+client; FFmpeg, GStreamer, mpv and Firefox use the same driver and are
+welcome, but they also have native V4L2 paths of their own.
 
-For the clean target rebuild, symbol gate, and durable tablet lab workflow,
-see [`docs/build-and-deploy.md`](docs/build-and-deploy.md).
+## What works today
 
-## Usage
+Every row is backed by a recorded hardware run in
+[TEST-RESULTS.md](TEST-RESULTS.md) (boot ID, kernel, module hash and driver
+hash for each). Qualified on a Snapdragon SM8550 tablet, Fedora 44, Google
+Chrome 152.
 
-Applications using the backend can be launched by adding the build directory to the libVA driver path, and, optionally, setting the driver name to load:
+| Codec | Chrome | Path in Chrome | Bit-exact check |
+| --- | --- | --- | --- |
+| H.264 (CB/Main/High) | hardware decoder | Import, zero-copy | frame MD5 equal to the native V4L2 decoder; Fluster JVT-AVC_V1 40/135, equal to the firmware's own pass set |
+| HEVC Main | hardware decoder | Import, zero-copy | frame MD5 equal; Fluster JCT-VC-HEVC_V1 111/147 (firmware 112) |
+| HEVC Main10 (P010) | hardware decoder | Import, zero-copy | frame MD5 equal at 10-bit |
+| VP9 Profile 0 / 2 | hardware decoder | GPU blit (see limits) | frame MD5 equal, 8- and 10-bit |
+| AV1 | not advertised | opt-in only | OBU rebuild bit-exact, but VA clients time out on hidden frames (see limits) |
+
+"Hardware decoder" means Chrome's media surface reports `VaapiVideoDecoder`
+with the platform flag set and a decoded-frame count over a 30 s window with
+no dropped frames; a mapped node or a running GPU process proves nothing.
+
+## Requirements
+
+- An SoC with the `qcom-iris` decoder (HFI gen2; SM8550 is the qualified
+  one). aarch64.
+- libva ≥ 1.1, libdrm ≥ 2.4.52; EGL/GLES/GBM for the GPU copy engine;
+  `v4l-utils` at runtime (the launcher finds the decoder node by driver name
+  because the number moves between boots).
+- Any Linux distribution that can load a libva module. Fedora 44 is the
+  qualified one; Fedora and Arch packaging is provided.
+- Optionally, two Iris kernel patches (decode-order output and a 64-buffer
+  CAPTURE pool) from [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2),
+  carried rebased in [`packaging/kernel/`](packaging/kernel/README.md) with a
+  module-only build recipe. On a stock kernel the driver detects their
+  absence and still works; Chrome then gets a GPU copy per frame instead of
+  the zero-copy path.
+
+## Install and use
+
+From the packages, on Fedora:
+
 ```sh
-LIBVA_DRIVERS_PATH=<project dir>/build/src LIBVA_DRIVER_NAME=v4l2 vainfo
+git archive --format=tar.gz --prefix=libva-v4l2-iris-0.1.0/ \
+    -o ~/rpmbuild/SOURCES/libva-v4l2-iris-0.1.0.tar.gz HEAD
+rpmbuild -ba packaging/fedora/libva-v4l2-iris.spec \
+    --define "source_commit $(git rev-parse HEAD)" \
+    --define "tracked_sha256 $(git ls-files -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
+sudo dnf install ~/rpmbuild/RPMS/aarch64/libva-v4l2-iris-*.rpm
 ```
 
-Alternatively, a packaging build configured with the system prefix installs the driver:
+Arch uses `packaging/arch/PKGBUILD`. Both install the driver into libva's
+driver directory, the `iris-vaapi-browser` launcher and a
+"Google Chrome (Iris VA-API)" desktop entry, plus an install manifest with
+the source commit and artifact hash. Then launch Chrome from that desktop
+entry, or from a shell:
+
 ```sh
-meson setup build --prefix=/usr
-meson compile -C build
-sudo meson install -C build
+iris-vaapi-browser --browser=chrome
 ```
 
-For direct deployment, prefer the helper below. It reads libva's canonical `driverdir` from `libva.pc`:
+The launcher resolves the Iris node on every start, sets `LIBVA_DRIVER_NAME`
+for that process only and passes no Chrome feature overrides; Chrome's
+packaged defaults are what this project qualifies. Check the result in
+`chrome://media-internals` while a video plays: the decoder must read
+`VaapiVideoDecoder` with `kIsPlatformVideoDecoder: true`.
+
+From a checkout instead of a package:
+
 ```sh
-sudo ./scripts/install-system.sh build
+meson setup build && meson compile -C build
+sudo ./scripts/install-system.sh build       # libva driverdir + launcher under /usr/local
+LIBVA_DRIVERS_PATH=$PWD/build/src LIBVA_DRIVER_NAME=v4l2 vainfo   # or just try it
 ```
 
-The project is packaged for Fedora and Arch Linux (`packaging/fedora/libva-v4l2-iris.spec`, `packaging/arch/PKGBUILD`). Both install through the same helper.
+`scripts/uninstall-system.sh` reverses the helper install using the recorded
+manifest. Details of the lab workflow are in
+[`docs/build-and-deploy.md`](docs/build-and-deploy.md).
 
 ## How it decodes
 
-The driver owns one model with three publish policies chosen per surface
-automatically. It owns the CAPTURE pool.
+One ownership model with three publish policies, chosen per surface from the
+client's behaviour. The driver owns the CAPTURE pool.
 
-- A surface that is exported or mapped only after its decode (FFmpeg,
-  GStreamer, mpv) takes the completed CAPTURE slot itself: **Direct**, true
+- **Direct**: a surface that is exported or mapped only after its decode
+  (FFmpeg, GStreamer, mpv) takes the completed CAPTURE slot itself. True
   zero-copy.
-- A surface the client exported *before* its first decode (Chrome
-  pre-exports its whole surface pool) is either decoded into directly
-  (**Import**) or filled by a GPU blit (**Copy**). Import queues the client's
-  buffer into the CAPTURE queue for exactly that picture, which needs
-  decode-order output and gives Chrome a path with no copy at all; it is
-  selected per codec from the measured evidence (H.264, HEVC, Main10) and
-  falls back to Copy for VP9 and on stock kernels. Copy blits on the Adreno
-  GPU (EGL) into a stable buffer whose file descriptor never changes; CPU
-  memcpy is the fallback engine.
+- **Import**: a surface the client exported *before* its first decode (Chrome
+  pre-exports its whole pool) has its buffer queued into CAPTURE for exactly
+  that picture, so the firmware decodes straight into it. Needs decode-order
+  output from the kernel patch; selected per codec from the measured
+  evidence (H.264, HEVC, Main10).
+- **Copy**: the same pre-exported surface is filled by a GPU blit (EGL on
+  Adreno) from the driver's slot into a stable buffer whose file descriptor
+  never changes. VP9 and stock kernels take this path.
 
-Import is only exact when the session keeps one client buffer in flight and
-never skips a submitted picture; both are enforced in the session, and a
+Import holds because of two measured rules: exactly one client buffer is
+with the firmware at a time, and no submitted picture is ever skipped. A
 completion that lands in a neighbour's buffer fails both surfaces instead of
-publishing. The measurements behind the policy are in TEST-RESULTS.md.
+publishing. The contract, the state machine and the trace vocabulary are in
+[`docs/architecture.md`](docs/architecture.md); the measurements are in
+[TEST-RESULTS.md](TEST-RESULTS.md).
 
-The driver wants two Iris kernel patches from strongtz/libva-v4l2 applied to the self-built kernel module: decode-order output (via the display-delay control) and 64-buffer CAPTURE max. `packaging/kernel/` carries them rebased onto the `sheng-7.2.6` tree, with build notes for rebuilding only the `qcom-iris` module. The driver probes for the control and falls back to display-order behaviour (bounded sync wait plus one STOP/LAST/START drain on timeout) on a stock kernel.
+## Known limits
+
+- **VP9 stays on the GPU copy path.** A VP9 alt-ref access unit decodes as
+  two pictures. With one buffer in flight the session stalls about 500 ms
+  per alt-ref; with two, the firmware chooses the buffer itself and about a
+  quarter of the completions land in the wrong one. Copy until the
+  translator submits one access unit per picture.
+- **AV1 is opt-in.** The firmware returns no CAPTURE buffer for hidden
+  (`show_frame=0`) pictures and VA has no `show_existing_frame` call, so VA
+  clients time out on streams with alt-ref frames. The OBU rebuild is
+  bit-exact under `test/av1-obu-roundtrip.sh`;
+  `V4L2_VA_EXPERIMENTAL_PROFILES=1` advertises the profile for qualification
+  only.
+- **Stock kernel means Copy for Chrome.** Without the decode-order control
+  the session runs in display-order mode: bounded sync waits plus one
+  STOP/LAST/START drain on timeout, and Import is refused.
+- **Chrome 153 HEVC seek regression, upstream.** Chromium 153 turned on
+  `ExtendedVideoBitstreamValidation`, and its shared `H265Decoder` treats
+  the first SPS after every seek as a configuration change, so the
+  compositor keeps showing pre-seek frames. Reported and bisected by
+  [CFM880/iris-vaapi](https://github.com/CFM880/iris-vaapi) on SM8150, filed
+  as [Chromium issue 563075803](https://issues.chromium.org/issues/563075803).
+  Not reproduced here because the target runs Chrome 152; on 153, launch
+  with `--disable-features=ExtendedVideoBitstreamValidation` or stay on 152.
+- **One qualified device.** Everything above was measured on one SM8550
+  tablet. Other Iris gen2 SoCs should work but carry no evidence yet; Arch
+  packaging is provided but not validated.
+- Three HEVC conformance vectors (`DELTAQP_A_BRCM_4`,
+  `INITQP_B_Main10_Sony_1`, `PMERGE_E_TI_3`) decode every frame without a
+  firmware error but differ in pixels; not chased yet.
+
+## Development
+
+```sh
+meson setup build-local && meson compile -C build-local
+sh test/run-static-checks.sh
+meson test -C build-local --print-errorlogs
+git diff --check
+```
+
+Hardware gates run on the target: `test/iris-browser-acceptance.sh --clip …`
+(Chrome evidence), `test/iris-matrix.sh` (frame MD5 against the native
+decoders), `test/iris-structure-matrix.sh`, `test/iris-dynamic-resolution.sh`,
+`test/iris-concurrency-soak.sh`, `test/iris-zero-copy-suite.sh`. Experiments
+that can reset the firmware go through `scripts/iris-experiment-guard.sh`.
+The full list is in [`test/README.md`](test/README.md); the rules for
+contributors and for coding agents are in [CONTRIBUTING.md](CONTRIBUTING.md)
+and [AGENTS.md](AGENTS.md).
 
 ## License and credits
 
-The driver is distributed under the same terms as upstream: MIT, with the
-LGPL-2.1-covered parts, see `COPYING`, `COPYING.MIT` and `COPYING.LGPL`.
+MIT with LGPL-2.1-covered parts, the same terms as upstream; see `COPYING`,
+`COPYING.MIT` and `COPYING.LGPL`.
 
-- The stateful Iris implementation in `src/` is this fork's work; the VA and
-  V4L2 scaffolding descends from [mxsrc/libva-v4l2](https://github.com/mxsrc/libva-v4l2).
-- `include/linux/` vendors the kernel UAPI headers, each carrying its own
-  SPDX tag (`GPL-2.0+ WITH Linux-syscall-note OR BSD-3-Clause`).
+- This is a fork of [mxsrc/libva-v4l2](https://github.com/mxsrc/libva-v4l2),
+  itself descended from Bootlin's libva-v4l2-request. The VA and V4L2
+  scaffolding comes from there; the stateful Iris implementation in `src/`,
+  the browser acceptance gates and the packaging are this fork's work.
+- `include/linux/` vendors the kernel UAPI headers under their own SPDX tag
+  (`GPL-2.0+ WITH Linux-syscall-note OR BSD-3-Clause`).
 - `packaging/kernel/` carries the two Iris kernel patches from
-  [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2) (Radxa)
-  rebased onto the current kernel tree. That patch touches GPL-2.0 kernel
-  code and carries that license, not the driver's.
+  [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2) (Radxa, Xilin
+  Wu). They touch GPL-2.0 kernel code and carry that license, not the
+  driver's. The explicit-RPS HEVC slice rewrite follows the same project's
+  approach.
 
 ## Environment variables
 
-Every switch the driver reads is listed here and read in exactly one place, `src/util/options.cc`; `test/iris-env-doc-check.sh` fails the build if this table and that file disagree in either direction.
+Every switch the driver reads is listed here and read in exactly one place,
+`src/util/options.cc`; `test/iris-env-doc-check.sh` fails the build if this
+table and that file disagree in either direction. All of them are diagnostic;
+the launcher sets none of them.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -103,31 +204,3 @@ Every switch the driver reads is listed here and read in exactly one place, `src
 | `V4L2_VA_PUBLISH` | `auto` | Force `copy`, `direct` or `import` publication for every surface. Diagnostics only; `auto` picks per surface from the client's export behaviour (Direct for post-decode exporters, Import for pre-exporters on a decode-order kernel, Copy otherwise). `import` degrades to `copy` where the session cannot honour it. |
 | `V4L2_VA_DUMP` | off | Directory to write every submitted access unit into. |
 | `V4L2_VA_EXPERIMENTAL_PROFILES` | off | Also advertise AV1. Qualification only; the launcher never sets it. |
-
-## Status
-
-| Codec | Qualification Level |
-| --- | --- |
-| H.264 | Qualified (exact framemd5 matrix, structure matrix, 100-switch dynamic resolution, 120 s dual-context soak, Chrome B-frame zero dropped, Direct-path zero-copy under FFmpeg) |
-| HEVC Main | Qualified |
-| VP9 Profile 0 | Qualified (additionally 100 context recreations and Chrome with alt-ref) |
-| HEVC Main10 | Qualified (exact framemd5 at 10-bit, Chrome 1080p24 Main10 B-frame stream with the GPU copy engine on P010) |
-| VP9 Profile 2 | Qualified (exact framemd5 at 10-bit through FFmpeg) |
-| AV1 | Opt-in. The OBU rebuild is bit-exact (software oracle) but the firmware returns no CAPTURE buffer for hidden (show_frame=0) pictures and VA has no show_existing_frame call, so VA clients time out on streams with alt-ref frames. Not a driver bug. |
-
-## Verifying
-
-Before claiming a change is complete, run the relevant local gates:
-- `sh test/run-static-checks.sh`
-- `meson test -C build-local`
-- `test/iris-browser-acceptance.sh --clip … [--driver …]` on the target
-- `test/iris-matrix.sh`
-- `test/iris-structure-matrix.sh`
-- `test/iris-zero-copy-suite.sh`
-- `test/iris-dynamic-resolution.sh`
-- `test/iris-concurrency-soak.sh`
-- `test/av1-obu-roundtrip.sh`
-- experiments through `scripts/iris-experiment-guard.sh`
-
-For complete architecture details and contract definitions, see [`docs/architecture.md`](docs/architecture.md).
-For instructions on the clean target rebuild, symbol gate, and durable tablet lab workflow, see [`docs/build-and-deploy.md`](docs/build-and-deploy.md).
