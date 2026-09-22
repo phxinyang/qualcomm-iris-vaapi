@@ -285,7 +285,7 @@ int main(int argc, char** argv)
     if (xioctl(vfd, VIDIOC_STREAMON, &cap_type, "STREAMON CAPTURE") < 0)
         return 2;
 
-    unsigned next_au = 1, next_out = 1, completed = 0, misplaced = 0, unwritten = 0, holes_skipped = 0;
+    unsigned next_au = 1, next_out = 1, completed = 0, misplaced = 0, holes_skipped = 0;
     unsigned assoc_wrong = 0, content_wrong = 0;
     std::vector<int> shift_hist;
     std::vector<unsigned> completed_tokens;
