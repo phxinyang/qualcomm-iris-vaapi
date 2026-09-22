@@ -24,7 +24,7 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="VA-API backend for the Qualcomm Iris V4L2 stateful decoder"
 arch=('aarch64')
-url="https://github.com/xinyang/qualcomm-iris-vaapi"
+url="https://github.com/phxinyang/qualcomm-iris-vaapi"
 license=('MIT' 'LGPL-2.1-or-later')
 # v4l-utils is not optional: the launcher resolves the decoder node by driver
 # name because the node number moves between boots on this device, and it

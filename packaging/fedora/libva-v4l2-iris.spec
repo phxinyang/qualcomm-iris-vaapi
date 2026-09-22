@@ -34,7 +34,7 @@ Summary:        VA-API backend for the Qualcomm Iris V4L2 stateful decoder
 
 # The backend carries both licences; see COPYING, COPYING.LGPL and COPYING.MIT.
 License:        MIT AND LGPL-2.1-or-later
-URL:            https://github.com/xinyang/qualcomm-iris-vaapi
+URL:            https://github.com/phxinyang/qualcomm-iris-vaapi
 Source0:        %{forgename}-%{version}.tar.gz
 
 ExclusiveArch:  aarch64
