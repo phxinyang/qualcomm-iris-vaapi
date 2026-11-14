@@ -5,10 +5,21 @@
 # archive from a clean copy of HEAD and assert the prefix the two consumers
 # unpack, the files their build reads, and the dirty-tree refusal. Working in
 # a throwaway fixture keeps the developer's own uncommitted changes out of it.
+# An RPM build has already unpacked that archive, so the repository-side half
+# of this check is skipped there; the packaging checks still run from it.
 
 set -eu
 
 root=${1:-$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)}
+
+# %autosetup produces a tree with no .git, and the spec has no BuildRequires:
+# git. Check the root itself rather than trusting rev-parse alone: inside a
+# parent repository it would "succeed" against the wrong checkout.
+if [ ! -e "$root/.git" ] || ! git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
+    printf 'NOTE make-dist: no git checkout at %s, archive self-check skipped\n' "$root"
+    exit 0
+fi
+
 scratch_root=${IRIS_TEST_SCRATCH_ROOT:-${TMPDIR:-$HOME/Lab/Bridge/tmp}}
 mkdir -p "$scratch_root"
 work=$(mktemp -d "$scratch_root/iris-make-dist.XXXXXX")
@@ -117,5 +128,19 @@ if sh "$src/scripts/make-dist.sh" --out "$work/dirty" >"$work/dirty.out" 2>&1; t
 fi
 grep -q 'working tree is dirty' "$work/dirty.out" \
     || fail 'dirty-tree failure did not name its cause'
+
+# The archive we just built is exactly what %autosetup unpacks: no .git. Prove
+# its own checker skips cleanly there. A failure would take the whole RPM
+# %check down; a skip that also fires in a real checkout would hide the
+# assertions above, so the two shapes are both exercised.
+nogit=$work/nogit
+mkdir -p "$nogit"
+tar xzf "$archive" -C "$nogit"
+unpacked=$nogit/$name
+if ! sh "$unpacked/test/iris-make-dist-check.sh" "$unpacked" >"$work/nogit.out" 2>&1; then
+    fail 'archive self-check did not skip the unpacked tarball'
+fi
+grep -Fq 'archive self-check skipped' "$work/nogit.out" \
+    || fail 'no-git skip did not report its reason'
 
 echo "PASS make-dist: prefix, contents, repository-only exclusions, reproducibility and dirty refusal"
