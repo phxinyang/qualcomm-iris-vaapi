@@ -9,6 +9,13 @@
 # working tree: a source tarball should name a commit, and the install
 # provenance manifest records that commit separately. A dirty tree is refused
 # rather than silently packaging something other than the commit it names.
+#
+# .gitattributes marks CI, agent instructions and experiment records
+# export-ignore, and git archive honours those rules for the tracked tree.
+# Distribution packaging stays in: the spec's %check runs
+# test/iris-packaging-check.sh, which reads all three formats from the unpacked
+# tree. The archive self-check itself needs a git checkout and skips in a
+# tarball build; test/iris-make-dist-check.sh asserts both shapes.
 
 set -eu
 
