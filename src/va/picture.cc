@@ -147,7 +147,7 @@ void wait_for_pixels(const std::shared_ptr<Surface>& s, const std::shared_ptr<ir
 // How many blending passes one picture may carry. VA puts no limit on the
 // count and neither does the kernel — each pass is one more dispatch — so this
 // is a bound on the work a single vaEndPicture can be asked for, not a
-// capability. Sixteen is the sibling driver's figure.
+// capability. Sixteen is the figure another driver uses.
 constexpr size_t kMaxOverlays = 16;
 
 // Copy the client's pipeline parameters and refuse every operation the
