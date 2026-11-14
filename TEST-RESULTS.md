@@ -5798,7 +5798,7 @@ decoder resolved at runtime to `/dev/video17`. Every run below is guarded
 | --- | --- |
 | Host | `sh test/run-static-checks.sh` PASS, `meson test -C build-local` 26/26, `git diff --check` clean |
 | `test/iris-matrix.sh`, `V4L2_VA_PUBLISH=import` | H.264, VP9, HEVC, AV1 48/48 exact frame MD5; `import=48`, `submitted=48 completed=48 errors=0 drops=0 misplaced=0 retained=0` for each codec |
-| FFmpeg, 1280x720 VP9 with alt-refs (`lag720.webm`, 480 frames), Import | `submitted=515 completed=515 errors=0 drops=0 misplaced=0`, 515 `publish=import`, `memory=import`; frame MD5 identical to the software decode |
+| FFmpeg, 1280x720 VP9 with alt-refs (`lag720.webm`, 480 frames), Import | `submitted=515 completed=515 errors=0 drops=0 misplaced=0` (515/515), 515 `publish=import`, `memory=import`; frame MD5 identical to the software decode |
 | Chrome 156, same clip, 60 s, Import, run A (`e1d0585b…`) | `submitted=1705 completed=1705 errors=0 drops=0 misplaced=0 retained=1161`; `VaapiVideoDecoder`, platform=true, 1440 decoded / 0 dropped |
 | Chrome 156, 640x360 alt-ref clip, 60 s, Import, run B | `submitted=1588 completed=1588 errors=0 drops=0 misplaced=0 retained=12`; 1439 decoded / 0 dropped |
 | Chrome 156, 1280x720 clip, 60 s, Import, run C (driver above) | 1705 `submit`, 1705 `publish=import`, 0 `publish=drop`, 0 `publish=error`, 0 `publish=misplaced`, 1154 `target detached`; 1440 decoded / 0 dropped |
@@ -7861,6 +7861,46 @@ this change; Chrome does not encode, and the Chrome decode pass is unchanged
 by both commits. The matrix and quality gates ran from the build tree, not
 from an installed package. 4K numbers are not comparable across runs on this
 tablet without pinning CPU and GPU frequency.
+
+## Pinned-clock HEVC throughput, this driver alone (2026-11-14)
+
+Target `sheng`, boot `4b73926c-a774-4ae4-8968-d0a26b20a9c3`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, decoder node `/dev/video0` and encoder node
+`/dev/video1` resolved by QUERYCAP name `iris_driver`, render node
+`/dev/dri/renderD128`. This driver `f74ea6ad0defee68`, built from a release
+tree and run on the target. FFmpeg 8.1.3, battery 83 % discharging, thermal
+zones 31-47 °C, no firmware reset.
+
+Throughput on this tablet tracks the clock, so CPU policies 0, 3 and 7 were
+held in the `performance` governor at 2016000, 2803200 and 2956800 Hz and
+`3d00000.gpu` in `userspace` at 680000000 Hz for the whole run. Each cell is
+the mean of five rounds. Clips are `x265` ultrafast with `bframes=0` and
+`keyint=60`, 900 frames at 720p and 1080p and 480 frames at 4K, so process
+start-up is amortised rather than measured. Encode is
+`-c:v h264_vaapi -b:v 5M/10M/20M -g 60 -async_depth 4` over an `-f lavfi`
+`testsrc2` source, which includes the CPU NV12 upload. Decode is
+`-hwaccel vaapi -hwaccel_output_format vaapi -f null -`, so it excludes the
+download and the display.
+
+| operation | 720p | 1080p | 4K |
+| --- | ---: | ---: | ---: |
+| decode | 759.1 fps | 581.1 fps | 358.6 fps |
+| encode | 644.4 fps | 591.0 fps | 167.2 fps |
+| decode client utime | 0.274 s | 0.423 s | 0.403 s |
+
+These are the eight numbers the two READMEs quote, rounded to whole fps. The
+deferred copy-engine initialization keeps the GPU copy backend idle on a
+pipeline that never asks for a copy, which is where the decode client CPU
+time goes. Encode client CPU time is 1.01/1.94/4.82 s at the three sizes.
+
+The first attempt at this table was thrown away: a leftover profiler ffmpeg
+had been spinning in `R` for 50 minutes and held a core, and its temperatures
+were 52-64 °C. The numbers above are from a quiet machine.
+
+What this does not prove: one synthetic clip per size, so scene complexity
+and bitrate effects are not sampled; 4K at 167 fps is close enough to the
+encoder's own ceiling that a different content mix would move it more than
+any driver difference. No cross-driver claim is made from this section.
 
 ## The video processor's per-picture Vulkan cost, and what it buys (2026-11-14)
 
