@@ -17,6 +17,8 @@
 
 只有能力表标记 `production: supported` 的编码格式才声明 VA profile。一致性数字来自与软件解码的逐帧比对。Fluster 是语料结果，不是每次构建的回归；失败向量归类见 `TEST-RESULTS.md`。VP9 参考 MD5 早于本机 libvpx，176/305 不是解码缺陷数。
 
+UBWC 表面默认提供，`V4L2_VA_UBWC=0` 关闭。客户端在 `VASurfaceAttribDRMFormatModifiers` 里列出 `DRM_FORMAT_MOD_QCOM_COMPRESSED` 时得到 Q08C 表面，也就是节点分配的四平面压缩缓冲；`vaExportSurfaceHandle` 按每个平面一个 R8 层报出该修饰符。这类表面只能走 Direct 或 Import 发布：Copy、图像入口、film grain、视频处理与编码器都返回 `VA_STATUS_ERROR_UNIMPLEMENTED`，因为本驱动没有 UBWC 解压。Q10C 不提供：节点按每像素 4/3 字节分配，GPU 的 10-bit UBWC 导入要求每像素 2 字节，这个栈上没有客户端能读这块缓冲。`test/iris-ubwc-gate.sh` 让四种编码格式都解码到 Q08C，并要求 GPU 读回（`test/vk-ubwc-read`，Turnip）与线性解码的亮度和色度逐字节一致。
+
 解码上限 7680x4320，四种编码格式均支持；两个 1080p 客户端可同时解码。
 
 AV1 film grain 合成在用户态完成。客户端给出独立的 `current_display_picture` 时，驱动在复用 `current_frame` 之前把 grain 混到显示表面。以 side data 传 grain 参数的客户端自行合成。`test/iris-av1-grain-gate.sh` 要求每帧与 libdav1d 的加 grain 输出逐字节一致。
@@ -27,6 +29,7 @@ AV1 film grain 合成在用户态完成。客户端给出独立的 `current_disp
 | --- | --- | --- | --- | --- |
 | H.264 | `VAEntrypointEncSlice`（CBR、VBR、CQP） | NV12 | Annex-B | 1080p SSIM 0.9986；CBR 与 VBR 下按请求码率输出 |
 | HEVC | `VAEntrypointEncSlice`（CBR、VBR、CQP） | NV12 | Annex-B | 1080p SSIM 0.9968；CBR 与 VBR 下按请求码率输出 |
+| HEVC Main 10 | `VAEntrypointEncSlice`（CBR、VBR、CQP） | P010 | Annex-B | 640x480 平均 SSIM 0.9995；需 0014 内核补丁，模块接受 P010 时才声明该 profile |
 
 ### 视频处理
 
@@ -47,7 +50,7 @@ AV1 film grain 合成在用户态完成。客户端给出独立的 `current_disp
 - 平台：高通 SM8550（HFI gen2 Iris VPU），aarch64。
 - 核心依赖：`libva` >= 1.1，`libdrm` >= 2.4.52。GPU 拷贝引擎需要 EGL、GLES 与 GBM。
 - 发行版：Fedora 44 是基准。`packaging/` 与 `debian/` 提供 Fedora、Arch 与 Debian/Ubuntu arm64 包。
-- 内核：`sheng-7.3.4`（`87ac0f2347eb`）配 0008-0009，或 `sheng-7.2.6`（`42f3b40c702a`）配 0001-0004，两者均已验收。原版内核上仍可构建安装，降级方式见「已知限制」。补丁在 `packaging/kernel/`。
+- 内核：`sheng-7.3.4`（`87ac0f2347eb`）配 0008-0009，或 `sheng-7.2.6`（`42f3b40c702a`）配 0001-0004，两者均已验收。7.3.4 上 0013 增加编码多切片控件，0014 增加 HEVC Main 10 的 P010 输入；驱动只在已加载模块提供该能力时声明。原版内核上仍可构建安装，降级方式见「已知限制」。补丁在 `packaging/kernel/`。
 
 ## 安装
 
@@ -105,16 +108,17 @@ HEVC Main 8-bit，FFmpeg 8.1.3。CPU 锁最高频，GPU 锁 680 MHz。解码不�
 - **Import**：客户端在解码前分配并传入 DMA-BUF。在解码顺序内核上零拷贝。
 - **Copy**：固件解码到驱动槽位，GPU 复制到客户端缓冲区。用于原版内核，以及同一 VA 上下文内 AV1 分辨率切换后的后半段。
 
-导入的 DMA-BUF 必须符合原生 CAPTURE 布局：单一线性对象，跨度 128 字节对齐。其他情况返回 `VA_STATUS_ERROR_INVALID_PARAMETER`。
+导入的 DMA-BUF 必须符合原生 CAPTURE 布局：单一线性对象，跨度 128 字节对齐。UBWC 表面导入的是按内核 Q08C 偏移排列的四个 R8 层，修饰符为 `QCOM_COMPRESSED`。其他情况返回 `VA_STATUS_ERROR_INVALID_PARAMETER`。
 
 ## 已知限制
 
 - **AV1 分辨率切换**：上下文内切换后，继续按旧几何导出表面的客户端在这些帧上得到 GPU 拷贝。Chromium 播本地文件时可能选软件 AV1 解码器，是否走硬件以浏览器门禁为准。
 - **原版内核**：解码降级为 GPU 拷贝，IDR 请求改为移动 intra period。
-- **编码**：仅单图单切片。多切片、分块与 ROI 返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。B 帧需 `V4L2_VA_B_FRAMES` 开启，仅 H.264，客户端需保持至少三帧在途（FFmpeg：`-bf 1 -async_depth 3`）。
+- **编码**：客户端给出的切片列表变成宏块预算（`ceil(宏块数 / 切片数)`），仅 CBR 或 CQP、≤60 fps、≤4096x2160，并需要 0013 内核补丁；没有补丁时每帧只有一整片，`VAConfigAttribEncMaxSlices` 答 1。分块返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。ROI 需 `V4L2_VA_ROI` 开启并安装 0017 内核补丁：模块会把每个宏块的 delta-QP 元数据缓冲区送进固件、固件也正常完成，但已验收镜像编出的图像没有任何变化（CBR 与 CQP、H.264 与 HEVC 都是逐字节相同），所以默认不声明区域。B 帧需 `V4L2_VA_B_FRAMES` 开启，仅 H.264，客户端需保持至少三帧在途（FFmpeg：`-bf 1 -async_depth 3`）。
 - **intra refresh**：滚动行请求（`VAEncMiscParameterRIR`）在 CBR 下生效，VBR/CQP 下拒绝。`ltr_count`/`frame_ltr_index`/`use_ltr_frames` 不声明。
-- **封装头**：extradata 报告 `VA_ENC_PACKED_HEADER_NONE`，参数集随码流带内传输。
-- **UBWC**：节点列出 `Q08C`/`Q10C`，固件确实写出 UBWC。Turnip 能逐字节解 Q08C，EGL（Copy 路径与 `vaGetImage`/`vaPutImage`）不能，P010 也没有压缩格式。没有客户端请求压缩表面，表面保持 `NV12`/`P010`，导入必须是 `DRM_FORMAT_MOD_LINEAR` 平面。
+- **时域分层**：`VAEncMiscParameterTemporalLayerStructure` 给出 1-6 层，固件按层数自行推导成员关系，客户端给的层 id 只做越界检查；不支持逐层码率。节点注册了分层控件时通过 `VAConfigAttribEncRateControlExt` 声明。
+- **封装头**：`VAConfigAttribEncPackedHeaders` 在 HEVC 编码答 `VA_ENC_PACKED_HEADER_MISC`，H.264 答 0。客户端给的原始封装头（`VAEncPackedHeaderRawData`）插在参数集之后、第一个 slice 之前；FFmpeg `hevc_vaapi` 的 HDR10 mastering display、content light level 和字幕 SEI 都走这条路。H.264 不能答 MISC：`h264_vaapi` 的 buffering period SEI 按 id 引用 SPS，而只声明 MISC 时 FFmpeg 不会自己写 SPS，CBR/VBR 编码会在客户端内部失败。序列头与 slice 头仍不支持，固件自己写；参数集随码流带内传输。
+- **UBWC**：默认提供（`V4L2_VA_UBWC=0` 关闭），只有 8 位 Q08C，且只能走 Direct 或 Import 发布。Copy 路径、`vaDeriveImage`/`vaGetImage`/`vaPutImage`、film grain、视频处理与编码器没有解压器，遇到压缩表面直接拒绝。Q10C 没有读取方，不提供；导入必须带修饰符和内核的四平面偏移。
 
 ## 环境变量
 
@@ -128,6 +132,8 @@ HEVC Main 8-bit，FFmpeg 8.1.3。CPU 锁最高频，GPU 锁 680 MHz。解码不�
 | `V4L2_VA_PUBLISH` | auto | 强制指定发布模式（`auto`、`direct`、`import`、`copy`） |
 | `V4L2_VA_VPP` | on | 设为 `0` 关闭 Vulkan 视频处理 |
 | `V4L2_VA_B_FRAMES` | off | 启用 H.264 编码器的 B 帧；需保持三帧以上在途（FFmpeg：`-async_depth 3`） |
+| `V4L2_VA_ROI` | off | 启用 ROI 区域声明；需 0017 内核补丁，已验收固件会忽略该图 |
+| `V4L2_VA_UBWC` | on（`0` 关闭） | 向请求 `QCOM_COMPRESSED` 修饰符的客户端提供 UBWC（Q08C）解码表面 |
 | `V4L2_VA_DUMP` | off | 提交的码流单元转储目录路径 |
 
 ## 命名
