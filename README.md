@@ -19,7 +19,9 @@ mpv, GStreamer and Sunshine use it through VA-API.
 | AV1 | Profile 0 (8/10-bit) | Import (zero-copy, decode-order kernel) | Bit-exact against libdav1d; film grain included |
 
 A profile is advertised only for codecs `data/iris-codec-capabilities.json`
-marks `production: supported`. The conformance numbers are frame-by-frame
+marks `production: supported`, and only on a platform that file lists: a node
+whose devicetree `compatible` names another SoC's Iris block advertises
+nothing, and clients fall back to software. The conformance numbers are frame-by-frame
 comparisons against a software decode; Fluster counts are corpus results, not
 per-build regressions, and every failing vector is classified. Decode is
 qualified up to 7680x4320 for all four codecs, and for two concurrent 1080p
@@ -30,7 +32,7 @@ UBWC surfaces are offered unless `V4L2_VA_UBWC=0`: a client that lists
 per plane, publishing Direct or Import only, because nothing here decompresses
 UBWC. AV1 film grain is blended in user space onto `current_display_picture`
 before the client can recycle `current_frame`. Both gates require byte-exact
-read-back: `test/iris-ubwc-gate.sh` through Turnip, `test/iris-av1-grain-gate.sh`
+read-back: `test/target/iris-ubwc-gate.sh` through Turnip, `test/target/iris-av1-grain-gate.sh`
 against libdav1d.
 
 ### Encode
@@ -104,7 +106,7 @@ Per-client settings are in `docs/install.md#client-setup`.
 `iris-device-check` is read-only: nodes, firmware version, bound driver and
 queue formats. `iris-verify` decodes and encodes a sample clip and requires the
 Iris interrupt counters to move. The full four-codec pixel oracle is
-`test/iris-matrix.sh`. A browser session counts as hardware only when the
+`test/target/iris-matrix.sh`. A browser session counts as hardware only when the
 media surface names the selected decoder and reports decoded and dropped
 frames.
 
@@ -139,6 +141,11 @@ Imported DMA-BUFs must match the native CAPTURE layout: one linear object with a
 
 ## Known limits
 
+- **Starting mid-GOP**: a decode context has to open at an intra picture
+  (H.264: an IDR or any all-intra picture; HEVC: an IRAP). The firmware
+  completes nothing for pictures before one, so `vaEndPicture` returns
+  `VA_STATUS_ERROR_DECODING_ERROR` for them instead of leaving the client to
+  wait.
 - **AV1 resolution change**: after an in-context change, a client that keeps
   exporting surfaces at the old geometry gets GPU copy for those pictures.
 - **Stock kernel**: decode degrades to GPU copy, and IDR requests move the intra
@@ -175,6 +182,7 @@ Imported DMA-BUFs must match the native CAPTURE layout: one linear object with a
 | `V4L2_VA_B_FRAMES` | off | Opt in to B pictures in the H.264 encoder; needs three pictures in flight (FFmpeg: `-async_depth 3`) |
 | `V4L2_VA_ROI` | off | Opt in to advertising ROI regions; needs the 0017 kernel patch, and the qualified firmware ignores the map |
 | `V4L2_VA_UBWC` | on (`0` disables) | Offer UBWC (Q08C) decode surfaces to clients that request the `QCOM_COMPRESSED` modifier |
+| `V4L2_VA_UNVERIFIED_PLATFORM` | off | Advertise on an Iris platform other than the qualified `qcom,sm8550-iris`; for porting, see `docs/porting.md` |
 | `V4L2_VA_HW_GRAIN` | off | Let the firmware apply AV1 film grain from the rebuilt header; the grained picture lands on `current_display_picture` |
 | `V4L2_VA_DUMP` | off | Directory path to dump submitted access units |
 

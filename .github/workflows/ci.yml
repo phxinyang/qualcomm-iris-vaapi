@@ -61,6 +61,7 @@ jobs:
             va-vtable \
             va-config-attributes \
             va-gst-filter \
+            va-platform \
             iris-va-vtable-surface \
             annexb \
             h264-translator \
@@ -77,6 +78,7 @@ jobs:
             iris-trace-vocab-check \
             static-checks \
             iris-source-invariants \
+            iris-layering-check \
             iris-env-doc-check \
             iris-eos-check-self-test \
             iris-clip-trace-check-self-test \
